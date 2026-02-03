@@ -4,19 +4,27 @@ project(sylar)
 
 set(CMAKE_CXX_STANDARD 11)
 
-# 编译选项：
-# -O0: 关闭优化（方便调试）
-# -g -ggdb: 生成调试信息
-# -Wall: 开启大部分警告
-# -rdynamic: 让链接器把所有符号都加入到动态符号表中（这对后续打印堆栈很重要）
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O0 -g -ggdb -Wall -rdynamic -fPIC")
+# 编译选项：-O0 关闭优化方便调试，-g 生成调试信息，-Wall 开启警告，-rdynamic 让链接器导出所有符号
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O0 -g -Wall -rdynamic -fPIC")
 
-# 包含当前目录，这样引用头文件可以直接 #include "sylar/xxx.h"
+# 包含项目根目录
 include_directories(.)
 
-# 定义一个库文件，后续源文件添加到这里
-# 目前还没有源文件，先留空，等会添加 log.cc
-# add_library(sylar SHARED sylar/log.cc)
+# 所有的日志模块源文件
+set(LOG_SOURCES
+    sylar/log/log_level.cc
+    sylar/log/log_formatter.cc
+    sylar/log/log_appender.cc
+    sylar/log/logger.cc
+)
+
+# 生成共享库 libsylar.so
+add_library(sylar SHARED ${LOG_SOURCES})
+
+# 编译测试程序
+add_executable(test_log tests/test_log.cc)
+# 链接刚才生成的 sylar 库
+target_link_libraries(test_log sylar)
 
 # 定义输出路径
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)

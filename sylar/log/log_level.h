@@ -1,4 +1,4 @@
-#ifndef __SYLAR_LOG_LOG_LEVEL_H_ // 一般命名方式为全大写文件路径用_连接
+#ifndef __SYLAR_LOG_LOG_LEVEL_H__ // 一般命名方式为全大写文件路径用_连接
 #define __SYLAR_LOG_LOG_LEVEL_H__
 
 #include <string>

@@ -1,0 +1,19 @@
+# 编译构建目录
+build/
+bin/
+lib/
+
+# 运行时产生的日志
+*.log
+log.txt
+
+# IDE 配置文件
+.vscode/
+.idea/
+.DS_Store
+
+# CMake 产生的额外文件（如果有人在根目录执行 cmake）
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
