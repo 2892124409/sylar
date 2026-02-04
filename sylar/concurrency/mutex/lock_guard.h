@@ -25,7 +25,7 @@ namespace sylar
         ScopedLockImpl(T &mutex)
             : m_mutex(mutex)
         {
-            m_mutex.lock();
+            m_mutex.lock(); // 执行的是模板T中的lock()函数
             m_locked = true;
         }
 
