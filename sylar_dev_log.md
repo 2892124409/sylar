@@ -129,4 +129,32 @@
 - **实践**: 在 `LoggerManager` 的构造函数中使用 `reset` 来初始化全局根日志器。
 
 ---
+
+## 基础模块 (Base Module)
+
+### 1. Util (通用工具类)
+
+#### 设计理念
+提供系统底层的封装，主要用于获取运行时信息（线程ID、堆栈信息等），为其他模块（如日志、协程、配置）提供基础支撑。
+
+#### 设计要点
+- **GetThreadId**: 封装 `syscall(SYS_gettid)`。
+- **Backtrace**: 利用 `<execinfo.h>` 库提供的 `backtrace` 和 `backtrace_symbols` 函数获取函数调用栈。
+- **Demangle**: 编译器在生成符号时会进行名字修饰（Name Mangling），使用 `abi::__cxa_demangle` 将丑陋的机器符号转换回人类可读的 C++ 函数名。
+
+#### 技巧
+- **符号提取**: `backtrace_symbols` 返回的字符串包含 `文件名(函数名+偏移量) [地址]`。通过字符串解析提取出 `函数名` 部分再进行 demangle，可以获得最清晰的堆栈输出。
+
+#### 遇到的问题
+##### Q: 为什么 `GetThreadId` 不使用 `pthread_self()`?
+**A**: `pthread_self()` 返回的是 POSIX 线程库内部维护的线程 ID（通常是一个很大的内存地址），它在进程内唯一，但在不同进程间不直观。而 `SYS_gettid` 返回的是 Linux 内核分配的真实线程 ID（PID），在 `top` 或 `ps` 命令中能直接看到，更利于调试。
+
+##### Q: 为什么日志输出中会出现 `<<error_format %N>>`?
+**A**: 这是因为在 `Logger` 的默认格式模板中使用了 `%N`（线程名称），但在 `LogFormatter` 的映射表中漏掉了该指令的注册。
+**解决**: 
+1. 在 `LogEvent` 中增加 `m_threadName` 成员。
+2. 实现 `ThreadNameFormatItem` 类。
+3. 在 `LogFormatter.cc` 的 `s_format_items` 映射表中添加 `XX(N, ThreadNameFormatItem)` 注册项。
+
+---
 *(持续更新中...)*

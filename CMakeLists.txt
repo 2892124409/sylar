@@ -16,6 +16,7 @@ set(LOG_SOURCES
     sylar/log/log_formatter.cc
     sylar/log/log_appender.cc
     sylar/log/logger.cc
+    sylar/base/util.cc
 )
 
 # 生成共享库 libsylar.so

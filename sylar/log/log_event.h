@@ -32,14 +32,16 @@ namespace sylar
          * @param[in] thread_id 线程id
          * @param[in] fiber_id 协程id
          * @param[in] time 日志时间(秒)
+         * @param[in] thread_name 线程名称
          */
-        LogEvent(std::shared_ptr<Logger> logger, LogLevel::Level level, const char *file, int32_t line, uint32_t elapse, uint32_t thread_id, uint32_t fiber_id, uint64_t time) 
+        LogEvent(std::shared_ptr<Logger> logger, LogLevel::Level level, const char *file, int32_t line, uint32_t elapse, uint32_t thread_id, uint32_t fiber_id, uint64_t time, const std::string& thread_name) 
             : m_file(file)
             , m_line(line)
             , m_elapse(elapse)
             , m_threadId(thread_id)
             , m_fiberId(fiber_id)
             , m_time(time)
+            , m_threadName(thread_name)
             , m_logger(logger)
             , m_level(level)
         {
@@ -51,6 +53,7 @@ namespace sylar
         uint32_t getThreadId() const { return m_threadId; }
         uint32_t getFiberId() const { return m_fiberId; }
         uint64_t getTime() const { return m_time; }
+        const std::string& getThreadName() const { return m_threadName; }
 
         /**
          * @brief 获取日志内容流
@@ -73,6 +76,7 @@ namespace sylar
         uint32_t m_threadId = 0;      // 线程ID
         uint32_t m_fiberId = 0;       // 协程ID
         uint64_t m_time = 0;          // 时间戳
+        std::string m_threadName;     // 线程名称
         std::stringstream m_ss;       // 日志内容流
 
         std::shared_ptr<Logger> m_logger; // 日志器

@@ -83,6 +83,19 @@ public:
     };
 
     /**
+     * @brief 线程名称格式化器 (%N)
+     */
+    class ThreadNameFormatItem : public LogFormatter::FormatItem
+    {
+    public:
+        ThreadNameFormatItem(const std::string &str = "") {}
+        void format(std::ostream &os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override
+        {
+            os << event->getThreadName();
+        }
+    };
+
+    /**
      * @brief 时间格式化器 (%d)
      */
     class DateTimeFormatItem : public LogFormatter::FormatItem
@@ -321,6 +334,7 @@ public:
                                             XX(l, LineFormatItem)
                                                 XX(T, TabFormatItem)
                                                     XX(F, FiberIdFormatItem)
+                                                        XX(N, ThreadNameFormatItem)
 #undef XX
         };
 
