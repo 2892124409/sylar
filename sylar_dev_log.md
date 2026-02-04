@@ -130,16 +130,41 @@
 
 ##### Q: 为什么要设计 `LogEventWrap`？如何实现流式宏打印？
 **A**: 为了实现 `SYLAR_LOG_INFO(logger) << "msg"` 这种极其简洁的语法，我们利用了 **RAII (资源获取即初始化)** 和 **临时对象析构** 的特性。
-1. **挑战**: `SYLAR_LOG_INFO` 必须能返回一个 `stringstream` 供用户输入，但又必须在用户输入完成后（即这一行结束时）自动触发 `logger->log()`。
-2. **解决**: 
-   - 宏展开后，会创建一个**临时匿名对象** `LogEventWrap`。
-   - 用户通过 `<<` 操作符往该临时对象持有的 `LogEvent` 中写入内容。
-   - **关键**: 根据 C++ 标准，临时对象的生命周期直到这一行（语句）结束才终止。
-   - **析构触发**: 当这一行执行完，`LogEventWrap` 临时对象被销毁，其析构函数被调用。我们在析构函数中写下 `m_event->getLogger()->log(m_event)`。
-3. **结果**: 实现了“写完即触发”的丝滑体验，且用户无需手动调用任何发送函数。
+
+**宏展开解析**：
+```cpp
+// 原始宏
+#define SYLAR_LOG_LEVEL(logger, level) \
+    if(logger->getLevel() <= level) \
+        sylar::LogEventWrap(sylar::LogEvent::ptr(new sylar::LogEvent(...))).getSS()
+
+// 调用代码
+SYLAR_LOG_INFO(logger) << "hello";
+
+// 展开后的实际执行流程
+if(logger->getLevel() <= level) { // 1. 级别判断
+    sylar::LogEvent::ptr event(new sylar::LogEvent(...)); // 2. 创建事件
+    sylar::LogEventWrap wrap(event); // 3. 创建临时包装对象
+    wrap.getSS() << "hello"; // 4. 往流里写数据
+} // 5. 语句结束，wrap 对象析构
+```
+
+**执行步骤详解**：
+1.  **级别判断 (Check)**: 先判断级别，如果不满足直接跳过，避免了后续所有开销（性能关键）。
+2.  **创建包装 (Construct)**: 创建一个临时的 `LogEventWrap` 对象。
+3.  **流式写入 (Stream)**: `getSS()` 返回 `stringstream`，用户通过 `<<` 写入内容。
+4.  **自动提交 (Destruct & Submit)**: 当这一行代码执行完毕，临时的 `wrap` 对象离开作用域被销毁。**在其析构函数中**，会自动调用 `logger->log(event)` 将日志真正提交。
+
+**结果**: 实现了“写完即触发”的丝滑体验，且用户无需手动调用任何发送函数。
+
+##### Q: 宏 `SYLAR_LOG_ROOT()` 是如何工作的？
+**A**: 它是一个便捷宏，底层封装了对 `LoggerManager` 单例的调用。
+- 展开前: `SYLAR_LOG_ROOT()`
+- 展开后: `sylar::LoggerMgr::GetInstance()->getRoot()`
+这隐藏了复杂的单例获取逻辑，让用户感觉像是直接获取了一个全局变量。同理，`SYLAR_LOG_NAME(name)` 封装了 `getLogger(name)`。
 
 ---
-
+*(持续更新中...)*
 ## 基础模块 (Base Module)
 
 ### 1. Util (通用工具类)

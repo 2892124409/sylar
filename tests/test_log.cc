@@ -1,29 +1,31 @@
 #include <iostream>
-#include <time.h>
 #include "../sylar/log/logger.h"
 #include "../sylar/base/util.h"
 
 int main(int argc, char** argv) {
     // 1. 获取 root 日志器
-    sylar::Logger::ptr logger = sylar::LoggerMgr::GetInstance()->getRoot();
+    sylar::Logger::ptr logger = SYLAR_LOG_ROOT();
     
-    std::cout << "--- Test 1: Default Root Logger ---" << std::endl;
-    // 使用 sylar::GetThreadId() 获取真实的线程 ID，增加线程名称 "main"
-    sylar::LogEvent::ptr event(new sylar::LogEvent(logger, sylar::LogLevel::DEBUG, __FILE__, __LINE__, 0, sylar::GetThreadId(), 2, time(0), "main"));
-    event->getSS() << "Hello Sylar Log from Root!";
-    logger->log(sylar::LogLevel::DEBUG, event);
+    std::cout << "--- Test 1: Using Macros ---" << std::endl;
+    // 使用宏，自动填入文件、行号、时间、线程ID
+    SYLAR_LOG_INFO(logger) << "Hello Sylar Log from Macro!";
+    SYLAR_LOG_ERROR(logger) << "This is an error!";
+    
+    // 测试格式化流式输出
+    SYLAR_LOG_DEBUG(logger) << "Debug message: " << 123 << " " << 3.14;
 
-    std::cout << "\n--- Test 2: Custom Logger with FileAppender ---" << std::endl;
-    sylar::Logger::ptr l(sylar::LoggerMgr::GetInstance()->getLogger("system"));
-    sylar::FileLogAppender::ptr file_appender(new sylar::FileLogAppender("./log.txt"));
-    l->addAppender(file_appender);
+    std::cout << "\n--- Test 2: Custom Logger ---" << std::endl;
+    sylar::Logger::ptr l = SYLAR_LOG_NAME("system");
+    l->addAppender(sylar::LogAppender::ptr(new sylar::FileLogAppender("./log.txt")));
+    
+    // 设置一个新的格式试试
+    l->setFormatter("%d - %m%n");
 
-    sylar::LogEvent::ptr event2(new sylar::LogEvent(l, sylar::LogLevel::ERROR, __FILE__, __LINE__, 0, sylar::GetThreadId(), 2, time(0), "main"));
-    event2->getSS() << "This is a system error log!";
-    l->log(sylar::LogLevel::ERROR, event2);
+    // 格式化输出测试
+    SYLAR_LOG_INFO(l) << "System info log";
+    SYLAR_LOG_ERROR(l) << "System error log";
 
-    std::cout << "\n--- Test 3: Backtrace ---" << std::endl;
-    std::cout << sylar::BacktraceToString(10, 0, "    ") << std::endl;
+    std::cout << "Check log.txt for custom format logs." << std::endl;
 
     return 0;
 }

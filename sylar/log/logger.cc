@@ -3,6 +3,20 @@
 
 namespace sylar {
 
+// ======================= LogEventWrap 实现 =======================
+
+LogEventWrap::LogEventWrap(LogEvent::ptr e)
+    :m_event(e) {
+}
+
+LogEventWrap::~LogEventWrap() {
+    m_event->getLogger()->log(m_event->getLevel(), m_event);
+}
+
+std::stringstream& LogEventWrap::getSS() {
+    return m_event->getSS();
+}
+
 // ======================= Logger 实现 =======================
 
 Logger::Logger(const std::string& name)
