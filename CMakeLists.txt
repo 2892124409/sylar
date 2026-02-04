@@ -23,6 +23,9 @@ set(LOG_SOURCES
 # 生成共享库 libsylar.so
 add_library(sylar SHARED ${LOG_SOURCES})
 
+# 链接 yaml-cpp 库
+target_link_libraries(sylar yaml-cpp)
+
 # 编译测试程序
 add_executable(test_log tests/test_log.cc)
 target_link_libraries(test_log sylar)

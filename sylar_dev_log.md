@@ -164,7 +164,7 @@ if(logger->getLevel() <= level) { // 1. 级别判断
 这隐藏了复杂的单例获取逻辑，让用户感觉像是直接获取了一个全局变量。同理，`SYLAR_LOG_NAME(name)` 封装了 `getLogger(name)`。
 
 ---
-*(持续更新中...)*
+
 ## 基础模块 (Base Module)
 
 ### 1. Util (通用工具类)
@@ -189,7 +189,50 @@ if(logger->getLevel() <= level) { // 1. 级别判断
 **解决**: 
 1. 在 `LogEvent` 中增加 `m_threadName` 成员。
 2. 实现 `ThreadNameFormatItem` 类。
-3. 在 `LogFormatter.cc` 的 `s_format_items` 映射表中添加 `XX(N, ThreadNameFormatItem)` 注册项。
+---
+
+### 2. Config (配置模块)
+
+#### 设计理念
+实现“约定优于配置”的设计思想。支持类型安全、复杂容器支持以及配置变更的回调通知（热更新）。
+
+#### 设计要点
+- **ConfigVarBase**: 非模板基类，用于统一管理不同类型的配置项（存入同一个 Map）。
+- **ConfigVar<T>**: 模板子类，负责存储实际值并处理序列化/反序列化。
+- **LexicalCast**: 类型转换中心。通过**模板偏特化**支持基础类型与 YAML 字符串之间的自动转换。
+- **变更回调**: 每个 `ConfigVar` 持有一个回调函数列表，当 `setValue` 被调用时触发，实现热加载。
+
+#### 技巧
+- **静态初始化保护**: 使用 `GetDatas()` 函数内的静态变量来存储配置 Map，避免了 C++ 全局静态变量初始化顺序不确定的坑 (Static Initialization Order Fiasco)。
+
+#### 遇到的问题
+##### Q: 为什么 `LexicalCast` 需要针对 STL 容器进行大量特化？
+**A**: 因为 `boost::lexical_cast` 默认只支持基础类型（如 int 转 string）。为了让配置系统支持 `vector<int>`, `map<string, int>` 等复杂结构，我们必须利用**模板偏特化**技术。
+- **序列化流程**: 容器 (如 `vector<T>`) -> 遍历并转换每个元素为 YAML 节点 -> 将整个 YAML 节点转为字符串。
+- **反序列化流程**: 字符串 -> `YAML::Load` 解析为节点 -> 遍历 YAML 节点并利用 `LexicalCast<string, T>` 转换每个元素 -> 塞回容器。
+通过这种递归调用（`LexicalCast` 内部调用 `LexicalCast`），我们甚至可以支持嵌套容器，如 `vector<list<int>>`。
+
+##### Q: 在 Lookup 查找配置时，为什么要用 `dynamic_pointer_cast`?
+**A**: 全局 Map 存储的是父类 `ConfigVarBase::ptr`。获取配置时，必须确认其实际类型与用户请求的类型 `T` 一致。`dynamic_pointer_cast` 提供了运行时的类型安全检查。
+
+##### Q: 如何实现从复杂的 YAML 文件批量加载配置？
+**A**: 采用了 **“树形结构扁平化”** 的策略。
+1. **递归遍历**: 实现辅助函数 `ListAllMember`，递归遍历 YAML 树。
+2. **路径拼接**: 将嵌套的结构转换为点分隔的路径字符串（如 `system -> port` 转换为 `system.port`）。
+3. **节点存储**: 将所有叶子节点及其对应的完整路径存入一个 `std::list` 中。
+4. **统一更新**: 遍历该列表，在 `ConfigVarMap` 中按路径名查找配置项。若匹配成功，则调用 `fromString` 利用之前特化的 `LexicalCast` 进行自动类型转换并赋值。
+
+##### Q: 配置变更回调（Listener）的 ID 为什么用 `static` 变量？
+**A**: 为了保证每个监听器在注册时都能获得一个唯一的编号（Key），以便后续可以精准地删除某个特定的监听器（`delListener`）。使用静态变量可以实现自增 ID 的分配。
+
+##### Q: 为什么设置了回调就能实现“热加载”？
+**A**: 回调函数本身只是热加载流程的**最后一环**。完整的热加载机制如下：
+1.  **文件监控 (File Watcher)**: 系统后台有一个线程或定时任务（利用 `inotify` 或 `stat`）监控配置文件（如 `conf.yml`）的修改时间。
+2.  **触发重载 (Trigger Reload)**: 一旦检测到文件变化，程序自动读取新文件内容。
+3.  **解析更新 (Parse & Update)**: 调用 `Config::LoadFromYaml`，将新配置解析为内存对象，并调用对应 `ConfigVar` 的 `setValue()` 方法。
+4.  **变更通知 (Notification)**: `setValue()` 内部检测到值发生变化，遍历 `m_cbs` 列表，依次执行注册的回调函数。
+5.  **业务响应 (Reaction)**: 回调函数执行具体的业务逻辑（如重置数据库连接池、重启 Listener），从而完成“热更新”。
+目前我们实现了 3, 4, 5 步，第 1, 2 步将在后续的文件监控模块中实现。
 
 ---
 *(持续更新中...)*

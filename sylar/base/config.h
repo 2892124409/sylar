@@ -80,6 +80,260 @@ namespace sylar
     };
 
     /**
+     * @brief 类型转换模板类片特化(YAML String 转换成 std::vector<T>)
+     */
+    template <class T>
+    class LexicalCast<std::string, std::vector<T>>
+    {
+    public:
+        std::vector<T> operator()(const std::string &v)
+        {
+            YAML::Node node = YAML::Load(v);
+            typename std::vector<T> vec;
+            std::stringstream ss;
+            for (size_t i = 0; i < node.size(); ++i)
+            {
+                ss.str("");
+                ss << node[i];
+                vec.push_back(LexicalCast<std::string, T>()(ss.str()));
+            }
+            return vec;
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(std::vector<T> 转换成 YAML String)
+     */
+    template <class T>
+    class LexicalCast<std::vector<T>, std::string>
+    {
+    public:
+        std::string operator()(const std::vector<T> &v)
+        {
+            YAML::Node node;
+            for (auto &i : v)
+            {
+                node.push_back(YAML::Load(LexicalCast<T, std::string>()(i)));
+            }
+            std::stringstream ss;
+            ss << node;
+            return ss.str();
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(YAML String 转换成 std::list<T>)
+     */
+    template <class T>
+    class LexicalCast<std::string, std::list<T>>
+    {
+    public:
+        std::list<T> operator()(const std::string &v)
+        {
+            YAML::Node node = YAML::Load(v);
+            typename std::list<T> vec;
+            std::stringstream ss;
+            for (size_t i = 0; i < node.size(); ++i)
+            {
+                ss.str("");
+                ss << node[i];
+                vec.push_back(LexicalCast<std::string, T>()(ss.str()));
+            }
+            return vec;
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(std::list<T> 转换成 YAML String)
+     */
+    template <class T>
+    class LexicalCast<std::list<T>, std::string>
+    {
+    public:
+        std::string operator()(const std::list<T> &v)
+        {
+            YAML::Node node;
+            for (auto &i : v)
+            {
+                node.push_back(YAML::Load(LexicalCast<T, std::string>()(i)));
+            }
+            std::stringstream ss;
+            ss << node;
+            return ss.str();
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(YAML String 转换成 std::set<T>)
+     */
+    template <class T>
+    class LexicalCast<std::string, std::set<T>>
+    {
+    public:
+        std::set<T> operator()(const std::string &v)
+        {
+            YAML::Node node = YAML::Load(v);
+            typename std::set<T> vec;
+            std::stringstream ss;
+            for (size_t i = 0; i < node.size(); ++i)
+            {
+                ss.str("");
+                ss << node[i];
+                vec.insert(LexicalCast<std::string, T>()(ss.str()));
+            }
+            return vec;
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(std::set<T> 转换成 YAML String)
+     */
+    template <class T>
+    class LexicalCast<std::set<T>, std::string>
+    {
+    public:
+        std::string operator()(const std::set<T> &v)
+        {
+            YAML::Node node;
+            for (auto &i : v)
+            {
+                node.push_back(YAML::Load(LexicalCast<T, std::string>()(i)));
+            }
+            std::stringstream ss;
+            ss << node;
+            return ss.str();
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(YAML String 转换成 std::unordered_set<T>)
+     */
+    template <class T>
+    class LexicalCast<std::string, std::unordered_set<T>>
+    {
+    public:
+        std::unordered_set<T> operator()(const std::string &v)
+        {
+            YAML::Node node = YAML::Load(v);
+            typename std::unordered_set<T> vec;
+            std::stringstream ss;
+            for (size_t i = 0; i < node.size(); ++i)
+            {
+                ss.str("");
+                ss << node[i];
+                vec.insert(LexicalCast<std::string, T>()(ss.str()));
+            }
+            return vec;
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(std::unordered_set<T> 转换成 YAML String)
+     */
+    template <class T>
+    class LexicalCast<std::unordered_set<T>, std::string>
+    {
+    public:
+        std::string operator()(const std::unordered_set<T> &v)
+        {
+            YAML::Node node;
+            for (auto &i : v)
+            {
+                node.push_back(YAML::Load(LexicalCast<T, std::string>()(i)));
+            }
+            std::stringstream ss;
+            ss << node;
+            return ss.str();
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(YAML String 转换成 std::map<std::string, T>)
+     */
+    template <class T>
+    class LexicalCast<std::string, std::map<std::string, T>>
+    {
+    public:
+        std::map<std::string, T> operator()(const std::string &v)
+        {
+            YAML::Node node = YAML::Load(v);
+            typename std::map<std::string, T> vec;
+            std::stringstream ss;
+            for (auto it = node.begin(); it != node.end(); ++it)
+            {
+                ss.str("");
+                ss << it->second;
+                vec.insert(std::make_pair(it->first.Scalar(),
+                                          LexicalCast<std::string, T>()(ss.str())));
+            }
+            return vec;
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(std::map<std::string, T> 转换成 YAML String)
+     */
+    template <class T>
+    class LexicalCast<std::map<std::string, T>, std::string>
+    {
+    public:
+        std::string operator()(const std::map<std::string, T> &v)
+        {
+            YAML::Node node;
+            for (auto &i : v)
+            {
+                node[i.first] = YAML::Load(LexicalCast<T, std::string>()(i.second));
+            }
+            std::stringstream ss;
+            ss << node;
+            return ss.str();
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(YAML String 转换成 std::unordered_map<std::string, T>)
+     */
+    template <class T>
+    class LexicalCast<std::string, std::unordered_map<std::string, T>>
+    {
+    public:
+        std::unordered_map<std::string, T> operator()(const std::string &v)
+        {
+            YAML::Node node = YAML::Load(v);
+            typename std::unordered_map<std::string, T> vec;
+            std::stringstream ss;
+            for (auto it = node.begin(); it != node.end(); ++it)
+            {
+                ss.str("");
+                ss << it->second;
+                vec.insert(std::make_pair(it->first.Scalar(),
+                                          LexicalCast<std::string, T>()(ss.str())));
+            }
+            return vec;
+        }
+    };
+
+    /**
+     * @brief 类型转换模板类片特化(std::unordered_map<std::string, T> 转换成 YAML String)
+     */
+    template <class T>
+    class LexicalCast<std::unordered_map<std::string, T>, std::string>
+    {
+    public:
+        std::string operator()(const std::unordered_map<std::string, T> &v)
+        {
+            YAML::Node node;
+            for (auto &i : v)
+            {
+                node[i.first] = YAML::Load(LexicalCast<T, std::string>()(i.second));
+            }
+            std::stringstream ss;
+            ss << node;
+            return ss.str();
+        }
+    };
+
+    /**
      * @brief 配置参数模板类
      * T: 参数类型
      * FromStr: 从字符串转T的转换器
@@ -147,6 +401,46 @@ namespace sylar
 
         std::string getTypeName() const override { return typeid(T).name(); }
 
+        /**
+         * @brief 添加变化回调函数
+         * @param[in] cb 回调函数
+         * @return 返回该回调函数的唯一id，用于删除回调
+         */
+        uint64_t addListener(on_change_cb cb) {
+            static uint64_t s_fun_id = 0;
+            std::lock_guard<MutexType> lock(m_mutex);
+            ++s_fun_id;
+            m_cbs[s_fun_id] = cb;
+            return s_fun_id;
+        }
+
+        /**
+         * @brief 删除变化回调函数
+         * @param[in] key 回调函数的唯一id
+         */
+        void delListener(uint64_t key) {
+            std::lock_guard<MutexType> lock(m_mutex);
+            m_cbs.erase(key);
+        }
+
+        /**
+         * @brief 获取回调函数
+         * @param[in] key 回调函数的唯一id
+         */
+        on_change_cb getListener(uint64_t key) {
+            std::lock_guard<MutexType> lock(m_mutex);
+            auto it = m_cbs.find(key);
+            return it == m_cbs.end() ? nullptr : it->second;
+        }
+
+        /**
+         * @brief 清空所有的回调函数
+         */
+        void clearListener() {
+            std::lock_guard<MutexType> lock(m_mutex);
+            m_cbs.clear();
+        }
+
     private:
         /**
          * @brief 实际存储的配置变量值
@@ -160,6 +454,8 @@ namespace sylar
          * 作用：当配置值发生变化时，通知所有注册了该事件的代码进行热更新处理
          */
         std::map<uint64_t, on_change_cb> m_cbs;
+        typedef std::mutex MutexType; // 这里的 MutexType 其实还没定义，我们需要引入mutex头文件或者使用 sylar::Logger::MutexType
+        MutexType m_mutex;
     };
     
     /**
@@ -223,6 +519,16 @@ namespace sylar
             }
             return std::dynamic_pointer_cast<ConfigVar<T>>(it->second);
         }
+
+        /**
+         * @brief 使用YAML::Node初始化配置模块
+         */
+        static void LoadFromYaml(const YAML::Node &root);
+
+        /**
+         * @brief 查找配置参数基类
+         */
+        static ConfigVarBase::ptr LookupBase(const std::string &name);
 
         /**
          * @brief 获取所有的配置项
