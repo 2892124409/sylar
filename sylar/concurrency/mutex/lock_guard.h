@@ -19,7 +19,7 @@ namespace sylar
     {
     public:
         /**
-         * @brief 构造函数
+         * @brief 带参构造函数
          * @param[in] mutex 锁对象
          */
         ScopedLockImpl(T &mutex)
@@ -76,7 +76,7 @@ namespace sylar
     {
     public:
         /**
-         * @brief 构造函数
+         * @brief 带参构造函数
          * @param[in] mutex 读写锁对象
          */
         ReadScopedLockImpl(T &mutex)
@@ -133,7 +133,7 @@ namespace sylar
     {
     public:
         /**
-         * @brief 构造函数
+         * @brief 带参构造函数
          * @param[in] mutex 读写锁对象
          */
         WriteScopedLockImpl(T &mutex)
