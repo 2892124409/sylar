@@ -27,7 +27,7 @@ namespace sylar
         Noncopyable(const Noncopyable &) = delete;
 
         /**
-         * @brief 赋值函数(禁用)
+         * @brief 赋值运算符(禁用)
          */
         Noncopyable &operator=(const Noncopyable &) = delete;
     };

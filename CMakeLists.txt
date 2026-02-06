@@ -10,30 +10,34 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O0 -g -Wall -rdynamic -fPIC"
 # 包含项目根目录
 include_directories(.)
 
-# 所有的日志模块源文件
-set(LOG_SOURCES
+# 所有的核心模块源文件
+set(SYLAR_SOURCES
     sylar/log/log_level.cc
     sylar/log/log_formatter.cc
     sylar/log/log_appender.cc
     sylar/log/logger.cc
     sylar/base/util.cc
-    sylar/base/config.cc # 新增配置模块源文件
+    sylar/base/config.cc
+    sylar/concurrency/mutex/semaphore.cc
+    sylar/concurrency/thread.cc
 )
 
 # 生成共享库 libsylar.so
-add_library(sylar SHARED ${LOG_SOURCES})
+add_library(sylar SHARED ${SYLAR_SOURCES})
 
-# 链接 yaml-cpp 库
-target_link_libraries(sylar yaml-cpp)
+# 链接 yaml-cpp 库和 pthread 库
+target_link_libraries(sylar yaml-cpp pthread)
+
+# 定义输出路径
+set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
+set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
 
 # 编译测试程序
 add_executable(test_log tests/test_log.cc)
 target_link_libraries(test_log sylar)
 
-# 编译配置模块测试程序
 add_executable(test_config tests/test_config.cc)
 target_link_libraries(test_config sylar)
 
-# 定义输出路径
-set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
-set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
+add_executable(test_thread tests/test_thread.cc)
+target_link_libraries(test_thread sylar)
