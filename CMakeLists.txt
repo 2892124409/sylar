@@ -4,7 +4,7 @@ project(sylar)
 
 set(CMAKE_CXX_STANDARD 11)
 
-# 编译选项：-O0 关闭优化方便调试，-g 生成调试信息，-Wall 开启警告，-rdynamic 让链接器导出所有符号
+# 编译选项
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O0 -g -Wall -rdynamic -fPIC")
 
 # 包含项目根目录
@@ -20,12 +20,13 @@ set(SYLAR_SOURCES
     sylar/base/config.cc
     sylar/concurrency/mutex/semaphore.cc
     sylar/concurrency/thread.cc
+    sylar/fiber/fiber.cc
 )
 
 # 生成共享库 libsylar.so
 add_library(sylar SHARED ${SYLAR_SOURCES})
 
-# 链接 yaml-cpp 库和 pthread 库
+# 链接库
 target_link_libraries(sylar yaml-cpp pthread)
 
 # 定义输出路径
@@ -41,3 +42,6 @@ target_link_libraries(test_config sylar)
 
 add_executable(test_thread tests/test_thread.cc)
 target_link_libraries(test_thread sylar)
+
+add_executable(test_fiber tests/test_fiber.cc)
+target_link_libraries(test_fiber sylar)
