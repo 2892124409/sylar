@@ -1,4 +1,5 @@
 #include "fiber.h"
+#include "scheduler.h"
 #include "sylar/base/config.h"
 #include "sylar/base/macro.h"
 #include <atomic>
@@ -135,7 +136,6 @@ namespace sylar
 
     /**
      * @brief 切换到当前协程运行
-     * @details 也就是从“主协程”切入到“子协程”
      */
     void Fiber::resume()
     {
@@ -143,7 +143,68 @@ namespace sylar
         SetThis(this);
         m_state = EXEC;
 
-        // swapcontext: 核心！保存当前(主协程)上下文到 t_thread_fiber，并激活当前协程上下文 m_ctx
+        // 如果参与调度，则与调度协程切换；否则与主协程切换
+        if (m_runInScheduler)
+        {
+            if (swapcontext(&Scheduler::GetMainFiber()->m_ctx, &m_ctx))
+            {
+                SYLAR_ASSERT2(false, "swapcontext");
+            }
+        }
+        else
+        {
+            if (swapcontext(&t_thread_fiber->m_ctx, &m_ctx))
+            {
+                SYLAR_ASSERT2(false, "swapcontext");
+            }
+        }
+    }
+
+    /**
+     * @brief 让出执行权
+     */
+    void Fiber::yield()
+    {
+        SYLAR_ASSERT(m_state == EXEC || m_state == TERM || m_state == EXCEPT);
+
+        // 如果参与调度，则切换回调度协程；否则切换回主协程
+        if (m_runInScheduler)
+        {
+            SetThis(Scheduler::GetMainFiber());
+        }
+        else
+        {
+            SetThis(t_thread_fiber.get());
+        }
+
+        if (m_state != TERM && m_state != EXCEPT)
+        {
+            m_state = HOLD;
+        }
+
+        if (m_runInScheduler)
+        {
+            if (swapcontext(&m_ctx, &Scheduler::GetMainFiber()->m_ctx))
+            {
+                SYLAR_ASSERT2(false, "swapcontext");
+            }
+        }
+        else
+        {
+            if (swapcontext(&m_ctx, &t_thread_fiber->m_ctx))
+            {
+                SYLAR_ASSERT2(false, "swapcontext");
+            }
+        }
+    }
+
+    /**
+     * @brief 切换到当前协程运行（用于 use_caller 线程）
+     */
+    void Fiber::call()
+    {
+        SetThis(this);
+        m_state = EXEC;
         if (swapcontext(&t_thread_fiber->m_ctx, &m_ctx))
         {
             SYLAR_ASSERT2(false, "swapcontext");
@@ -151,18 +212,11 @@ namespace sylar
     }
 
     /**
-     * @brief 让出执行权，切回主协程
+     * @brief 让出执行权（用于 use_caller 线程）
      */
-    void Fiber::yield()
+    void Fiber::back()
     {
-        SYLAR_ASSERT(m_state == EXEC || m_state == TERM || m_state == EXCEPT);
         SetThis(t_thread_fiber.get());
-        if (m_state != TERM && m_state != EXCEPT)
-        {
-            m_state = HOLD;
-        }
-
-        // swapcontext: 核心！保存当前(子协程)上下文到 m_ctx，并恢复主协程上下文
         if (swapcontext(&m_ctx, &t_thread_fiber->m_ctx))
         {
             SYLAR_ASSERT2(false, "swapcontext");
@@ -260,7 +314,14 @@ namespace sylar
          */
         auto raw_ptr = cur.get();
         cur.reset();
-        raw_ptr->yield();
+        
+        // 如果是参与调度的协程，执行完毕后切回调度协程
+        if (raw_ptr->m_runInScheduler) {
+            raw_ptr->yield();
+        } else {
+            // 如果是不参与调度的协程（如 use_caller 的调度协程），执行完毕后切回线程主协程
+            raw_ptr->back();
+        }
 
         // 代码永远不应该运行到这里
         SYLAR_ASSERT2(false, "never reach fiber_id=" + std::to_string(raw_ptr->getId()));

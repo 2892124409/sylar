@@ -21,6 +21,7 @@ set(SYLAR_SOURCES
     sylar/concurrency/mutex/semaphore.cc
     sylar/concurrency/thread.cc
     sylar/fiber/fiber.cc
+    sylar/fiber/scheduler.cc
 )
 
 # 生成共享库 libsylar.so
@@ -44,4 +45,11 @@ add_executable(test_thread tests/test_thread.cc)
 target_link_libraries(test_thread sylar)
 
 add_executable(test_fiber tests/test_fiber.cc)
+
 target_link_libraries(test_fiber sylar)
+
+
+
+add_executable(test_scheduler tests/test_scheduler.cc)
+
+target_link_libraries(test_scheduler sylar)

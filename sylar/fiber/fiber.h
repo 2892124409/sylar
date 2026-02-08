@@ -83,6 +83,18 @@ namespace sylar
         void yield();
 
         /**
+         * @brief 从当前线程的主协程切换到当前的协程
+         * @pre 当前协程状态不是 EXEC
+         * @post 当前协程状态为 EXEC
+         */
+        void call();
+
+        /**
+         * @brief 将当前协程切换到后台，唤醒主协程
+         */
+        void back();
+
+        /**
          * @brief 返回协程id
          */
         uint64_t getId() const { return m_id; }
@@ -91,6 +103,12 @@ namespace sylar
          * @brief 返回协程状态
          */
         State getState() const { return m_state; }
+
+        /**
+         * @brief 设置协程状态
+         * @param[in] s 状态
+         */
+        void setState(State s) { m_state = s; }
 
     public:
         /**
