@@ -21,7 +21,7 @@ namespace sylar
     /**
      * @brief 返回当前协程的ID
      */
-    uint32_t GetFiberId();
+    uint64_t GetFiberId();
 
     /**
      * @brief 获取当前的调用栈
@@ -38,6 +38,16 @@ namespace sylar
      * @param[in] prefix 每行前缀
      */
     std::string BacktraceToString(int size = 64, int skip = 2, const std::string &prefix = "");
+
+    /**
+     * @brief 获取当前毫秒时间戳
+     */
+    uint64_t GetCurrentMS();
+
+    /**
+     * @brief 获取当前微秒时间戳
+     */
+    uint64_t GetCurrentUS();
 
 }
 
