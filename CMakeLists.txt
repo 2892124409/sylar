@@ -23,6 +23,7 @@ set(SYLAR_SOURCES
     sylar/fiber/fiber.cc
     sylar/fiber/scheduler.cc
     sylar/fiber/iomanager.cc
+    sylar/fiber/timer.cc
 )
 
 # 生成共享库 libsylar.so
@@ -52,4 +53,11 @@ add_executable(test_scheduler tests/test_scheduler.cc)
 target_link_libraries(test_scheduler sylar)
 
 add_executable(test_iomanager tests/test_iomanager.cc)
+
 target_link_libraries(test_iomanager sylar)
+
+
+
+add_executable(test_timer tests/test_timer.cc)
+
+target_link_libraries(test_timer sylar)

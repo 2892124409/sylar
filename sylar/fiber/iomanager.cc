@@ -197,7 +197,7 @@ namespace sylar
         ++m_pendingEventCount;
         // 更新该 fd 上下文中的事件掩码
         fd_ctx->events = (Event)(fd_ctx->events | event);
-        
+
         // 获取并配置对应事件的上下文
         FdContext::EventContext &event_ctx = fd_ctx->getEventContext(event);
         SYLAR_ASSERT(!event_ctx.scheduler && !event_ctx.fiber && !event_ctx.cb);
@@ -355,12 +355,11 @@ namespace sylar
      */
     void IOManager::tickle()
     {
-        if (!hasIdleThreads())
+        if (hasIdleThreads())
         {
-            return;
+            int rt = write(m_tickleFds[1], "T", 1);
+            SYLAR_ASSERT(rt == 1);
         }
-        int rt = write(m_tickleFds[1], "T", 1);
-        SYLAR_ASSERT(rt == 1);
     }
 
     /**
@@ -368,13 +367,24 @@ namespace sylar
      */
     bool IOManager::stopping()
     {
-        // 只有当没有待处理 IO 事件，且基类 Scheduler 确认可以停止时才真正停止
-        return m_pendingEventCount == 0 && Scheduler::stopping();
+        uint64_t timeout = 0;
+        return stopping(timeout);
+    }
+
+    bool IOManager::stopping(uint64_t &timeout)
+    {
+        timeout = getNextTimer();
+        return timeout == ~0ull && m_pendingEventCount == 0 && Scheduler::stopping();
+    }
+
+    void IOManager::onTimerInsertedAtFront()
+    {
+        tickle();
     }
 
     /**
      * @brief 核心 IO 调度循环
-     * @details 
+     * @details
      * 1. 当 Scheduler::run() 发现没活干时会切进此协程。
      * 2. 阻塞在 epoll_wait 处进入内核睡眠。
      * 3. 醒来后处理就绪事件，将对应的任务放入调度队列。
@@ -390,7 +400,8 @@ namespace sylar
 
         while (true)
         {
-            if (stopping())
+            uint64_t next_timeout = 0;
+            if (stopping(next_timeout))
             {
                 SYLAR_LOG_INFO(g_logger) << "name=" << getName() << " idle stopping exit";
                 break;
@@ -399,9 +410,19 @@ namespace sylar
             int rt = 0;
             do
             {
-                // 默认超时 5 秒（后续集成 TimerManager 后会改为最近定时器的超时时间）
-                static const uint64_t MAX_TIMEOUT = 5000;
-                rt = epoll_wait(m_epfd, events, MAX_EVNETS, (int)MAX_TIMEOUT);
+                // 默认最大睡眠时间 5 秒
+                static const uint64_t MAX_TIMEOUT = 3000;
+                if (next_timeout != ~0ull)
+                {
+                    next_timeout = std::min(next_timeout, MAX_TIMEOUT);
+                }
+                else
+                {
+                    next_timeout = MAX_TIMEOUT;
+                }
+
+                // 精准睡眠：epoll_wait 会在 IO 发生 OR 时间到期时返回
+                rt = epoll_wait(m_epfd, events, MAX_EVNETS, (int)next_timeout);
 
                 if (rt < 0 && errno == EINTR)
                 {
@@ -413,6 +434,17 @@ namespace sylar
                 }
             } while (true);
 
+            // 处理到期的定时器回调
+            std::vector<std::function<void()>> cbs;
+            listExpiredCb(cbs);
+            if (!cbs.empty())
+            {
+                // 将过期的定时器回调全部投入调度器
+                schedule(cbs.begin(), cbs.end());
+                cbs.clear();
+            }
+
+            // 处理就绪的 IO 事件
             for (int i = 0; i < rt; ++i)
             {
                 epoll_event &event = events[i];
@@ -420,20 +452,21 @@ namespace sylar
                 if (event.data.fd == m_tickleFds[0])
                 {
                     uint8_t dummy[256];
-                    while (read(m_tickleFds[0], dummy, sizeof(dummy)) > 0);
+                    while (read(m_tickleFds[0], dummy, sizeof(dummy)) > 0)
+                        ;
                     continue;
                 }
 
                 // 拿到注册时绑定的 FdContext
                 FdContext *fd_ctx = (FdContext *)event.data.ptr;
                 FdContext::MutexType::Lock lock(fd_ctx->mutex);
-                
+
                 // 处理错误事件：转成读写事件由上层处理
                 if (event.events & (EPOLLERR | EPOLLHUP))
                 {
                     event.events |= (EPOLLIN | EPOLLOUT) & fd_ctx->events;
                 }
-                
+
                 uint32_t real_events = NONE;
                 if (event.events & EPOLLIN)
                 {

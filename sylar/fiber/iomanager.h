@@ -9,7 +9,8 @@
 #define __SYLAR_IOMANAGER_H__
 
 #include "sylar/fiber/scheduler.h"
-#include"sylar/concurrency/mutex/rw_mutex.h"
+#include "sylar/fiber/timer.h"
+#include "sylar/concurrency/mutex/rw_mutex.h"
 
 namespace sylar
 {
@@ -17,7 +18,7 @@ namespace sylar
     /**
      * @brief IO协程调度器
      */
-    class IOManager : public Scheduler
+    class IOManager : public Scheduler, public TimerManager
     {
     public:
         typedef std::shared_ptr<IOManager> ptr;
@@ -141,7 +142,9 @@ namespace sylar
     protected:
         void tickle() override;
         bool stopping() override;
+        bool stopping(uint64_t &timeout);
         void idle() override;
+        void onTimerInsertedAtFront() override;
 
         /**
          * @brief 重置socket句柄上下文的容器大小
