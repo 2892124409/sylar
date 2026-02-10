@@ -277,6 +277,91 @@ if(logger->getLevel() <= level) { // 1. 级别判断
 
 ---
 
+### 4. Singleton (单例模板)
+#### 类作用
+系统的"全局唯一管家"。提供通用的单例模式模板，支持返回裸指针和智能指针两种方式，确保全局只有一个实例。
+
+#### 设计理念
+单例模式是一种创建型模式，保证一个类只有一个实例，并提供全局访问点。在服务器框架中，单例常用于管理器类（如 FdManager、LoggerManager）。
+
+#### 设计要点
+- **`Singleton<T>`**: 返回单例裸指针 `T*`
+- **`SingletonPtr<T>`**: 返回单例智能指针 `shared_ptr<T>`
+- **模板参数 X**: 用于区分同一类型的不同单例实例（Tag）
+- **模板参数 N**: 同一个 Tag 下可以创建多个实例索引
+- **线程安全**: C++11 保证 `static` 局部变量的初始化是线程安全的
+
+#### 遇到的问题
+##### Q: 为什么在 `namespace sylar` 中还有一个匿名 `namespace`？
+**A**: 这是一个巧妙的设计模式，用于**隐藏实现细节**和**防止符号冲突**。
+
+1. **匿名命名空间的特性**：
+   ```cpp
+   namespace sylar {
+       namespace {  // 匿名命名空间
+           template <class T, class X, int N>
+           T &GetInstanceX() {
+               static T v;
+               return v;
+           }
+       }
+   }
+   ```
+   - 匿名命名空间内的内容具有**内部链接性** (internal linkage)
+   - 相当于给每个函数都加上了 `static` 关键字
+   - 这些函数只在当前编译单元（.cc 文件）内可见
+
+2. **为什么要这样设计**？
+   - **防止符号冲突**: 如果多个 .cc 文件 include 这个头文件，没有匿名命名空间就会产生**多重定义错误**。匿名命名空间确保每个编译单元都有自己的副本，互不干扰。
+   - **隐藏实现细节**: 外部无法直接调用 `sylar::GetInstanceX<...>()`，这是**私有实现**，只能通过公共接口 `Singleton<T>::GetInstance()` 访问。
+   - **灵活重构**: 这些辅助函数可以被修改或删除，而不影响用户代码。
+
+3. **对比**：
+   ```cpp
+   // ❌ 错误：全局可见，多个 .cc include 会冲突
+   namespace sylar {
+       template <class T, class X, int N>
+       T &GetInstanceX() { ... }
+   }
+
+   // ✅ 正确：内部可见，每个编译单元独立
+   namespace sylar {
+       namespace {
+           template <class T, class X, int N>
+           T &GetInstanceX() { ... }
+       }
+   }
+   ```
+
+**总结**: 匿名命名空间是一种**封装技巧**，将辅助函数隐藏起来，既保持了代码的组织性，又避免了链接冲突。
+
+##### Q: 单例模式中 `static` 局部变量的线程安全性是如何保证的？
+**A**: C++11 标准明确规定：编译器必须保证 `static` 局部变量的初始化是线程安全的。
+
+- **C++11 之前**: 编译器通常通过全局锁或其他机制来保证，但不是标准要求
+- **C++11 及之后**: 标准强制要求，编译器必须生成线程安全的初始化代码
+- **实现机制**: 编译器通常会生成类似以下的伪代码：
+  ```cpp
+  void* getInstance() {
+      static bool initialized = false;
+      static T instance;
+
+      // 编译器自动生成的线程安全检查
+      if (!initialized) {
+          lock_guard<mutex> lock(some_mutex);
+          if (!initialized) {
+              new (&instance) T();  // placement new
+              initialized = true;
+          }
+      }
+      return &instance;
+  }
+  ```
+
+这种机制被称为**Magic Statics**（魔法静态变量），是 C++11 最受欢迎的特性之一。
+
+---
+
 ## 并发模块 (Concurrency Module)
 
 ### 1. Semaphore (信号量)
