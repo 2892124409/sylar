@@ -1334,6 +1334,189 @@ typedef union epoll_data {
 
 #### (3) 响应式唤醒：onTimerInsertedAtFront
 - **逻辑**: 重写该虚函数，内部直接调用 `tickle()`。
-- **作用**: 解决了“早起闹钟”问题。如果当前 `epoll_wait` 正打算睡 10 秒，但用户在 1 秒时新加了一个 2 秒后过期的任务，该机制会通过管道立即踢醒线程，强制其重新计算睡眠时间，确保新任务不延误。
+- **作用**: 解决了"早起闹钟"问题。如果当前 `epoll_wait` 正打算睡 10 秒，但用户在 1 秒时新加了一个 2 秒后过期的任务，该机制会通过管道立即踢醒线程，强制其重新计算睡眠时间，确保新任务不延误。
+
+---
+
+## Hook 模块 (Hook Module)
+
+### 1. Hook 模块基础
+#### 模块作用
+系统的"魔法转换器"。通过 Hook 系统的 IO 和睡眠函数，将阻塞调用转换为非阻塞 + 协程调度，实现"同步编程，异步执行"。
+
+#### 设计理念
+Hook 模块是 Sylar 框架的核心魔法，它使得：
+1. **透明化**: 现有的同步代码无需修改即可获得协程化能力
+2. **统一接口**: 标准的 POSIX 函数自动转换为异步
+3. **性能提升**: 避免阻塞物理线程，提升并发能力
+4. **编程简化**: 像写同步代码一样写异步程序
+
+#### 设计要点
+- **函数指针保存**: 使用 `dlsym(RTLD_NEXT, ...)` 保存原始函数指针
+- **条件 Hook**: 通过 `thread_local bool t_hook_enable` 控制是否启用
+- **睡眠类函数**: sleep/usleep/nanosleep → 定时器 + yield
+- **IO 类函数**: 检查 FdCtx，EAGAIN 时注册到 IOManager + yield
+
+#### 遇到的问题
+##### Q: hook.h 中每个系统函数前面的 typedef 是什么意思？
+**A**: 这是**函数指针的 typedef**，用于定义函数指针类型。
+
+**语法拆解**：
+```cpp
+// 原始函数类型
+unsigned int sleep(unsigned int seconds);
+
+// 函数指针定义
+unsigned int (*func_ptr)(unsigned int seconds);
+
+// typedef 语法（把 (*name) 提到前面）
+typedef unsigned int (*sleep_fun)(unsigned int seconds);
+//                  ^^^^^^^^^  类型名
+```
+
+**为什么要这样写？**
+
+目的：保存原始系统函数的地址，以便在 Hook 函数中调用。
+
+```cpp
+// ========== hook.h ==========
+// 1. 定义函数指针类型
+typedef unsigned int (*sleep_fun)(unsigned int seconds);
+// 2. 声明函数指针变量（指向原始函数）
+extern sleep_fun sleep_f;
+
+// ========== hook.cc ==========
+// 3. 初始化：保存系统原始函数地址
+sleep_f = (sleep_fun)dlsym(RTLD_NEXT, "sleep");
+
+// 4. 定义 Hook 函数（同名的 sleep）
+unsigned int sleep(unsigned int seconds) {
+    if (!t_hook_enable) {
+        return sleep_f(seconds);  // 调用原始函数
+    }
+    // ... Hook 逻辑：协程化
+}
+```
+
+**形象比喻**：
+- 系统的 `sleep` 是旧锁
+- 我们的 `sleep` 是新锁（Hook 版本）
+- `sleep_f` 保存旧锁地址，让我们在新锁中还能调用旧锁
+
+**完整流程示意**：
+```cpp
+unsigned int read(int fd, void *buf, size_t count) {
+    // 1. 先尝试读取
+    ssize_t n = read_f(fd, buf, count);  // 调用原始的 read
+
+    // 2. 如果需要等待，就让出 CPU
+    if (n == -1 && errno == EAGAIN) {
+        Fiber::YieldToHold();
+        // 3. 被唤醒后再次尝试读取
+        n = read_f(fd, buf, count);
+    }
+
+    return n;
+}
+```
+
+**总结**：
+- `typedef` 定义了一个函数指针类型 `sleep_fun`
+- `sleep_f` 是这种类型的变量，用于保存系统原始的 `sleep` 函数地址
+- 通过 `sleep_f` 可以在 Hook 函数中调用原始系统函数
+
+**类比**：
+- `int* p` - p 是指向 int 的指针
+- `sleep_f` - sleep_f 是指向函数的指针
+- `typedef unsigned int (*sleep_fun)(...)` - 定义函数指针类型，类似 `typedef int* int_ptr`
+
+##### Q: Hook 模块是如何实现"同名替换"系统函数的？
+**A**: 这是通过 **链接器符号劫持** 实现的。
+
+**原理**：
+1. **定义同名函数**: 我们定义了 `unsigned int sleep(unsigned int seconds)`，与系统函数同名
+2. **优先级**: 当程序中有多个同名符号时，链接器会选择**先遇到的**那个
+3. **编译顺序**: 如果我们的 hook.cc 先被链接，那么所有的 `sleep` 调用都会跳到我们的函数
+
+**完整流程**：
+```cpp
+// ========== 编译链接阶段 ==========
+// 1. 编译 hook.cc，生成我们的 sleep 函数符号
+// 2. 链接时，hook.o 在 libc 之前被链接
+// 3. 所有代码中的 sleep 调用都被解析到我们的 sleep 函数
+
+// ========== 运行时初始化 ==========
+// 4. 在程序启动时（通过全局变量构造），调用 hook_init()
+// 5. hook_init() 使用 dlsym(RTLD_NEXT, "sleep") 找到系统真正的 sleep
+// 6. 将地址保存到 sleep_f 变量中
+
+// ========== 运行时调用 ==========
+// 7. 用户代码调用 sleep(1)
+// 8. 实际执行的是我们的 sleep 函数
+// 9. 我们可以根据需要调用 sleep_f(1)（原始函数）或实现自己的逻辑
+```
+
+**RTLD_NEXT 的作用**：
+```cpp
+sleep_f = (sleep_fun)dlsym(RTLD_NEXT, "sleep");
+//              ^^^^^^^^^^
+//              RTLD_NEXT 表示：在当前搜索顺序之后查找
+//              也就是找到系统 libc 中的 sleep 函数
+```
+
+**为什么不会死循环？**
+```cpp
+unsigned int sleep(unsigned int seconds) {
+    if (!t_hook_enable) {
+        return sleep_f(seconds);  // ✅ 直接调用函数指针，不会触发 Hook
+    }
+    // ...
+}
+```
+
+因为 `sleep_f` 是函数指针，直接调用它不会触发符号解析，所以不会死循环。
+
+##### Q: 为什么要用 `extern "C"` 包裹这些声明？
+**A**: 为了 **C/C++ 混合链接**。
+
+**问题背景**：
+- 系统函数（`sleep`, `read` 等）是 **C 函数**
+- C++ 编译器会对函数名进行 **名称修饰（Name Mangling）**，导致链接时找不到系统的 C 函数
+
+**extern "C" 的作用**：
+```cpp
+extern "C" {
+    typedef unsigned int (*sleep_fun)(unsigned int seconds);
+    extern sleep_fun sleep_f;
+}
+
+// 等价于告诉编译器：
+// "这些函数名不要进行 C++ 的名称修饰，保持 C 语言的原样"
+```
+
+**名称修饰对比**：
+```cpp
+// C++ 编译器可能生成这样的符号：
+// _Z5sleepj  (mangled name)
+
+// C 编译器生成的符号：
+// sleep      (original name)
+
+// 系统库中的符号是 "sleep"，所以我们必须用 extern "C" 匹配
+```
+
+**如果我们不用 extern "C"**：
+```cpp
+// ❌ 错误：C++ 会修饰函数名
+typedef unsigned int (*sleep_fun)(unsigned int seconds);
+extern sleep_fun sleep_f;  // 符号可能是 _Z7sleep_fj
+
+// 链接时会报错：undefined reference to 'sleep'
+// 因为系统库中的符号是 'sleep'，而不是 '_Z7sleep_fj'
+```
+
+**总结**：
+- `extern "C"` 告诉编译器："用 C 语言的规则处理这些函数名"
+- 这样才能正确链接到系统 libc 中的 C 函数
 
 ---
