@@ -25,6 +25,7 @@ set(SYLAR_SOURCES
     sylar/fiber/iomanager.cc
     sylar/fiber/timer.cc
     sylar/net/fd_manager.cc
+    sylar/net/hook.cc
 )
 
 # 生成共享库 libsylar.so

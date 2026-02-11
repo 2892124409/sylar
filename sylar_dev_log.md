@@ -1680,4 +1680,33 @@ extern sleep_fun sleep_f;  // 符号可能是 _Z7sleep_fj
 - `extern "C"` 告诉编译器："用 C 语言的规则处理这些函数名"
 - 这样才能正确链接到系统 libc 中的 C 函数
 
+### 2. 开发进展 (2026-02-12)
+- **`hook.cc` 文件创建与初始化**：
+    - 使用 `dlsym(RTLD_NEXT, #name)` 机制，通过全局静态对象 `_HookIniter` 的构造函数在程序启动时自动初始化所有被 Hook 系统函数的原始函数指针。
+    - 引入线程局部变量 `t_hook_enable` 来控制当前线程是否启用 Hook 功能，提供了 `is_hook_enable()` 和 `set_hook_enable()` 接口。
+- **睡眠函数 Hook 实现**：
+    - `sleep()`, `usleep()`, `nanosleep()` 函数已被 Hook。
+    - 当 Hook 启用时，这些函数不再阻塞当前线程，而是通过 `IOManager::addTimer()` 添加定时任务，并调用 `Fiber::YieldToHold()` 让出当前协程的执行权，实现非阻塞的协程睡眠。
+- **通用 IO 操作 Hook 框架 (`do_io` 模板函数)**：
+    - 实现了 `do_io` 模板函数，用于封装和协程化大部分阻塞式 IO 操作（如 `read`, `write`, `recv`, `send` 系列）。
+    - **逻辑要点**：
+        - 检查 `FdCtx` 获取文件描述符上下文信息（是否是 socket, 是否已关闭, 用户是否设置非阻塞）。
+        - 如果不需要 Hook（如 Hook 未启用、Fd 无效、用户已设非阻塞），则直接调用原始 IO 函数。
+        - 当 IO 操作返回 `EAGAIN` 或 `EINTR` (表示 IO 未就绪或被中断) 且 Hook 启用时：
+            - 在 `IOManager` 中注册对应的读/写事件。
+            - 调用 `Fiber::YieldToHold()` 让出当前协程，等待 IO 事件就绪。
+            - 协程被唤醒后，循环重试 IO 操作。
+        - **超时处理**：结合 `FdCtx` 中设置的超时时间，通过 `IOManager::addConditionTimer()` 添加条件定时器。
+            - 当定时器触发时，强制设置 `errno = ETIMEDOUT`，取消注册的 IO 事件，并重新调度协程，以便协程能够检查到超时错误。
+- **IO 读写函数 Hook 实现**：
+    - `read()`, `readv()`, `recv()`, `recvfrom()`, `recvmsg()` 函数已 Hook，它们内部均调用 `do_io` 模板函数处理读事件和接收超时。
+    - `write()`, `writev()`, `send()`, `sendto()`, `sendmsg()` 函数已 Hook，它们内部均调用 `do_io` 模板函数处理写事件和发送超时。
+- **文件和 Socket 控制函数 Hook 实现**：
+    - **`close()`**：Hooked，在调用原始 `close()` 之前，会先在 `IOManager` 中取消该文件描述符上的所有事件 (`cancelAll`)，并从 `FdManager` 中删除其上下文。
+    - **`fcntl()`**：Hooked，主要处理 `F_SETFL` 和 `F_GETFL` 命令，用于管理文件描述符的非阻塞状态。它会更新 `FdCtx` 中用户设置的非阻塞标志，并根据系统非阻塞状态调整实际返回或设置的标志。
+    - **`ioctl()`**：Hooked，主要处理 `FIONBIO` 命令，用于设置或清除文件描述符的非阻塞标志，并更新 `FdCtx` 中的用户非阻塞状态。
+    - **`getsockopt()`**：Hooked，直接调用原始函数，目前无特殊处理。
+    - **`setsockopt()`**：Hooked，特殊处理 `SO_RCVTIMEO` 和 `SO_SNDTIMEO` 选项。它会将超时时间保存到 `FdCtx` 中，由 Sylar 框架自行管理，不再传递给原始 `setsockopt`，以避免系统层面的阻塞超时设置干扰协程调度。
+- **待完成**：`socket()`, `connect()`, `accept()` 等Socket创建和连接相关的Hook逻辑尚未实现。
+
 ---
