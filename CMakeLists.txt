@@ -24,13 +24,14 @@ set(SYLAR_SOURCES
     sylar/fiber/scheduler.cc
     sylar/fiber/iomanager.cc
     sylar/fiber/timer.cc
+    sylar/net/fd_manager.cc
 )
 
 # 生成共享库 libsylar.so
 add_library(sylar SHARED ${SYLAR_SOURCES})
 
 # 链接库
-target_link_libraries(sylar yaml-cpp pthread)
+target_link_libraries(sylar yaml-cpp pthread dl)
 
 # 定义输出路径
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
