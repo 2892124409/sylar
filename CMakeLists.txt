@@ -63,3 +63,7 @@ target_link_libraries(test_iomanager sylar)
 add_executable(test_timer tests/test_timer.cc)
 
 target_link_libraries(test_timer sylar)
+
+add_executable(test_hook tests/test_hook.cc)
+
+target_link_libraries(test_hook sylar)

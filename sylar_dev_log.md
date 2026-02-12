@@ -1680,33 +1680,304 @@ extern sleep_fun sleep_f;  // 符号可能是 _Z7sleep_fj
 - `extern "C"` 告诉编译器："用 C 语言的规则处理这些函数名"
 - 这样才能正确链接到系统 libc 中的 C 函数
 
-### 2. 开发进展 (2026-02-12)
-- **`hook.cc` 文件创建与初始化**：
-    - 使用 `dlsym(RTLD_NEXT, #name)` 机制，通过全局静态对象 `_HookIniter` 的构造函数在程序启动时自动初始化所有被 Hook 系统函数的原始函数指针。
-    - 引入线程局部变量 `t_hook_enable` 来控制当前线程是否启用 Hook 功能，提供了 `is_hook_enable()` 和 `set_hook_enable()` 接口。
-- **睡眠函数 Hook 实现**：
-    - `sleep()`, `usleep()`, `nanosleep()` 函数已被 Hook。
-    - 当 Hook 启用时，这些函数不再阻塞当前线程，而是通过 `IOManager::addTimer()` 添加定时任务，并调用 `Fiber::YieldToHold()` 让出当前协程的执行权，实现非阻塞的协程睡眠。
-- **通用 IO 操作 Hook 框架 (`do_io` 模板函数)**：
-    - 实现了 `do_io` 模板函数，用于封装和协程化大部分阻塞式 IO 操作（如 `read`, `write`, `recv`, `send` 系列）。
-    - **逻辑要点**：
-        - 检查 `FdCtx` 获取文件描述符上下文信息（是否是 socket, 是否已关闭, 用户是否设置非阻塞）。
-        - 如果不需要 Hook（如 Hook 未启用、Fd 无效、用户已设非阻塞），则直接调用原始 IO 函数。
-        - 当 IO 操作返回 `EAGAIN` 或 `EINTR` (表示 IO 未就绪或被中断) 且 Hook 启用时：
-            - 在 `IOManager` 中注册对应的读/写事件。
-            - 调用 `Fiber::YieldToHold()` 让出当前协程，等待 IO 事件就绪。
-            - 协程被唤醒后，循环重试 IO 操作。
-        - **超时处理**：结合 `FdCtx` 中设置的超时时间，通过 `IOManager::addConditionTimer()` 添加条件定时器。
-            - 当定时器触发时，强制设置 `errno = ETIMEDOUT`，取消注册的 IO 事件，并重新调度协程，以便协程能够检查到超时错误。
-- **IO 读写函数 Hook 实现**：
-    - `read()`, `readv()`, `recv()`, `recvfrom()`, `recvmsg()` 函数已 Hook，它们内部均调用 `do_io` 模板函数处理读事件和接收超时。
-    - `write()`, `writev()`, `send()`, `sendto()`, `sendmsg()` 函数已 Hook，它们内部均调用 `do_io` 模板函数处理写事件和发送超时。
-- **文件和 Socket 控制函数 Hook 实现**：
-    - **`close()`**：Hooked，在调用原始 `close()` 之前，会先在 `IOManager` 中取消该文件描述符上的所有事件 (`cancelAll`)，并从 `FdManager` 中删除其上下文。
-    - **`fcntl()`**：Hooked，主要处理 `F_SETFL` 和 `F_GETFL` 命令，用于管理文件描述符的非阻塞状态。它会更新 `FdCtx` 中用户设置的非阻塞标志，并根据系统非阻塞状态调整实际返回或设置的标志。
-    - **`ioctl()`**：Hooked，主要处理 `FIONBIO` 命令，用于设置或清除文件描述符的非阻塞标志，并更新 `FdCtx` 中的用户非阻塞状态。
-    - **`getsockopt()`**：Hooked，直接调用原始函数，目前无特殊处理。
-    - **`setsockopt()`**：Hooked，特殊处理 `SO_RCVTIMEO` 和 `SO_SNDTIMEO` 选项。它会将超时时间保存到 `FdCtx` 中，由 Sylar 框架自行管理，不再传递给原始 `setsockopt`，以避免系统层面的阻塞超时设置干扰协程调度。
-- **待完成**：`socket()`, `connect()`, `accept()` 等Socket创建和连接相关的Hook逻辑尚未实现。
+### 2. Hook 函数实现详情
+
+#### 2.1 初始化机制
+- **`_HookIniter`**：通过全局静态对象在程序启动时自动初始化
+- **`dlsym(RTLD_NEXT, #name)`**：获取系统原始函数指针并保存
+- **`t_hook_enable`**：线程局部变量，控制当前线程 Hook 开关
+- **`is_hook_enable()` / `set_hook_enable()`**：查询/设置 Hook 开关
+
+#### 2.2 睡眠函数（已实现）
+
+| 函数 | Hook 行为 |
+|------|----------|
+| `sleep(seconds)` | 调用 `IOManager::addTimer()` 添加定时任务，然后 `Fiber::YieldToHold()` 让出协程，定时器到期后自动唤醒 |
+| `usleep(usec)` | 同上，转换为毫秒后添加定时器 |
+| `nanosleep(req, rem)` | 同上，支持纳秒级精度 |
+
+**逻辑**：
+```cpp
+if (!is_hook_enable()) {
+    return sleep_f(seconds);  // 直接调用原始函数
+}
+// 添加定时器，让出协程，定时器到期后自动唤醒
+iom->addTimer(seconds * 1000, std::bind(&Scheduler::schedule, iom, fiber));
+Fiber::YieldToHold();
+```
+
+#### 2.3 Socket 创建连接函数（未实现）
+
+| 函数 | 状态 | 计划实现 |
+|------|------|---------|
+| `socket(domain, type, protocol)` | ❌ 未实现 | 需要创建 socket 后自动设置为非阻塞，并创建 FdCtx |
+| `connect(sockfd, addr, addrlen)` | ❌ 未实现 | 需要支持异步连接，通过 IOManager 注册写事件等待连接完成 |
+| `accept(s, addr, addrlen)` | ❌ 未实现 | 需要支持异步接受连接，通过 IOManager 注册读事件等待新连接 |
+
+**占位说明**：这些函数已在 hook.h 中声明，但在 hook.cc 中暂无实现。
+
+#### 2.4 读函数（已实现）
+
+| 函数 | Hook 行为 |
+|------|----------|
+| `read(fd, buf, count)` | 调用 `do_io()` 处理读事件和 `SO_RCVTIMEO` 超时 |
+| `readv(fd, iov, iovcnt)` | 调用 `do_io()` 处理读事件和 `SO_RCVTIMEO` 超时 |
+| `recv(sockfd, buf, len, flags)` | 调用 `do_io()` 处理读事件和 `SO_RCVTIMEO` 超时 |
+| `recvfrom(sockfd, buf, len, flags, src_addr, addrlen)` | 调用 `do_io()` 处理读事件和 `SO_RCVTIMEO` 超时 |
+| `recvmsg(sockfd, msg, flags)` | 调用 `do_io()` 处理读事件和 `SO_RCVTIMEO` 超时 |
+
+**通用逻辑**（`do_io` 模板函数）：
+1. 检查 Hook 是否启用，FdCtx 是否有效，是否是 socket，用户是否设置非阻塞
+2. 调用原始函数，如果返回 EAGAIN/EINTR，则在 IOManager 中注册读事件
+3. 调用 `Fiber::YieldToHold()` 让出协程
+4. IO 就绪后被唤醒，重试读取操作
+5. 支持超时控制（通过 `SO_RCVTIMEO` 选项设置）
+
+#### 2.5 写函数（已实现）
+
+| 函数 | Hook 行为 |
+|------|----------|
+| `write(fd, buf, count)` | 调用 `do_io()` 处理写事件和 `SO_SNDTIMEO` 超时 |
+| `writev(fd, iov, iovcnt)` | 调用 `do_io()` 处理写事件和 `SO_SNDTIMEO` 超时 |
+| `send(sockfd, msg, len, flags)` | 调用 `do_io()` 处理写事件和 `SO_SNDTIMEO` 超时 |
+| `sendto(sockfd, msg, len, flags, to, tolen)` | 调用 `do_io()` 处理写事件和 `SO_SNDTIMEO` 超时 |
+| `sendmsg(sockfd, msg, flags)` | 调用 `do_io()` 处理写事件和 `SO_SNDTIMEO` 超时 |
+
+**逻辑**：同读函数，但注册的是写事件（`IOManager::WRITE`），超时使用 `SO_SNDTIMEO`。
+
+#### 2.6 控制函数（已实现）
+
+| 函数 | Hook 行为 |
+|------|----------|
+| `close(fd)` | 先调用 `IOManager::cancelAll(fd)` 取消所有事件，再从 `FdManager` 中删除 FdCtx，最后调用原始 `close()` |
+| `fcntl(fd, cmd, ...)` | 处理 `F_SETFL`：检测 `O_NONBLOCK` 标志并更新 FdCtx 的 `m_userNonblock`；处理 `F_GETFL`：根据系统非阻塞状态调整返回值 |
+| `ioctl(fd, FIONBIO, ...)` | 处理 `FIONBIO` 命令：设置/清除非阻塞标志，并更新 FdCtx 的 `m_userNonblock` |
+| `getsockopt(sockfd, level, optname, ...)` | 直接调用原始函数，无特殊处理 |
+| `setsockopt(sockfd, level, optname, ...)` | **特殊处理** `SO_RCVTIMEO` 和 `SO_SNDTIMEO`：将超时时间保存到 FdCtx 中，由框架管理，不传递给系统 |
+
+#### 2.7 辅助函数
+
+| 函数 | 状态 | 说明 |
+|------|------|------|
+| `connect_with_timeout(fd, addr, addrlen, timeout_ms)` | ✅ 已实现 | 带超时的 connect 函数，用于异步连接场景 |
+
+### 3. Hook 生效机制
+
+#### 概述
+Hook 模块的生效并非简单的"开关"模式，而是采用**双重条件判断**机制，确保 Hook 功能在合适的时机自动启用。
+
+#### 生效条件
+Hook 功能生效需要同时满足以下两个条件：
+
+1. **Hook 开关已启用**：`is_hook_enable() == true`
+   - 通过 `set_hook_enable(true/false)` 手动控制
+   - 默认值为 `false`
+   - 使用 `thread_local` 存储，每个线程独立
+
+2. **当前在线程调度器中**：`IOManager::GetThis() != nullptr`
+   - 表示当前代码正在 IOManager 的工作线程中执行
+   - 这是**自动启用 Hook 的关键条件**
+
+#### 关键代码分析
+
+```cpp
+// hook.cc 中的典型判断逻辑
+if(!sylar::is_hook_enable()) {
+    return hook_func(args);  // Hook 未启用，直接调用原始函数
+}
+
+sylar::IOManager* iom = sylar::IOManager::GetThis();
+if(iom) {
+    // 在 IOManager 线程中，执行 Hook 逻辑
+    // ...
+} else {
+    // 不在 IOManager 线程中，调用原始函数
+    return hook_func(args);
+}
+```
+
+#### 两种使用方式
+
+**方式一：手动控制（显式调用 set_hook_enable）**
+```cpp
+sylar::set_hook_enable(true);
+sleep(1);  // 确保 Hook 生效
+sylar::set_hook_enable(false);
+```
+
+**方式二：自动管理（推荐，利用 IOManager）**
+```cpp
+sylar::IOManager iom(1, true, "Test");
+
+iom.schedule([]() {
+    // 在 IOManager 线程中执行
+    sleep(1);  // GetThis() != nullptr，Hook 自动生效！
+});
+```
+
+#### GetThis() 的生效时机（重要）
+
+**核心原理**：`GetThis()` 返回的是当前线程关联的 Scheduler 指针，这个指针在线程进入 `Scheduler::run()` 函数时被设置，在线程整个生命周期内保持有效。
+
+**时间线示意**：
+```
+线程创建
+    │
+    ├──> 进入 Scheduler::run()
+    │       │
+    │       ├──> setThis() ← 在这里设置 t_scheduler = this
+    │       │
+    │       └──> while(true) 调度循环
+    │               ├── 执行 IOManager 的协程     ← GetThis() != nullptr ✓
+    │               ├── 空闲等待（idle）          ← GetThis() != nullptr ✓
+    │               ├── 执行用户代码              ← GetThis() != nullptr ✓
+    │               └── 用户代码中调用 IO 函数    ← GetThis() != nullptr ✓
+    │
+    └──> 线程退出（t_scheduler 被清空）
+```
+
+**关键代码**：
+```cpp
+// scheduler.cc
+void Scheduler::run() {
+    setThis();  // ← 进入 run() 立即设置，整个 run() 期间有效
+
+    while(true) {
+        // 无论在循环的哪个位置
+        // GetThis() 都会返回当前 IOManager 指针
+        // Hook 都会自动生效！
+    }
+}
+```
+
+**重要结论**：
+- ✅ **在 IOManager 工作线程中，任何代码调用 IO 函数都会被 Hook**
+- ✅ **无需手动调用 `set_hook_enable()`**
+- ✅ **不仅限于协程内部，协程外的调度逻辑同样生效**
+
+这也是为什么推荐使用 IOManager 的原因：**只要把代码放入 IOManager 调度，Hook 就自动生效，完全透明**。
+
+#### use_caller=true 时主线程的特殊情况
+
+当 `use_caller=true` 时，主线程也作为工作线程使用，但其 `GetThis()` 的设置时机与子线程不同：
+
+**时间线对比**：
+```cpp
+int main() {
+    // ============ 主线程 ============
+    sylar::IOManager iom(1, true, "Test");  // use_caller=true
+
+    // 1. 构造函数中已执行 t_scheduler = this
+    // 2. 此时主线程 GetThis() 已经非空！
+    sleep(1);  // ✓ Hook 自动生效
+
+    iom.schedule([]() {
+        sleep(1);  // 子线程中也生效
+    });
+
+    iom.stop();  // 3. 主线程此时才进入 run()
+}
+```
+
+**关键代码位置**：
+```cpp
+// scheduler.cc 构造函数第 34 行
+if (use_caller) {
+    t_scheduler = this;  // ← 主线程在构造时就设置好了
+    // ...
+}
+```
+
+**主线程 vs 子线程对比**：
+
+| 线程类型 | GetThis() 设置时机 | 进入 run() 时机 | Hook 生效时机 |
+|---------|-------------------|----------------|---------------|
+| 主线程 (use_caller=true) | 构造函数中 | stop() 调用时 | **构造后立即生效** |
+| 子线程 | run() 入口 | 线程启动后立即 | 进入 run() 后生效 |
+
+**实际应用示例**：
+```cpp
+// test_hook.cc 中的用法
+sylar::IOManager iom(1, true, "HookTest");  // use_caller=true
+
+// 在主线程中直接测试 Hook 开关
+test_hook_switch();  // 这是在主线程中执行的
+
+// 然后在 IOManager 中调度其他测试
+iom.schedule(test_sleep);
+iom.schedule(test_pipe_io);
+```
+
+**重要提示**：
+- `use_caller=true` 的主要目的是让主线程参与调度
+- 但副作用是：**构造完成后，主线程的 `GetThis()` 就非空了**
+- 这意味着主线程在 `stop()` 之前的任何 IO 函数调用都会被自动 Hook
+
+#### 如何控制 Hook 行为
+
+如果不想让某些 IO 操作被 Hook，有以下几种方式：
+
+**方式一：关闭线程级 Hook 开关**
+```cpp
+// 只影响当前线程
+sylar::set_hook_enable(false);
+```
+
+**方式二：设置 fd 为非阻塞（fd 级控制，推荐）**
+```cpp
+// 只影响特定 socket，不影响其他 fd
+int flags = fcntl(sockfd, F_GETFL, 0);
+fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+// 之后这个 sockfd 的 IO 操作不会被 Hook
+```
+
+**方式三：不在 IOManager 线程中执行**
+```cpp
+// 在普通线程中执行，GetThis() 返回 nullptr
+std::thread t([]() {
+    write(fd, buf, len);  // 不会被 Hook
+});
+```
+
+**设计理念**：
+```cpp
+// hook.cc 第 147 行的判断逻辑
+if (!ctx || ctx->isClose() || !ctx->isSocket() || ctx->getUserNonblock()) {
+    return fun(fd, args...);  // 不 Hook，直接调用原始函数
+}
+```
+
+- 用户主动设置 `O_NONBLOCK` = "我知道我在做非阻塞 IO"
+- 框架不应该再 Hook，直接调用原始函数
+- 这是**fd 级别的细粒度控制**，比线程级开关更灵活
+
+**实际应用场景**：
+```cpp
+// 某个第三方库需要自己管理 IO，不想被 Hook
+int lib_fd = socket(...);
+fcntl(lib_fd, F_SETFL, O_NONBLOCK);  // 标记为用户管理
+// 之后该库的所有 IO 操作都不会被 Hook 干扰
+```
+
+#### 为什么要双重条件？
+
+1. **灵活性**：通过 `is_hook_enable()` 提供手动控制能力
+2. **自动化**：通过 `IOManager::GetThis()` 实现协程调度器内的自动 Hook
+3. **安全性**：避免在非协程环境下错误地使用 Hook 逻辑
+
+#### 实际应用场景
+
+| 场景 | is_hook_enable | GetThis() | Hook 是否生效 |
+|------|----------------|-----------|---------------|
+| 主线程创建 Socket | false | nullptr | ❌ 不生效 |
+| IOManager 协程中 sleep | false | 非空 | ✅ **生效**（自动） |
+| 手动 set_hook_enable(true) | true | nullptr | ✅ 生效（手动） |
+| IOManager + 手动 enable | true | 非空 | ✅ 生效（双重确认） |
+
+#### 最佳实践建议
+
+1. **推荐使用方式二**：让 IOManager 自动管理 Hook，无需手动调用 `set_hook_enable()`
+2. **测试验证**：参考 `tests/test_hook.cc` 中的测试用例
+3. **注意事项**：确保在 IOManager 的调度上下文中调用 IO 函数
 
 ---
