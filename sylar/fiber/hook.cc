@@ -9,7 +9,7 @@
 #include "sylar/fiber/iomanager.h"
 #include "sylar/log/logger.h"
 #include "sylar/base/macro.h"       // For SYLAR_LIKELY, SYLAR_UNLIKELY
-#include "sylar/net/fd_manager.h"   // For FdManager, FdCtx
+#include "sylar/fiber/fd_manager.h" // For FdManager, FdCtx
 #include "sylar/base/config.h"      // For ConfigVar
 
 // 定义一个静态的logger，用于hook模块的日志输出
