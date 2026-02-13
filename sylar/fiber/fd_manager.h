@@ -7,8 +7,8 @@
  * @date 2019-05-30
  * @copyright Copyright (c) 2019年 sylar.yin All rights reserved (www.sylar.top)
  */
-#ifndef __FD_MANAGER_H__
-#define __FD_MANAGER_H__
+#ifndef __SYLAR_FD_MANAGER_H__
+#define __SYLAR_FD_MANAGER_H__
 
 #include <memory>
 #include <vector>
