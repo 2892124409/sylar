@@ -362,7 +362,136 @@ if(logger->getLevel() <= level) { // 1. 级别判断
 
 ---
 
-### 5. 位域（Bit Field）优化
+### 5. Endian (字节序处理)
+
+#### 类作用
+字节序转换工具，用于处理大端（Big Endian）和小端（Little Endian）之间的转换，主要用于网络编程中的字节序处理。
+
+#### 核心 API
+
+| 函数 | 功能 |
+|------|------|
+| `byteswap<T>(T value)` | 无条件字节序转换（2/4/8 字节） |
+| `byteswapOnLittleEndian<T>(T value)` | 只在小端机器上转换 |
+| `byteswapOnBigEndian<T>(T value)` | 只在大端机器上转换 |
+
+#### 遇到的问题
+
+##### Q: `typename std::enable_if<sizeof(T) == sizeof(uint64_t), T>::type` 是什么意思？
+
+**A**: 这是 C++11 的 **SFINAE (Substitution Failure Is Not An Error)** 技术，用于模板函数的重载选择。
+
+**核心含义**：只有当 T 的大小等于 8 字节时，这个 `byteswap` 函数才会被编译器选中。
+
+**工作原理**：
+- `std::enable_if<条件, 类型>::type` - 如果条件为 true，则 `::type` 等于指定类型；否则没有 `::type` 成员
+- `sizeof(T) == sizeof(uint64_t)` - 检查类型大小是否为 8 字节
+- 编译器会根据类型大小自动选择正确的重载版本
+
+**实际效果**：
+```cpp
+uint64_t a = 0x123456789ABCDEF0;
+byteswap(a);  // 选择 8 字节版本 → bswap_64()
+
+uint32_t b = 0x12345678;
+byteswap(b);  // 选择 4 字节版本 → bswap_32()
+
+uint16_t c = 0x1234;
+byteswap(c);  // 选择 2 字节版本 → bswap_16()
+```
+
+**设计优势**：
+- **类型安全**：编译期检查，不会调用错误的函数
+- **通用性**：支持任何大小匹配的类型（int、long、double 等）
+- **零运行时开销**：编译期决定，零性能损失
+
+##### Q: `#if BYTE_ORDER == BIG_ENDIAN` 这些条件编译指令是什么意思？
+
+**A**: 这是 C/C++ 的**预处理器条件编译**指令，用于在编译时根据系统字节序选择不同的代码。
+
+**工作流程**：
+
+1. **检测系统字节序**
+   ```cpp
+   #if BYTE_ORDER == BIG_ENDIAN
+   #define SYLAR_BYTE_ORDER SYLAR_BIG_ENDIAN
+   #else
+   #define SYLAR_BYTE_ORDER SYLAR_LITTLE_ENDIAN
+   #endif
+   ```
+
+2. **根据字节序选择代码**
+   ```cpp
+   #if SYLAR_BYTE_ORDER == SYLAR_BIG_ENDIAN    // 大端系统的代码
+       template <class T>
+       T byteswapOnLittleEndian(T t) {
+           return t;  // 大端系统上不转换
+       }
+   #else    // 小端系统的代码
+       template <class T>
+       T byteswapOnLittleEndian(T t) {
+           return byteswap(t);  // 小端系统上需要转换
+       }
+   #endif
+   ```
+
+**编译后的结果**：
+
+在小端系统（x86）上：
+```cpp
+// 只保留小端代码
+template <class T>
+T byteswapOnLittleEndian(T t) {
+    return byteswap(t);  // 执行字节交换
+}
+```
+
+在大端系统上：
+```cpp
+// 只保留大端代码
+template <class T>
+T byteswapOnLittleEndian(T t) {
+    return t;  // 不转换，零开销
+}
+```
+
+**设计理由**：
+
+网络字节序是大端，所以：
+- **小端机器**（x86/x64）：需要转换（主机字节序 ↔ 网络字节序）
+- **大端机器**：不需要转换（已经是网络字节序）
+
+`byteswapOnLittleEndian()` 的语义是：
+> **"只在小端机器上转换字节序，在大端机器上什么都不做"**
+
+**优势对比**：
+
+| 方式 | 优点 | 缺点 |
+|------|------|------|
+| 条件编译 | 编译期决定，零运行时开销 | 需要重新编译 |
+| 运行时检查 | 灵活 | 每次调用都要判断，有性能开销 |
+
+**实际应用示例**：
+```cpp
+// 在小端系统（x86）上
+uint16_t port = 8080;
+uint16_t network_port = byteswapOnLittleEndian(port);
+// 实际执行：network_port = bswap(8080) = 0x1F90
+
+// 在大端系统上
+uint16_t port = 8080;
+uint16_t network_port = byteswapOnLittleEndian(port);
+// 实际执行：network_port = 8080（不转换）
+```
+
+**总结**：
+- 条件编译在编译期就解决了字节序问题
+- 避免了运行时判断的开销
+- 这是 C/C++ 中处理跨平台差异的经典技巧
+
+---
+
+### 6. 位域（Bit Field）优化
 #### 类作用
 精确控制类成员变量的内存占用，通过指定每个成员占用的位数，实现内存压缩。
 
