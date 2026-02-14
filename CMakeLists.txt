@@ -67,3 +67,7 @@ target_link_libraries(test_timer sylar)
 add_executable(test_hook tests/test_hook.cc)
 
 target_link_libraries(test_hook sylar)
+
+add_executable(test_endian tests/test_endian.cc)
+target_link_libraries(test_endian sylar)
+
