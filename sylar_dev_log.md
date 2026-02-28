@@ -2110,3 +2110,896 @@ fcntl(lib_fd, F_SETFL, O_NONBLOCK);  // 标记为用户管理
 3. **注意事项**：确保在 IOManager 的调度上下文中调用 IO 函数
 
 ---
+
+## 网络模块 (Net Module)
+
+### 1. sockaddr 结构体深度解析
+#### 模块作用
+`sockaddr` 是网络编程中用于表示**通用 socket 地址**的基础结构体，是所有网络地址操作的基石。
+
+#### sockaddr 结构定义
+
+```cpp
+// 在 <sys/socket.h> 中定义
+struct sockaddr {
+    sa_family_t sa_family;  // 地址族 (2字节) - AF_INET, AF_INET6, AF_UNIX 等
+    char        sa_data[14]; // 地址数据 (14字节) - 存储具体地址信息
+};
+```
+
+**内存布局示意**：
+```
+┌─────────────────────────────────────┐
+│          sockaddr (16字节)           │
+├──────────────┬──────────────────────┤
+│ sa_family    │     sa_data[14]      │
+│  (2字节)     │      (14字节)        │
+│              │  存储具体地址信息     │
+└──────────────┴──────────────────────┘
+```
+
+#### 为什么需要 sockaddr？
+
+**核心问题**：不同协议的地址格式完全不同：
+- IPv4 地址：4字节 IP + 2字节端口 = 6字节
+- IPv6 地址：16字节 IP + 2字节端口 + 4字节流信息 = 22字节
+- Unix 域套接字：文件路径（可变长度）
+
+**设计目的**：提供统一的接口，让 `bind()`, `connect()`, `sendto()` 等系统函数能够处理任何类型的地址。
+
+#### 具体协议的结构体
+
+##### (1) sockaddr_in (IPv4 地址)
+
+```cpp
+struct sockaddr_in {
+    sa_family_t    sin_family;  // AF_INET (2字节)
+    in_port_t      sin_port;    // 端口，网络字节序 (2字节)
+    struct in_addr sin_addr;    // IP地址 (4字节)
+    char           sin_zero[8]; // 填充，保持16字节对齐
+};
+
+struct in_addr {
+    uint32_t s_addr;  // IPv4地址，网络字节序
+};
+```
+
+**内存布局**：
+```
+┌──────────────┬──────────────┬──────────────┬──────────────┐
+│  sin_family  │   sin_port   │   sin_addr   │   sin_zero   │
+│    (2字节)   │    (2字节)   │    (4字节)   │    (8字节)   │
+└──────────────┴──────────────┴──────────────┴──────────────┘
+                        总共 16 字节
+```
+
+**示例**：
+```cpp
+struct sockaddr_in addr;
+addr.sin_family = AF_INET;
+addr.sin_port = htons(8080);           // 主机序转网络序
+addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+// 使用时强制转换为 sockaddr*
+bind(sockfd, (struct sockaddr*)&addr, sizeof(addr));
+```
+
+##### (2) sockaddr_in6 (IPv6 地址)
+
+```cpp
+struct sockaddr_in6 {
+    sa_family_t     sin6_family;   // AF_INET6 (2字节)
+    in_port_t       sin6_port;     // 端口 (2字节)
+    uint32_t        sin6_flowinfo; // 流信息 (4字节)
+    struct in6_addr sin6_addr;     // IPv6地址 (16字节)
+    uint32_t        sin6_scope_id; // 作用域ID (4字节)
+};
+
+struct in6_addr {
+    uint8_t s6_addr[16];  // 128位IPv6地址
+};
+```
+
+**内存布局**：
+```
+┌───────────┬───────────┬───────────────┬───────────┬───────────────┐
+│sin6_family│ sin6_port │ sin6_flowinfo │ sin6_addr │ sin6_scope_id│
+│  (2字节)  │  (2字节)  │   (4字节)     │ (16字节)  │   (4字节)     │
+└───────────┴───────────┴───────────────┴───────────┴───────────────┘
+                        总共 28 字节
+```
+
+##### (3) sockaddr_un (Unix 域套接字)
+
+```cpp
+struct sockaddr_un {
+    sa_family_t sun_family;  // AF_UNIX
+    char        sun_path[];  // 路径名（可变长度）
+};
+```
+
+用于本地进程间通信（IPC），路径通过文件系统访问。
+
+#### 结构体对比
+
+| 结构体 | 地址族 | 大小 | 用途 |
+|--------|--------|------|------|
+| `sockaddr` | 通用 | 16字节 | 统一接口，强制类型转换用 |
+| `sockaddr_in` | AF_INET | 16字节 | IPv4 地址 |
+| `sockaddr_in6` | AF_INET6 | 28字节 | IPv6 地址 |
+| `sockaddr_un` | AF_UNIX | 可变 | 本地进程间通信 |
+
+#### Address 类中的设计
+
+```cpp
+// address.h:36 - 虚函数设计
+virtual const sockaddr* getAddr() const = 0;
+virtual sockaddr* getAddr() = 0;
+virtual socklen_t getAddrLen() const = 0;
+```
+
+**设计优势**：
+1. **统一接口**：无论 IPv4/IPv6/Unix，都返回 `sockaddr*`
+2. **多态封装**：通过虚函数实现类型透明操作
+3. **直接传参**：返回值可直接传给 `bind()`, `connect()` 等系统函数
+
+**IPv4Address 实现**：
+```cpp
+const sockaddr* IPv4Address::getAddr() const {
+    return (sockaddr*)&m_addr;  // m_addr 是 sockaddr_in 类型
+}
+
+socklen_t IPv4Address::getAddrLen() const {
+    return sizeof(m_addr);  // 返回 16
+}
+```
+
+#### 网络字节序
+
+**重要概念**：网络字节序是大端（Big Endian），而 x86/x64 是小端（Little Endian）。
+
+| 函数 | 功能 | 示例 |
+|------|------|------|
+| `htons()` | Host to Network Short (端口) | `htons(8080)` |
+| `htonl()` | Host to Network Long (IP) | `htonl(0x7F000001)` |
+| `ntohs()` | Network to Host Short | `ntohs(port)` |
+| `ntohl()` | Network to Host Long | `ntohl(addr)` |
+
+**为什么需要转换**？
+- 网络协议规定数据传输使用大端序
+- 不同主机可能有不同的字节序
+- 通过转换确保数据在网络传输中的一致性
+
+**在 Address 类中的应用**：
+```cpp
+// 存储时转网络序
+m_addr.sin_port = byteswapOnLittleEndian(port);
+m_addr.sin_addr.s_addr = byteswapOnLittleEndian(address);
+
+// 读取时转主机序
+return byteswapOnLittleEndian(m_addr.sin_port);
+```
+
+#### 遇到的问题
+
+##### Q: 为什么要用 `(sockaddr*)` 强制类型转换？
+
+**A**: 这是 C 语言实现多态的经典技巧。
+
+**原理**：
+1. `sockaddr` 是"通用接口容器"
+2. `sockaddr_in` 等是"具体数据类型"
+3. 它们的前 2 字节都是 `sa_family`，可以通过这个字段区分类型
+4. 系统函数内部会根据 `sa_family` 判断实际类型
+
+**示例**：
+```cpp
+// 系统函数内部（伪代码）
+int bind(int sockfd, const sockaddr* addr, socklen_t addrlen) {
+    switch (addr->sa_family) {
+        case AF_INET:
+            // 知道这是 sockaddr_in，按 IPv4 处理
+            struct sockaddr_in* in = (struct sockaddr_in*)addr;
+            // 使用 in->sin_port, in->sin_addr 等
+            break;
+        case AF_INET6:
+            // 知道这是 sockaddr_in6，按 IPv6 处理
+            break;
+    }
+}
+```
+
+##### Q: 为什么不直接用 `sockaddr*` 作为成员类型？
+
+**A**: 因为 `sockaddr` 的 `sa_data[14]` 太难用。
+
+**问题**：
+1. 只有 14 字节，IPv6 都放不下（需要 26 字节）
+2. 没有字段名，必须手动计算偏移量
+3. 代码可读性差，容易出错
+
+**正确做法**：
+```cpp
+// ✅ 使用具体类型
+struct sockaddr_in m_addr;  // 有 sin_port, sin_addr 等清晰字段
+
+// 需要时再转换
+return (sockaddr*)&m_addr;
+```
+
+##### Q: sin_zero 字段是干什么用的？
+
+**A**: 这是为了**内存对齐**和**结构体大小统一**。
+
+**历史原因**：
+- 早期设计要求 `sockaddr` 和 `sockaddr_in` 大小相同（16字节）
+- `sockaddr_in` 实际只需要 8 字节，剩下 8 字节用 `sin_zero` 填充
+
+**用途**：
+1. 确保两种结构体可以安全地相互转换
+2. 满足内存对齐要求，提高访问效率
+3. 保持与旧代码的兼容性
+
+**现代处理**：
+```cpp
+struct sockaddr_in addr;
+memset(&addr, 0, sizeof(addr));  // 清零，包括 sin_zero
+// 或者使用 C++11
+struct sockaddr_in addr {};
+```
+
+##### Q: 为什么需要网络字节序？
+
+**A**: 为了**跨平台通信的一致性**。
+
+**场景**：
+```
+主机A (小端) ←--网络传输--→ 主机B (大端)
+
+如果都用主机序：
+A发送: 0x1234 (小端: 34 12)
+B接收: 读作 0x1234 (大端理解为 34 12 = 0x3412) ❌ 数据错误！
+
+如果都用网络序 (大端)：
+A发送: 0x1234 → 转大端 → 12 34
+B接收: 读作 0x1234 ✓ 正确！
+```
+
+**类比**：
+- 就像不同国家的人交流，约定使用英语
+- 网络字节序就是网络世界的"通用语言"
+
+### 2. DNS 解析详解
+#### 什么是 DNS？
+
+**DNS (Domain Name System)** = 域名系统，是互联网的"电话簿"。
+
+| 人类友好 | 机器友好 |
+|----------|----------|
+| `www.baidu.com` | `110.242.68.66` |
+| `www.google.com` | `142.250.185.46` |
+| 域名（好记） | IP地址（机器用） |
+
+#### DNS 解析是什么？
+
+**DNS 解析** = 把域名翻译成 IP 地址的过程。
+
+**完整流程示意**：
+```
+用户在浏览器输入: www.baidu.com
+              ↓
+    浏览器问 DNS 服务器: "www.baidu.com 的 IP 是多少？"
+              ↓
+    DNS 服务器查找并返回: "是 110.242.68.66"
+              ↓
+        浏览器用 IP 地址连接服务器
+```
+
+#### 代码中的体现
+
+```cpp
+// 你可以这样连接
+connect(sockfd, "110.242.68.66", 80);  // ❌ 需要记住 IP
+
+// 但也可以这样（DNS解析后）
+connect(sockfd, "www.baidu.com", 80);  // ✅ 只需要记住域名
+//           ^^^^^^^^^^^^^^
+//           程序内部会自动解析成 IP
+```
+
+#### Address 类中的 DNS 解析函数
+
+##### (1) `Lookup()` - 最基础的解析函数
+
+```cpp
+static bool Lookup(std::vector<Address::ptr>& result,
+                   const std::string& host,
+                   int family = AF_UNSPEC,
+                   int type = 0,
+                   int protocol = 0);
+```
+
+**作用**：把域名解析成地址列表
+
+**参数说明**：
+
+| 参数 | 含义 | 示例 |
+|------|------|------|
+| `result` | 输出参数，存储解析结果 | - |
+| `host` | 域名或 IP 地址 | `"www.baidu.com"` |
+| `family` | 地址族限制 | `AF_INET`(只要IPv4), `AF_INET6`(只要IPv6), `AF_UNSPEC`(都可) |
+| `type` | socket 类型 | `SOCK_STREAM`(TCP), `SOCK_DGRAM`(UDP) |
+| `protocol` | 协议类型 | `IPPROTO_TCP`, `IPPROTO_UDP` |
+
+**使用示例**：
+```cpp
+std::vector<Address::ptr> result;
+
+// 解析百度域名
+bool ok = Address::Lookup(result, "www.baidu.com", AF_INET);
+
+if (ok) {
+    for (auto& addr : result) {
+        std::cout << addr->toString() << std::endl;
+        // 输出类似: 110.242.68.66:80
+    }
+}
+```
+
+##### (2) `LookupAny()` - 只返回第一个结果
+
+```cpp
+static Address::ptr LookupAny(const std::string& host,
+                              int family = AF_UNSPEC,
+                              int type = 0,
+                              int protocol = 0);
+```
+
+**作用**：返回任意一个匹配的地址（通常第一个）
+
+**使用场景**：当你不在乎有多个 IP，随便连一个就行
+
+**示例**：
+```cpp
+Address::ptr addr = Address::LookupAny("www.baidu.com");
+if (addr) {
+    std::cout << "连接到: " << addr->toString() << std::endl;
+}
+```
+
+##### (3) `LookupAnyIPAddress()` - 只要 IP 地址
+
+```cpp
+static std::shared_ptr<IPAddress> LookupAnyIPAddress(
+    const std::string& host,
+    int family = AF_UNSPEC,
+    int type = 0,
+    int protocol = 0);
+```
+
+**作用**：返回任意一个 IP 地址（排除 Unix 域套接字等）
+
+**为什么需要这个函数**？
+
+因为 `Lookup` 可能返回多种类型的地址：
+- IPv4 地址
+- IPv6 地址
+- Unix 域套接字地址
+
+但有时候你只想要 IP 地址，这时用这个函数更安全。
+
+**示例**：
+```cpp
+IPAddress::ptr ip = Address::LookupAnyIPAddress("www.google.com");
+if (ip) {
+    uint16_t port = ip->getPort();  // IP 地址才有端口
+    ip->setPort(8080);              // 设置端口
+}
+```
+
+#### 支持的格式
+
+Address 类的 `Lookup` 函数支持多种输入格式：
+
+```cpp
+// 格式1: 纯域名
+Address::Lookup(result, "www.baidu.com");
+
+// 格式2: 域名:端口
+Address::Lookup(result, "www.baidu.com:80");
+
+// 格式3: IPv4:端口
+Address::Lookup(result, "127.0.0.1:8080");
+
+// 格式4: [IPv6]:端口
+Address::Lookup(result, "[2001:db8::1]:8080");
+```
+
+**解析逻辑**（address.cc 第 118-148 行）：
+1. 检查是否是 IPv6 格式 `[IPv6]:port`
+2. 检查是否是 `host:port` 格式
+3. 提取 node（主机）和 service（端口）
+4. 调用 `getaddrinfo()` 进行 DNS 解析
+
+#### 实际应用场景
+
+##### 场景1：HTTP 客户端
+
+```cpp
+class HttpClient {
+public:
+    void connect(const std::string& url) {
+        // 从 URL 中提取域名
+        std::string host = extractHost(url);  // "www.baidu.com"
+
+        // DNS 解析
+        IPAddress::ptr addr = Address::LookupAnyIPAddress(host);
+
+        if (!addr) {
+            std::cerr << "DNS 解析失败！" << std::endl;
+            return;
+        }
+
+        // 设置 HTTP 端口
+        addr->setPort(80);
+
+        // 连接服务器
+        int sockfd = socket(addr->getFamily(), SOCK_STREAM, 0);
+        ::connect(sockfd, addr->getAddr(), addr->getAddrLen());
+    }
+};
+```
+
+##### 场景2：负载均衡
+
+一个域名可能对应多个 IP：
+
+```cpp
+std::vector<Address::ptr> result;
+Address::Lookup(result, "www.google.com");
+
+// 返回多个 IP，可以选择：
+// 1. 随机选一个（简单的负载均衡）
+// 2. 按顺序尝试（故障转移）
+// 3. 根据响应时间选择（智能路由）
+```
+
+#### 底层实现原理
+
+Address 类使用的是 Linux 的 `getaddrinfo()` 函数：
+
+```cpp
+// address.cc 中的实现
+int error = getaddrinfo(node.c_str(), service, &hints, &results);
+//                                        ^^^^^^
+//                                        DNS解析就在这里！
+
+// getaddrinfo 会：
+// 1. 查询 /etc/hosts 文件
+// 2. 查询 DNS 服务器（如 8.8.8.8）
+// 3. 返回所有匹配的地址
+```
+
+**getaddrinfo 的查询流程**：
+```
+getaddrinfo("www.baidu.com", "80", ...)
+      ↓
+1. 检查 /etc/hosts 文件（本地缓存）
+      ↓
+2. 查询 DNS 服务器（/etc/resolv.conf）
+      ↓
+3. 返回所有匹配的地址链表
+```
+
+#### 对比：手动 vs DNS 解析
+
+| 方式 | 优点 | 缺点 |
+|------|------|------|
+| **硬编码 IP** | 简单直接 | IP 变了要改代码，不可靠 |
+| **DNS 解析** | 灵活，域名不变即可 | 需要网络查询，有轻微延迟 |
+
+```cpp
+// ❌ 硬编码 IP（不可靠）
+connect("110.242.68.66", 80);  // 百度换了 IP 就挂了
+
+// ✅ DNS 解析（推荐）
+IPAddress::ptr addr = Address::LookupAnyIPAddress("www.baidu.com");
+connect(addr->getAddr(), addr->getAddrLen());
+```
+
+#### 遇到的问题
+
+##### Q: 一个域名为什么会有多个 IP 地址？
+
+**A**: 为了**负载均衡**和**高可用性**。
+
+1. **负载均衡**：将请求分散到多台服务器
+   ```
+   client → www.google.com
+              ↓
+          142.250.1.1 (服务器A)
+          142.250.1.2 (服务器B)
+          142.250.1.3 (服务器C)
+   ```
+
+2. **故障转移**：某台服务器挂了，自动用其他 IP
+
+3. **地理位置优化**：返回离用户最近的服务器 IP
+
+##### Q: DNS 解析失败怎么办？
+
+**A**: Address::Lookup 会返回 false。
+
+```cpp
+std::vector<Address::ptr> result;
+if (!Address::Lookup(result, "invalid-domain.xyz")) {
+    // 处理失败情况
+    SYLAR_LOG_ERROR(g_logger) << "DNS 解析失败";
+    return;
+}
+```
+
+**常见失败原因**：
+- 域名不存在
+- 网络不通
+- DNS 服务器无响应
+
+##### Q: 为什么不直接用 `getaddrinfo()`？
+
+**A**: Address 类是对 `getaddrinfo()` 的封装，提供了：
+
+1. **面向对象接口**：返回 `Address::ptr` 而不是原始的 `sockaddr*`
+2. **自动类型识别**：根据 `sa_family` 创建正确的子类
+3. **错误处理**：日志记录和异常处理
+4. **格式支持**：支持 `host:port` 格式解析
+
+**对比**：
+
+```cpp
+// 使用原始 getaddrinfo（复杂）
+struct addrinfo hints, *result;
+memset(&hints, 0, sizeof(hints));
+hints.ai_family = AF_INET;
+int error = getaddrinfo("www.baidu.com", "80", &hints, &result);
+if (error != 0) {
+    // 错误处理
+}
+// 使用 result...
+freeaddrinfo(result);
+
+// 使用 Address::Lookup（简洁）
+std::vector<Address::ptr> result;
+Address::Lookup(result, "www.baidu.com:80", AF_INET);
+// 直接使用 result...
+```
+
+### 3. 网段计算函数详解
+#### 三大网段计算函数
+
+IPAddress 类中提供了三个用于网段计算的纯虚函数：
+
+| 函数 | 作用 | 使用场景 |
+|------|------|----------|
+| `broadcastAddress(prefix_len)` | 获取广播地址 | 向网段发送广播消息 |
+| `networkAddress(prefix_len)` | 获取网段地址 | 判断 IP 是否在同一网段 |
+| `subnetMask(prefix_len)` | 获取子网掩码 | 配置网络或显示 |
+
+#### 前置知识：IP 地址结构
+
+```
+完整的 IP 地址包含两部分：
+
+IP: 192.168.1.100
+   ├── 网络部分 ──┼── 主机部分 ──┤
+   192.168.1.     100
+   ↑              ↑
+标识网段       标识主机
+```
+
+#### (1) broadcastAddress() - 广播地址
+
+**广播地址** = 向网段内所有主机发送消息的地址
+
+```
+网段: 192.168.1.0/24
+广播地址: 192.168.1.255
+
+发送到 192.168.1.255 的消息
+    ↓
+该网段内所有主机都能收到
+```
+
+**使用示例**：
+```cpp
+IPv4Address::ptr addr = IPv4Address::Create("192.168.1.100", 0);
+IPv4Address::ptr broadcast = addr->broadcastAddress(24);
+
+std::cout << broadcast->toString() << std::endl;
+// 输出: 192.168.1.255:0
+
+// 发送广播消息
+sendto(sockfd, data, len, 0,
+       broadcast->getAddr(),
+       broadcast->getAddrLen());
+```
+
+**计算原理**：
+```
+IP:     192.168.1.100  → 11000000.10101000.00000001.01100100
+掩码:   255.255.255.0  → 11111111.11111111.11111111.00000000
+取反:   0.0.0.255       → 00000000.00000000.00000000.11111111
+
+广播地址 = IP | 取反的掩码
+        = 192.168.1.100 | 0.0.0.255
+        = 192.168.1.255
+```
+
+#### (2) networkAddress() - 网段地址
+
+**网段地址** = 该 IP 所属的网段标识（主机部分全 0）
+
+```
+IP: 192.168.1.100/24
+网段: 192.168.1.0
+
+含义: 这个 IP 属于 192.168.1.0 这个网段
+```
+
+**使用场景**：
+```cpp
+// 检查两个 IP 是否在同一网段
+bool isSameNetwork(IPAddress::ptr ip1, IPAddress::ptr ip2, int prefix_len) {
+    return ip1->networkAddress(prefix_len)->toString() ==
+           ip2->networkAddress(prefix_len)->toString();
+}
+
+// 使用
+if (isSameNetwork(addr1, addr2, 24)) {
+    std::cout << "在同一网段" << std::endl;
+}
+```
+
+**计算原理**：
+```
+IP:     192.168.1.100  → 11000000.10101000.00000001.01100100
+掩码:   255.255.255.0  → 11111111.11111111.11111111.00000000
+
+网段地址 = IP & 掩码
+        = 192.168.1.100 & 255.255.255.0
+        = 192.168.1.0
+```
+
+#### (3) subnetMask() - 子网掩码
+
+**子网掩码** = 用于区分网络部分和主机部分
+
+**使用示例**：
+```cpp
+IPv4Address::ptr addr = IPv4Address::Create("192.168.1.100", 0);
+IPv4Address::ptr mask = addr->subnetMask(24);
+
+std::cout << mask->toString() << std::endl;
+// 输出: 255.255.255.0:0
+```
+
+#### 常用前缀长度对照表
+
+| 前缀长度 | 子网掩码 | 可用主机数 | 用途 |
+|----------|----------|------------|------|
+| /8 | 255.0.0.0 | 1677 万 | A 类网络 |
+| /16 | 255.255.0.0 | 6.5 万 | B 类网络 |
+| /24 | 255.255.255.0 | 254 | C 类网络（最常用） |
+| /32 | 255.255.255.255 | 1 | 单个主机 |
+
+#### 实际应用场景
+
+**场景1：局域网设备发现**
+```cpp
+void discoverLocalDevices() {
+    // 获取本机网卡地址
+    std::vector<std::pair<Address::ptr, uint32_t>> ifaces;
+    Address::GetInterfaceAddresses(ifaces, "eth0", AF_INET);
+
+    auto& local_addr_pair = ifaces[0];
+    auto local_addr = std::dynamic_pointer_cast<IPAddress>(local_addr_pair.first);
+    uint32_t prefix_len = local_addr_pair.second;
+
+    // 计算广播地址
+    auto broadcast = local_addr->broadcastAddress(prefix_len);
+    broadcast->setPort(9999);
+
+    // 发送发现消息到整个网段
+    std::string msg = "DISCOVER";
+    sendto(sockfd, msg.c_str(), msg.size(), 0,
+           broadcast->getAddr(), broadcast->getAddrLen());
+}
+```
+
+**场景2：检查网段连通性**
+```cpp
+bool isSameSubnet(const std::string& ip1, const std::string& ip2, int prefix_len) {
+    IPAddress::ptr addr1 = IPAddress::Create(ip1.c_str());
+    IPAddress::ptr addr2 = IPAddress::Create(ip2.c_str());
+
+    auto network1 = addr1->networkAddress(prefix_len);
+    auto network2 = addr2->networkAddress(prefix_len);
+
+    return network1->toString() == network2->toString();
+}
+```
+
+#### 网段可视化示意
+
+```
+网段: 192.168.1.0/24
+
+网络地址:   192.168.1.0     (networkAddress)
+首地址:     192.168.1.1     ← 第一个可用主机
+            192.168.1.2
+            ...
+            192.168.1.100   ← 你的 IP
+            ...
+            192.168.1.254   ← 最后一个可用主机
+广播地址:   192.168.1.255   (broadcastAddress)
+```
+
+### 4. 日志器初始化模式
+#### 问题：为什么每个 .cc 文件都有这行代码？
+
+```cpp
+static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+```
+
+这是 Sylar 框架中常见的**日志器初始化模式**。
+
+#### 代码拆解
+
+```cpp
+static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+//       ^^^^^^^^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^^^^^^^^^^
+//       类型：日志器智能指针     宏：获取名为 "system" 的日志器
+```
+
+**宏展开后的实际代码**：
+```cpp
+#define SYLAR_LOG_NAME(name) sylar::LoggerMgr::GetInstance()->getLogger(name)
+
+// 展开后：
+sylar::Logger::ptr g_logger = sylar::LoggerMgr::GetInstance()->getLogger("system");
+```
+
+#### 为什么需要这行代码？
+
+##### 原因1：方便记录日志
+
+定义后，整个文件中都可以用 `g_logger` 记录日志：
+
+```cpp
+// address.cc 中使用
+bool Address::Lookup(...) {
+    // 使用 g_logger 记录日志
+    SYLAR_LOG_DEBUG(g_logger) << "Address::Lookup getaddress(" << host << ")";
+}
+
+bool Address::GetInterfaceAddresses(...) {
+    // 同一个文件中的其他函数也可以用
+    SYLAR_LOG_DEBUG(g_logger) << "Address::GetInterfaceAddresses...";
+}
+```
+
+##### 原因2：性能优化
+
+**不使用全局变量**（每次都要查询）：
+```cpp
+// ❌ 性能较差
+void someFunction() {
+    auto logger = SYLAR_LOG_NAME("system");  // 每次调用都要查询 LoggerMgr
+    SYLAR_LOG_DEBUG(logger) << "message";
+}
+```
+
+**使用全局变量**（查询一次）：
+```cpp
+// ✅ 性能更好
+static Logger::ptr g_logger = SYLAR_LOG_NAME("system");  // 只查询一次
+
+void someFunction() {
+    SYLAR_LOG_DEBUG(g_logger) << "message";  // 直接使用
+}
+```
+
+##### 原因3：编译单元隔离
+
+不同文件可以有各自的 `g_logger`，互不干扰：
+
+```cpp
+// address.cc
+static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+
+// socket.cc
+static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+
+// 两者是不同的变量，各自在自己的文件中有效
+// 避免了命名冲突和全局变量污染
+```
+
+#### static 关键字的两个作用
+
+| 作用 | 说明 |
+|------|------|
+| **文件作用域** | 变量只在当前 .cc 文件内可见，其他文件无法访问 |
+| **只初始化一次** | 第一次使用时初始化，后续调用直接使用已初始化的实例 |
+
+#### 为什么选择 "system" 日志器？
+
+在 Sylar 框架中，日志器有层次结构：
+
+```
+root (根日志器)
+    ├── system (系统日志器) ← 基础模块用这个
+    ├── server (服务器日志器)
+    └── ... (其他模块)
+```
+
+`address.cc` 属于基础网络模块，使用 `system` 日志器比较合适。
+
+#### 对比：static vs 全局变量
+
+| 特性 | `static g_logger` | 全局 `g_logger` |
+|------|-------------------|-----------------|
+| 作用域 | 仅限当前文件 | 整个程序 |
+| 命名冲突 | 不会冲突 | 可能冲突 |
+| 封装性 | 好 | 差 |
+| 使用场景 | 模块内部日志 | 需要共享的日志 |
+
+#### 命名规范
+
+`g_logger` 是一个通用的命名约定：
+
+| 前缀 | 含义 | 示例 |
+|------|------|------|
+| `g_` | 全局变量（global） | `g_logger` |
+| `s_` | 静态变量（static） | `s_instance` |
+| `m_` | 成员变量（member） | `m_addr` |
+
+#### 完整的工作流程
+
+```cpp
+// ========== address.cc ==========
+
+// 1. 定义全局日志器（文件开始处）
+static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+
+// 2. 在函数中使用
+bool Address::Lookup(...) {
+    // 编译时，SYLAR_LOG_DEBUG 宏会展开使用 g_logger
+    SYLAR_LOG_DEBUG(g_logger) << "Address::Lookup getaddress(" << host << ")";
+    // 展开后类似：
+    // if (g_logger->getLevel() <= DEBUG) {
+    //     g_logger->log(LogEvent::ptr(...));
+    // }
+}
+
+// 3. 其他函数也可以使用
+bool Address::GetInterfaceAddresses(...) {
+    SYLAR_LOG_DEBUG(g_logger) << "Address::GetInterfaceAddresses...";
+}
+```
+
+#### 总结
+
+```
+这行代码的作用：
+1. 获取名为 "system" 的日志器
+2. 存储为文件级别的静态变量
+3. 供整个 .cc 文件使用
+
+优点：
+- 方便：一次定义，到处使用
+- 性能：只查询一次
+- 封装：文件作用域，不污染全局命名空间
+
+这就是为什么每个 .cc 文件开头都有类似这行代码的原因！
+```
+
+---
