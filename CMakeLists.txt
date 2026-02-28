@@ -26,6 +26,7 @@ set(SYLAR_SOURCES
     sylar/fiber/timer.cc
     sylar/fiber/fd_manager.cc
     sylar/fiber/hook.cc
+    sylar/net/address.cc
 )
 
 # 生成共享库 libsylar.so
@@ -70,4 +71,7 @@ target_link_libraries(test_hook sylar)
 
 add_executable(test_endian tests/test_endian.cc)
 target_link_libraries(test_endian sylar)
+
+add_executable(test_address tests/test_address.cc)
+target_link_libraries(test_address sylar)
 
