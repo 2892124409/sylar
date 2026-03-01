@@ -3003,3 +3003,1308 @@ bool Address::GetInterfaceAddresses(...) {
 ```
 
 ---
+
+## Socket 模块 (Socket Module)
+
+### 1. 为什么 Socket 类同时定义 shared_ptr 和 weak_ptr？
+
+```cpp
+class Socket : public std::enable_shared_from_this<Socket>, Noncopyable
+{
+public:
+    typedef std::shared_ptr<Socket> ptr;
+    typedef std::weak_ptr<Socket> weak_ptr;  // 为什么需要这个？
+    // ...
+};
+```
+
+#### weak_ptr 的三大用途
+
+##### 用途1：打破循环引用
+
+如果两个对象相互持有对方的 `shared_ptr`，引用计数永远不会降为 0，导致内存泄漏：
+
+```cpp
+// 问题场景：Session 和 Socket 相互引用
+class Session {
+    Socket::ptr m_socket;  // shared_ptr
+};
+
+class Socket {
+    Session::ptr m_session;  // 如果 Session 也持有 Socket::ptr
+    // 形成循环引用！两者都无法被释放
+};
+```
+
+解决方案：一方使用 `weak_ptr`：
+
+```cpp
+class Session {
+    Socket::weak_ptr m_socket;  // weak_ptr 不增加引用计数
+    // 打破循环！
+};
+```
+
+##### 用途2：安全地检查对象是否存活
+
+`weak_ptr` 允许"观察"对象，但不阻止它被销毁：
+
+```cpp
+Socket::weak_ptr weakSock = sock;  // 不增加引用计数
+
+// 稍后检查对象是否还存在
+if (auto s = weakSock.lock()) {  // lock() 返回 shared_ptr
+    // 对象还存在，可以安全使用 s
+    s->send("hello");
+} else {
+    // 对象已被销毁
+    std::cout << "Socket 已关闭" << std::endl;
+}
+```
+
+##### 用途3：Socket 特有的使用场景
+
+| 场景 | 说明 |
+|------|------|
+| **连接池管理** | 连接池持有 `weak_ptr`，外部不再使用 Socket 时能自动销毁 |
+| **异步回调** | 回调函数持有 `weak_ptr`，避免阻止 Socket 销毁 |
+| **超时清理** | 定时器检查 `weak_ptr` 是否过期，自动清理资源 |
+
+```cpp
+// 异步回调示例
+void asyncWrite(Socket::weak_ptr weakSock, const std::string& data) {
+    // 使用 IOManager 延迟执行
+    iomanager->schedule([weakSock, data]() {
+        if (auto sock = weakSock.lock()) {
+            sock->send(data.c_str(), data.size());
+        }
+        // 如果 Socket 已关闭，weakSock.lock() 返回空
+        // 不会发送数据，也不会崩溃
+    });
+}
+```
+
+#### 为什么其他类不需要 weak_ptr？
+
+| 类 | 需要 weak_ptr? | 原因 |
+|---|---|---|
+| `Logger` | 否 | 单例模式，生命周期由 LogManager 管理 |
+| `Fiber` | 否 | 由 Scheduler 管理，不需要相互引用 |
+| `Address` | 否 | 简单的数据类，没有复杂的对象关系 |
+| `Socket` | **是** | 可能与 Session、连接池等形成复杂引用关系 |
+
+#### shared_ptr vs weak_ptr 对比
+
+| 特性 | shared_ptr | weak_ptr |
+|------|------------|----------|
+| 引用计数 | 增加 | 不增加 |
+| 所有权 | 共享拥有 | 不拥有 |
+| 访问对象 | 直接访问 | 需要 lock() 转换 |
+| 对象销毁 | 会阻止 | 不阻止 |
+| 使用场景 | 主要持有者 | 观察、打破循环 |
+
+---
+
+### 2. setsockopt 系统调用详解
+
+`setsockopt` 是 Linux 系统调用，用于设置 Socket 的各种选项。
+
+#### 函数原型
+
+```cpp
+#include <sys/types.h>
+#include <sys/socket.h>
+
+int setsockopt(int sockfd, int level, int optname,
+               const void *optval, socklen_t optlen);
+```
+
+#### 参数详解
+
+```
+setsockopt(sockfd, level, optname, optval, optlen)
+             │       │        │        │       │
+             │       │        │        │       └── 选项值的长度
+             │       │        │        └────────── 选项值的指针
+             │       │        └─────────────────── 选项名称
+             │       └──────────────────────────── 选项级别
+             └──────────────────────────────────── Socket 文件描述符
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `sockfd` | int | Socket 文件描述符 |
+| `level` | int | 选项所属的协议层 |
+| `optname` | int | 具体的选项名称 |
+| `optval` | void* | 选项值的指针 |
+| `optlen` | socklen_t | 选项值的字节长度 |
+
+#### 返回值
+
+```cpp
+成功: 返回 0
+失败: 返回 -1，并设置 errno
+```
+
+#### Level（协议层）
+
+```
+┌─────────────────────────────────────────┐
+│              应用层                      │
+├─────────────────────────────────────────┤
+│  SOL_SOCKET    - Socket 通用选项         │
+├─────────────────────────────────────────┤
+│  IPPROTO_TCP   - TCP 层选项              │
+│  IPPROTO_UDP   - UDP 层选项              │
+├─────────────────────────────────────────┤
+│  IPPROTO_IP    - IP 层选项               │
+│  IPPROTO_IPV6  - IPv6 层选项             │
+├─────────────────────────────────────────┤
+│              数据链路层                   │
+└─────────────────────────────────────────┘
+```
+
+#### 常用选项详解
+
+##### Level: SOL_SOCKET（Socket 通用层）
+
+| 选项 | 值类型 | 说明 |
+|------|--------|------|
+| `SO_REUSEADDR` | int | 允许复用处于 TIME_WAIT 状态的地址 |
+| `SO_REUSEPORT` | int | 允许多个 Socket 绑定同一端口 |
+| `SO_KEEPALIVE` | int | 启用 TCP 保活机制 |
+| `SO_BROADCAST` | int | 允许发送广播 |
+| `SO_RCVBUF` | int | 接收缓冲区大小 |
+| `SO_SNDBUF` | int | 发送缓冲区大小 |
+| `SO_RCVTIMEO` | timeval | 接收超时 |
+| `SO_SNDTIMEO` | timeval | 发送超时 |
+| `SO_ERROR` | int | 获取并清除 Socket 错误状态（只读） |
+
+##### Level: IPPROTO_TCP（TCP 层）
+
+| 选项 | 值类型 | 说明 |
+|------|--------|------|
+| `TCP_NODELAY` | int | 禁用 Nagle 算法 |
+| `TCP_CORK` | int | 禁用部分发送（优化小包） |
+| `TCP_KEEPIDLE` | int | 保活空闲时间（秒） |
+| `TCP_KEEPINTVL` | int | 保活探测间隔（秒） |
+| `TCP_KEEPCNT` | int | 保活探测次数 |
+
+##### Level: IPPROTO_IP（IP 层）
+
+| 选项 | 值类型 | 说明 |
+|------|--------|------|
+| `IP_TTL` | int | IP 生存时间 |
+| `IP_TOS` | int | 服务类型 |
+| `IP_MULTICAST_TTL` | int | 组播 TTL |
+| `IP_MULTICAST_IF` | in_addr | 组播出口接口 |
+
+#### 实际使用示例
+
+##### 1. 地址复用
+
+```cpp
+int optval = 1;//1表示启用；0表示禁用（默认）
+setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+```
+
+**场景**：服务器重启时，端口可能还在 TIME_WAIT 状态（约 60 秒），不设置会绑定失败。
+
+##### 2. 设置超时
+
+```cpp
+struct timeval tv;//tv总超时时间=tv_sec+tv_usec，一个表示秒一个表示毫秒
+tv.tv_sec = 5;   // 5 秒
+tv.tv_usec = 0;  // 0 微秒
+setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+```
+
+##### 3. 禁用 Nagle 算法
+
+```cpp
+int optval = 1;
+setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval));
+```
+
+**Nagle 算法**：将多个小包合并发送，减少网络负载。但会增加延迟。
+
+| 场景 | 建议 |
+|------|------|
+| 文件传输 | 启用 Nagle（默认） |
+| 实时游戏/SSH | 禁用 Nagle |
+
+##### 4. 调整缓冲区
+
+```cpp
+int bufsize = 256 * 1024;  // 256KB
+setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+```
+
+##### 5. TCP 保活
+
+```cpp
+int keepalive = 1;
+setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+
+int idle = 60;     // 60 秒无活动后开始探测
+setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+
+int interval = 10; // 每 10 秒探测一次
+setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+
+int count = 5;     // 探测 5 次无响应则断开
+setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+```
+
+#### getsockopt（获取选项）
+
+```cpp
+int getsockopt(int sockfd, int level, int optname,
+               void *optval, socklen_t *optlen);
+```
+
+使用示例：
+
+```cpp
+int bufsize = 0;
+socklen_t len = sizeof(bufsize);
+getsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, &len);
+printf("接收缓冲区大小: %d\n", bufsize);
+```
+
+#### 在 Socket 类中的封装
+
+```cpp
+// 原始系统调用
+int val = 1;
+setsockopt(m_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+
+// Socket 类封装后
+int val = 1;
+setOption(SOL_SOCKET, SO_REUSEADDR, val);  // 更简洁
+
+// 或者用模板
+setOption<int>(SOL_SOCKET, SO_REUSEADDR, 1);  // 一步到位
+```
+
+---
+
+### 3. 套接字超时机制详解
+
+#### (1) 接收/发送超时的作用
+
+**接收超时（SO_RCVTIMEO）**：限制 `recv()`、`recvfrom()`、`accept()` 等读操作的等待时间。
+
+**发送超时（SO_SNDTIMEO）**：限制 `send()`、`sendto()`、`connect()` 等写操作的等待时间。
+
+```cpp
+// 设置接收超时为 3 秒
+sock->setRecvTimeout(3000);
+
+char buf[1024];
+int n = sock->recv(buf, sizeof(buf));
+if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+    std::cout << "接收超时！3秒内没有数据\n";
+}
+```
+
+**超时触发的场景**：
+
+| 超时类型 | 触发场景 |
+|----------|----------|
+| `SO_RCVTIMEO` | 对端没有发送数据、网络延迟、对端已断开 |
+| `SO_SNDTIMEO` | 发送缓冲区满、网络拥塞、对方不读取 |
+
+**实际应用场景**：
+
+```cpp
+// 场景1：HTTP 请求超时
+sock->setRecvTimeout(10000);  // 10 秒
+int n = sock->recv(response, sizeof(response));
+if (n < 0 && errno == EAGAIN) {
+    std::cout << "服务器 10 秒内没响应\n";
+}
+
+// 场景2：防止慢客户端攻击
+client_sock->setRecvTimeout(30000);  // 30 秒
+// 如果客户端故意慢慢发数据，30 秒内没发完就断开
+```
+
+#### (2) Timer 定时器在 Socket 中的应用
+
+**问题**：Socket 类的超时设置直接用的是系统内核的超时机制，之前开发的 Timer 定时器在哪里用上了？
+
+**答案**：在 **Hook 模块** 中！当使用协程调度器时，Timer 才会真正发挥作用。
+
+**两层超时机制**：
+
+| 机制 | 实现方式 | 适用场景 |
+|------|----------|----------|
+| 系统超时 (SO_RCVTIMEO) | 内核定时器 | 同步阻塞 IO |
+| Timer 定时器 | IOManager + epoll | 协程异步 IO |
+
+**Hook 模块中 Timer 的工作流程**：
+
+```cpp
+// hook.cc 中的 do_io 函数核心逻辑
+
+// 1. 读取 Socket 设置的超时时间（通过 setRecvTimeout/setSendTimeout 设置的）
+uint64_t timeout = ctx->getTimeout(timeout_so_type);
+
+while (true) {
+    // 2. 如果设置了超时，创建 Timer 定时器
+    if (timeout != (uint64_t)-1) {
+        timer = iom->addConditionTimer(timeout, [...](){
+            // 超时回调：
+            errno = ETIMEDOUT;           // 设置超时错误码
+            iom->cancelEvent(fd, event); // 取消 IO 事件
+            iom->schedule(fiber);        // 唤醒协程
+        }, cur_fiber);
+    }
+
+    // 3. 尝试执行 IO 操作
+    ssize_t rt = fun(fd, args...);
+
+    // 4. 如果是 EAGAIN（数据未就绪），注册 IO 事件并挂起协程
+    if (errno == EAGAIN) {
+        iom->addEvent(fd, event);
+        Fiber::YieldToHold();  // 协程让出 CPU
+
+        // 5. 协程被唤醒后检查是超时还是 IO 就绪
+        if (errno == ETIMEDOUT) { return -1; }  // 超时
+        // 否则是 IO 就绪，继续循环重试
+    }
+}
+```
+
+#### (3) Hook 对 setsockopt 的拦截
+
+**核心机制**：在 Hook 启用时，`setsockopt` 设置的超时会被拦截，存储到 `FdCtx`，而不是传给内核。
+
+```cpp
+// hook.cc 第 426-441 行
+int setsockopt(int sockfd, int level, int optname, const void *optval, socklen_t optlen)
+{
+    if (!sylar::is_hook_enable()) {
+        return setsockopt_f(sockfd, level, optname, optval, optlen);  // 未启用 Hook
+    }
+
+    if (level == SOL_SOCKET) {
+        if (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO) {
+            // 拦截！存到 FdCtx 中
+            sylar::FdCtx::ptr ctx = sylar::FdMgr::GetInstance()->get(sockfd);
+            if (ctx) {
+                const timeval* v = (const timeval*)optval;
+                ctx->setTimeout(optname, v->tv_sec * 1000 + v->tv_usec / 1000);
+            }
+            return 0;  // ⚠️ 直接返回，不调用系统 setsockopt_f！
+        }
+    }
+    return setsockopt_f(sockfd, level, optname, optval, optlen);
+}
+```
+
+**拦截流程图**：
+
+```
+用户调用 sock->setRecvTimeout(3000)
+            │
+            ▼
+    setOption(SOL_SOCKET, SO_RCVTIMEO, ...)
+            │
+            ▼
+    ::setsockopt() ──────► 被 Hook 拦截！
+            │
+            ▼
+    ┌─────────────────────────────────┐
+    │ optname == SO_RCVTIMEO?          │
+    │         │                        │
+    │         ▼                        │
+    │ ctx->setTimeout(3000)            │  ◄── 存到 FdCtx
+    │         │                        │
+    │         ▼                        │
+    │ return 0;  // 不调用系统 setsockopt │  ◄── 内核完全不知道！
+    └─────────────────────────────────┘
+```
+
+**对比**：
+
+| 场景 | setsockopt 行为 | recv/send 行为 |
+|------|----------------|---------------|
+| Hook 未启用 | 调用系统 `setsockopt_f` | 使用内核超时机制 |
+| Hook 启用 | 存到 `FdCtx`，不调用系统 | 使用 **Timer 定时器** |
+
+#### (4) 系统内核超时 vs Timer+协程超时
+
+**核心区别**：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              系统内核超时 (SO_RCVTIMEO)                           │
+├─────────────────────────────────────────────────────────────────┤
+│  线程执行 recv()                                                 │
+│       │                                                         │
+│       ▼                                                         │
+│  内核态：线程进入睡眠 (TASK_INTERRUPTIBLE)                        │
+│       │                                                         │
+│       💤💤💤  等待 3 秒...  💤💤💤                                │
+│       │                                                         │
+│       ▼                                                         │
+│  超时！唤醒线程，返回 -1                                          │
+│                                                                 │
+│  【问题】：这 3 秒线程完全闲置，无法做任何其他事情                   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│              Timer + 协程超时                                     │
+├─────────────────────────────────────────────────────────────────┤
+│  协程 A 执行 recv()                                               │
+│       │                                                         │
+│       ▼                                                         │
+│  1. 注册 epoll 事件 (非阻塞)                                      │
+│  2. 注册 Timer (3秒后触发)                                        │
+│  3. Yield 让出 CPU                                               │
+│       │                                                         │
+│       ▼                                                         │
+│  线程去执行其他协程：                                             │
+│    协程 B 处理 HTTP 请求                                          │
+│    协程 C 读取数据库                                              │
+│    协程 D 发送响应                                                │
+│       │                                                         │
+│       ▼                                                         │
+│  3 秒后 Timer 触发，唤醒协程 A                                     │
+│                                                                 │
+│  【优势】：这 3 秒线程持续工作，利用率 100%                         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**详细对比表**：
+
+| 维度 | 系统内核超时 | Timer + 协程超时 |
+|------|-------------|-----------------|
+| **等待时线程状态** | 阻塞（睡眠） | 继续运行（执行其他协程） |
+| **CPU 利用率** | 等待期间 0% | 等待期间接近 100% |
+| **并发能力** | 1 线程 = 1 连接 | 1 线程 = 万级连接 |
+| **超时精度** | 依赖内核调度 | Timer 精度（毫秒级） |
+| **资源消耗** | 每等待占 1 线程 | 每等待只占内存（协程栈） |
+| **切换开销** | 内核态切换（微秒级） | 用户态切换（纳秒级） |
+
+**性能对比（1000 并发连接）**：
+
+| 指标 | 系统内核超时 + 多线程 | Timer + 协程 |
+|------|---------------------|--------------|
+| 线程数 | 1000 | 4（CPU 核心数） |
+| 内存 | 1000 × 8MB = 8GB | 4 × 8MB + 1000 × 1MB ≈ 1GB |
+| 内存节省 | - | **87.5%** |
+| 吞吐量提升 | - | **5-10 倍** |
+
+**餐厅模型比喻**：
+
+```
+【系统内核超时】= 一个服务员只服务一桌
+
+服务员："您的菜好了我叫您"
+服务员站在桌边死等... 3 秒... 10 秒...
+服务员："超时了！"
+
+问题：这 3 秒服务员什么都干不了，其他桌没人服务
+
+【Timer + 协程】= 一个服务员服务多桌
+
+服务员："我设个 3 分钟闹钟，先去服务其他桌"
+服务员去服务 2 号桌...
+服务员去服务 3 号桌...
+闹钟响了！回到 1 号桌："超时了！"
+
+优势：这 3 分钟服务员一直在工作
+```
+
+#### (5) 总结
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    超时机制选择                              │
+├────────────────────────────────────────────────────────────┤
+│                                                            │
+│  系统内核超时 (SO_RCVTIMEO/SO_SNDTIMEO)                     │
+│  ├── 适用：传统多线程服务器                                  │
+│  ├── 问题：线程阻塞等待，资源浪费                             │
+│  └── 场景：少量连接、简单程序                                 │
+│                                                            │
+│  Timer + 协程超时                                           │
+│  ├── 适用：高性能协程服务器 (sylar)                          │
+│  ├── 优势：线程不阻塞，处理其他协程                           │
+│  └── 场景：万级并发、高性能场景                               │
+│                                                            │
+│  Hook 拦截的意义：                                          │
+│  ├── 把系统超时 → 转换为协程超时                             │
+│  ├── setsockopt 的 SO_RCVTIMEO → 存到 FdCtx                 │
+│  └── recv/send 时 → 用 Timer 实现协程化超时                  │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 4. 数据发送系统函数详解（send、sendto、sendmsg）
+
+#### (1) 三种发送函数的关系
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        发送函数层级关系                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│                    ┌──────────────────┐                                  │
+│                    │   sendmsg()      │  ◄── 最底层、最强大               │
+│                    │   (msghdr)       │                                  │
+│                    └────────┬─────────┘                                  │
+│                             │                                           │
+│              ┌──────────────┴──────────────┐                            │
+│              │                             │                            │
+│              ▼                             ▼                            │
+│       ┌────────────┐              ┌────────────┐                       │
+│       │  send()    │              │  sendto()  │                       │
+│       │  TCP       │              │  UDP       │                       │
+│       └────────────┘              └────────────┘                       │
+│                                                                         │
+│       send() = sendmsg 的简化版（不需要目标地址）                          │
+│       sendto() = sendmsg 的简化版（每次指定目标地址）                      │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### (2) send() - TCP 发送
+
+```cpp
+#include <sys/socket.h>
+
+ssize_t send(int sockfd, const void *buf, size_t len, int flags);
+```
+
+**作用**：向已连接的 Socket 发送数据（TCP 专用）。
+
+**参数**：
+
+| 参数 | 说明 |
+|------|------|
+| `sockfd` | 已连接的 Socket 文件描述符 |
+| `buf` | 要发送的数据缓冲区 |
+| `len` | 数据长度 |
+| `flags` | 发送标志（通常为 0） |
+
+**返回值**：
+- 成功：返回实际发送的字节数
+- 失败：返回 -1，设置 errno
+
+**关键点**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      send() 的"部分发送"问题                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  你想发送: "Hello World!" (12 字节)                                      │
+│                                                                         │
+│  发送缓冲区（剩余 5 字节空间）：                                           │
+│  ┌──────────────────────────────────┐                                   │
+│  │ 已有数据..........剩余 5 字节空间  │                                   │
+│  └──────────────────────────────────┘                                   │
+│                                                                         │
+│  send() 可能只发送 5 字节，返回 5！                                       │
+│                                                                         │
+│  【正确做法】：循环发送直到全部发完                                        │
+│  ```cpp                                                                 │
+│  int total = 0;                                                         │
+│  while (total < length) {                                               │
+│      int n = send(sock, (char*)buf + total, length - total, 0);         │
+│      if (n <= 0) break;  // 错误或连接关闭                                │
+│      total += n;                                                        │
+│  }                                                                      │
+│  ```                                                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### (3) sendto() - UDP 发送
+
+```cpp
+#include <sys/socket.h>
+
+ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
+               const struct sockaddr *dest_addr, socklen_t addrlen);
+```
+
+**作用**：向指定目标地址发送数据（UDP 专用，也可用于 TCP）。
+
+**参数**：
+
+| 参数 | 说明 |
+|------|------|
+| `sockfd` | Socket 文件描述符（本地 UDP Socket） |
+| `buf` | 要发送的数据缓冲区 |
+| `len` | 数据长度 |
+| `flags` | 发送标志 |
+| `dest_addr` | 目标地址 |
+| `addrlen` | 目标地址长度 |
+
+**与 send() 的区别**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    send() vs sendto()                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  【send() - TCP】                                                        │
+│  - 必须先 connect()                                                      │
+│  - Socket 已绑定到特定对端                                                │
+│  - 不需要每次指定目标地址                                                  │
+│  - 面向连接，可靠传输                                                      │
+│                                                                         │
+│  【sendto() - UDP】                                                      │
+│  - 不需要 connect()                                                      │
+│  - Socket 只是本地 UDP 端口，未绑定对端                                    │
+│  - 每次都要指定目标地址                                                    │
+│  - 无连接，不可靠传输                                                      │
+│                                                                         │
+│  类比：                                                                   │
+│  - send() = 专线电话（已连接，直接说话）                                   │
+│  - sendto() = 寄信（每次都要写收件人地址）                                 │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**使用示例**：
+
+```cpp
+// UDP 发送给不同目标
+Socket::ptr sock = Socket::CreateUDPSocket();  // m_sock = 3
+
+IPv4Address::ptr addr1 = IPv4Address::Create("192.168.1.100", 8080);
+IPv4Address::ptr addr2 = IPv4Address::Create("192.168.1.101", 8080);
+
+// 同一个 m_sock，发给不同的人
+sock->sendTo("Hello A", 7, addr1);  // m_sock=3 发给 addr1
+sock->sendTo("Hello B", 7, addr2);  // m_sock=3 发给 addr2
+sock->sendTo("Hello C", 7, addr3);  // m_sock=3 发给 addr3
+```
+
+#### (4) sendmsg() - 高级发送
+
+```cpp
+#include <sys/socket.h>
+
+ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
+```
+
+**作用**：最强大的发送函数，支持多缓冲区、目标地址、辅助数据等。
+
+**msghdr 结构体**：
+
+```cpp
+struct msghdr {
+    void         *msg_name;       // 目标地址（UDP 用，TCP 可为 NULL）
+    socklen_t     msg_namelen;    // 目标地址长度
+    struct iovec *msg_iov;        // iovec 数组（多缓冲区）
+    size_t        msg_iovlen;     // iovec 数组长度
+    void         *msg_control;    // 辅助数据（如传递 fd）
+    size_t        msg_controllen; // 辅助数据长度
+    int           msg_flags;      // 接收标志
+};
+```
+
+**iovec 结构体**（分散/聚集 I/O）：
+
+```cpp
+struct iovec {
+    void  *iov_base;  // 缓冲区起始地址
+    size_t iov_len;   // 缓冲区长度
+};
+```
+
+**为什么需要 iovec？**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      iovec 的优势（零拷贝）                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  场景：发送协议包 = 头部 + 内容                                           │
+│                                                                         │
+│  【传统方式 - 需要拷贝或多次系统调用】                                     │
+│  ```cpp                                                                 │
+│  // 方法1：两次系统调用（效率低）                                          │
+│  send(sock, &header, sizeof(header));                                   │
+│  send(sock, &body, sizeof(body));                                       │
+│                                                                         │
+│  // 方法2：先拷贝到一块内存（浪费 CPU）                                     │
+│  char buffer[sizeof(header) + sizeof(body)];                            │
+│  memcpy(buffer, &header, sizeof(header));                               │
+│  memcpy(buffer + sizeof(header), &body, sizeof(body));                  │
+│  send(sock, buffer, sizeof(buffer));                                    │
+│  ```                                                                    │
+│                                                                         │
+│  【iovec 方式 - 一次系统调用，零拷贝】                                     │
+│  ```cpp                                                                 │
+│  iovec iov[2];                                                          │
+│  iov[0].iov_base = &header;                                             │
+│  iov[0].iov_len = sizeof(header);                                       │
+│  iov[1].iov_base = &body;                                               │
+│  iov[1].iov_len = sizeof(body);                                         │
+│                                                                         │
+│  sendmsg(sock, &msg, 0);  // 一次系统调用！                               │
+│  ```                                                                    │
+│                                                                         │
+│  内存布局：                                                               │
+│  ┌──────────┐    ┌──────────┐                                          │
+│  │  header  │    │   body   │    ──► sendmsg ──► 网络                   │
+│  └──────────┘    └──────────┘                                          │
+│       ↑                ↑                                                │
+│    iov[0]           iov[1]                                              │
+│                                                                         │
+│  两块内存不需要连续，直接发送！                                            │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**实际应用示例**：
+
+```cpp
+// HTTP 响应：状态行 + 头部 + 内容
+void sendHttpResponse(Socket::ptr sock) {
+    std::string status = "HTTP/1.1 200 OK\r\n";
+    std::string headers = "Content-Length: 5\r\n\r\n";
+    std::string body = "Hello";
+
+    iovec iov[3];
+    iov[0].iov_base = (void*)status.c_str();
+    iov[0].iov_len = status.size();
+    iov[1].iov_base = (void*)headers.c_str();
+    iov[1].iov_len = headers.size();
+    iov[2].iov_base = (void*)body.c_str();
+    iov[2].iov_len = body.size();
+
+    sock->send(iov, 3);  // 一次发送三块数据
+}
+```
+
+#### (5) Socket 类中的封装
+
+```cpp
+// TCP 单缓冲区
+int Socket::send(const void *buffer, size_t length, int flags)
+{
+    if (isConnected()) {
+        return ::send(m_sock, buffer, length, flags);
+    }
+    return -1;
+}
+
+// TCP 多缓冲区（使用 sendmsg）
+int Socket::send(const iovec *buffers, size_t length, int flags)
+{
+    if (isConnected()) {
+        msghdr msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_iov = (iovec *)buffers;
+        msg.msg_iovlen = length;
+        return ::sendmsg(m_sock, &msg, flags);
+    }
+    return -1;
+}
+
+// UDP 单缓冲区
+int Socket::sendTo(const void *buffer, size_t length, const Address::ptr to, int flags)
+{
+    if (!isValid()) return -1;
+    return ::sendto(m_sock, buffer, length, flags, to->getAddr(), to->getAddrLen());
+}
+
+// UDP 多缓冲区（使用 sendmsg）
+int Socket::sendTo(const iovec *buffers, size_t length, const Address::ptr to, int flags)
+{
+    if (!isValid()) return -1;
+    msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = (iovec *)buffers;
+    msg.msg_iovlen = length;
+    msg.msg_name = (char *)to->getAddr();
+    msg.msg_namelen = to->getAddrLen();
+    return ::sendmsg(m_sock, &msg, flags);
+}
+```
+
+#### (6) 函数总结表
+
+| 函数 | 协议 | 缓冲区 | 需要连接 | 目标地址 | 系统调用 |
+|------|------|--------|----------|----------|----------|
+| `send(buf)` | TCP | 单个 | ✅ 是 | 不需要 | `::send()` |
+| `send(iovec[])` | TCP | 多个 | ✅ 是 | 不需要 | `::sendmsg()` |
+| `sendTo(buf, addr)` | UDP | 单个 | ❌ 否 | 每次指定 | `::sendto()` |
+| `sendTo(iovec[], addr)` | UDP | 多个 | ❌ 否 | 每次指定 | `::sendmsg()` |
+
+#### (7) flags 常用选项
+
+```cpp
+MSG_DONTWAIT  // 非阻塞发送（立即返回，不阻塞）
+MSG_NOSIGNAL  // 忽略 SIGPIPE（对端关闭时不会崩溃）
+MSG_OOB       // 发送带外数据（紧急数据）
+MSG_MORE      // 告诉内核还有更多数据（延迟发送以合并小包）
+MSG_DONTROUTE // 不使用路由表（直接发送到本地网络）
+
+// 使用示例
+sock->send(buffer, length, MSG_NOSIGNAL | MSG_DONTWAIT);
+```
+
+---
+
+### 5. 数据接收系统函数详解（recv、recvfrom、recvmsg）
+
+#### (1) 接收函数概述
+
+数据接收函数用于从套接字接收数据。与发送函数类似，不同协议和场景使用不同的接收函数：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        数据接收函数选择指南                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────┐          ┌─────────────────┐                      │
+│  │  TCP 已连接      │          │  UDP 无连接      │                      │
+│  └────────┬────────┘          └────────┬────────┘                      │
+│           │                            │                               │
+│     ┌─────┴─────┐                ┌─────┴─────┐                         │
+│     │           │                │           │                         │
+│  ┌──▼──┐    ┌───▼───┐        ┌──▼──┐    ┌───▼───┐                     │
+│  │recv │    │recvmsg│        │recvfrom│  │recvmsg│                     │
+│  └─────┘    └───────┘        └───────┘    └───────┘                     │
+│     │            │                │            │                        │
+│  单缓冲区     多缓冲区         获取来源地址   多缓冲区                    │
+│                                                                         │
+│  TCP 用 recv()         UDP 用 recvfrom()（可获取发送方地址）            │
+│  高级需求用 recvmsg()（多缓冲区 + 控制信息）                            │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### (2) recv() - TCP 接收
+
+```cpp
+#include <sys/socket.h>
+
+// 函数原型
+ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+```
+
+**参数说明**：
+- `sockfd`：套接字描述符（必须是**已连接**的 TCP 套接字）
+- `buf`：接收缓冲区（存放接收到的数据）
+- `len`：缓冲区大小（最多接收的字节数）
+- `flags`：接收选项（通常为 0）
+
+**返回值**：
+- `> 0`：实际接收的字节数
+- `= 0`：对端关闭连接（EOF）
+- `-1`：出错，查看 errno
+
+**特点**：
+- 只能用于 **TCP 已连接**套接字
+- 不知道数据来源（因为是已连接的）
+- 返回值可能 **小于 len**（TCP 是字节流，不保证一次收完）
+
+```cpp
+// 接收示例
+char buffer[1024];
+int n = recv(sock, buffer, sizeof(buffer), 0);
+if (n > 0) {
+    // 成功接收 n 字节
+} else if (n == 0) {
+    // 对端关闭连接
+} else {
+    // 出错
+}
+```
+
+#### (3) recvfrom() - UDP 接收
+
+```cpp
+#include <sys/socket.h>
+
+// 函数原型
+ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
+                 struct sockaddr *src_addr, socklen_t *addrlen);
+```
+
+**参数说明**：
+- `sockfd`：套接字描述符（通常是 UDP 套接字）
+- `buf`：接收缓冲区
+- `len`：缓冲区大小
+- `flags`：接收选项
+- `src_addr`：**输出参数**，存放发送方的地址
+- `addrlen`：**输入/输出参数**，地址结构体的大小
+
+**返回值**：
+- `> 0`：实际接收的字节数
+- `-1`：出错
+
+**特点**：
+- 常用于 **UDP 无连接**套接字
+- 可以**获取发送方地址**（IP 和端口）
+- 也可用于 TCP（但通常没必要）
+
+```cpp
+// UDP 服务器接收示例
+char buffer[1024];
+struct sockaddr_in client_addr;
+socklen_t addr_len = sizeof(client_addr);
+
+int n = recvfrom(udp_sock, buffer, sizeof(buffer), 0,
+                 (struct sockaddr*)&client_addr, &addr_len);
+
+if (n > 0) {
+    // 获取客户端地址
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+    int client_port = ntohs(client_addr.sin_port);
+    printf("收到来自 %s:%d 的 %d 字节数据\n", client_ip, client_port, n);
+}
+```
+
+#### (4) recvmsg() - 高级接收
+
+```cpp
+#include <sys/socket.h>
+
+// 函数原型
+ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags);
+```
+
+**msghdr 结构体**（与 sendmsg 相同）：
+```cpp
+struct msghdr {
+    void         *msg_name;       // 发送方地址（输出）
+    socklen_t     msg_namelen;    // 地址长度
+    struct iovec *msg_iov;        // 散布式 I/O 向量
+    size_t        msg_iovlen;     // iovec 数量
+    void         *msg_control;    // 辅助数据（如文件描述符传递）
+    size_t        msg_controllen; // 辅助数据长度
+    int           msg_flags;      // 接收标志（输出）
+};
+```
+
+**特点**：
+- 支持**多缓冲区接收**（scatter/gather I/O）
+- 可以**获取发送方地址**
+- 支持**辅助数据**（如传递文件描述符）
+- 功能最强，但也最复杂
+
+```cpp
+// 使用 iovec 多缓冲区接收
+void receiveIntoMultipleBuffers(int sock) {
+    char header[16];
+    char body[1024];
+    char trailer[8];
+
+    iovec iov[3];
+    iov[0].iov_base = header;
+    iov[0].iov_len = sizeof(header);
+    iov[1].iov_base = body;
+    iov[1].iov_len = sizeof(body);
+    iov[2].iov_base = trailer;
+    iov[2].iov_len = sizeof(trailer);
+
+    struct sockaddr_in peer_addr;
+    socklen_t addr_len = sizeof(peer_addr);
+
+    msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_name = &peer_addr;        // 获取发送方地址
+    msg.msg_namelen = addr_len;
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 3;
+
+    int n = recvmsg(sock, &msg, 0);
+    // 数据被"散布"到三个缓冲区中
+}
+```
+
+#### (5) TCP 与 UDP 接收的区别
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     TCP 接收 vs UDP 接收                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  【TCP 字节流】                        【UDP 数据报】                     │
+│                                                                         │
+│  发送：send("Hello")                  发送：sendto("Hello")              │
+│  发送：send("World")                  发送：sendto("World")              │
+│                                                                         │
+│  接收可能是：                          接收一定是：                        │
+│  ┌─────────────────────────────┐     ┌─────────────────────────────┐   │
+│  │ 情况1: "HelloWorld"         │     │ 第一次: "Hello" (完整数据报) │   │
+│  │ 情况2: "Hel" "loWorld"      │     │ 第二次: "World" (完整数据报) │   │
+│  │ 情况3: "HelloWorl" "d"      │     │                             │   │
+│  └─────────────────────────────┘     └─────────────────────────────┘   │
+│                                                                         │
+│  TCP: 边界不保留，需要自己处理消息边界    UDP: 边界保留，一次发送=一次接收   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### (6) Socket 类中的封装
+
+```cpp
+// TCP 单缓冲区接收
+int Socket::recv(void *buffer, size_t length, int flags)
+{
+    if (isConnected()) {
+        return ::recv(m_sock, buffer, length, flags);
+    }
+    return -1;
+}
+
+// TCP 多缓冲区接收（使用 recvmsg）
+int Socket::recv(iovec *buffers, size_t length, int flags)
+{
+    if (isConnected()) {
+        msghdr msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_iov = buffers;
+        msg.msg_iovlen = length;
+        return ::recvmsg(m_sock, &msg, flags);
+    }
+    return -1;
+}
+
+// UDP 接收（获取来源地址）
+int Socket::recvFrom(void *buffer, size_t length, Address::ptr from, int flags)
+{
+    if (!isValid()) return -1;
+    sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    int n = ::recvfrom(m_sock, buffer, length, flags, (sockaddr *)&addr, &len);
+    if (n > 0) {
+        from = Address::Create((sockaddr *)&addr, len);  // 创建地址对象
+    }
+    return n;
+}
+
+// UDP 多缓冲区接收
+int Socket::recvFrom(iovec *buffers, size_t length, Address::ptr from, int flags)
+{
+    if (!isValid()) return -1;
+    msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = buffers;
+    msg.msg_iovlen = length;
+    msg.msg_name = (sockaddr *)&msg.msg_name;  // 这里有个 bug
+    msg.msg_namelen = sizeof(msg.msg_name);
+    int n = ::recvmsg(m_sock, &msg, flags);
+    if (n > 0) {
+        from = Address::Create((sockaddr *)msg.msg_name, msg.msg_namelen);
+    }
+    return n;
+}
+```
+
+#### (7) 函数总结表
+
+| 函数 | 协议 | 缓冲区 | 获取来源地址 | 系统调用 |
+|------|------|--------|--------------|----------|
+| `recv(buf)` | TCP | 单个 | ❌ 不需要 | `::recv()` |
+| `recv(iovec[])` | TCP | 多个 | ❌ 不需要 | `::recvmsg()` |
+| `recvFrom(buf, from)` | UDP | 单个 | ✅ 是 | `::recvfrom()` |
+| `recvFrom(iovec[], from)` | UDP | 多个 | ✅ 是 | `::recvmsg()` |
+
+#### (8) flags 常用选项
+
+```cpp
+MSG_DONTWAIT   // 非阻塞接收（立即返回，不阻塞）
+MSG_PEEK       // 窥视数据（不删除缓冲区中的数据）
+MSG_WAITALL    // 等待完整数据（阻塞直到收到请求的字节数）
+MSG_TRUNC      // 数据被截断时返回真实数据长度
+MSG_ERRQUEUE   // 接收错误信息
+
+// 使用示例
+// 窥视数据（不移除）
+char peek_buf[10];
+int n = recv(sock, peek_buf, sizeof(peek_buf), MSG_PEEK | MSG_DONTWAIT);
+
+// 等待完整 100 字节
+char data[100];
+int n = recv(sock, data, sizeof(data), MSG_WAITALL);
+```
+
+#### (9) 实际应用示例
+
+```cpp
+// TCP 服务器读取完整消息（处理消息边界）
+bool readFullMessage(Socket::ptr sock, void* buffer, size_t len) {
+    size_t total = 0;
+    while (total < len) {
+        int n = sock->recv((char*)buffer + total, len - total, 0);
+        if (n <= 0) {
+            return false;  // 出错或连接关闭
+        }
+        total += n;
+    }
+    return true;
+}
+
+// UDP 服务器接收并回复
+void udpServerLoop(Socket::ptr udp_sock) {
+    char buffer[1024];
+    while (true) {
+        sylar::Address::ptr client_addr;
+        int n = udp_sock->recvFrom(buffer, sizeof(buffer), client_addr, 0);
+        if (n > 0) {
+            // 回复给发送方
+            udp_sock->sendTo(buffer, n, client_addr, 0);
+        }
+    }
+}
+```
+
+---
+
+### 6. 部分发送/接收问题详解
+
+#### (1) 问题：为什么 Socket 类没有循环处理部分发送/接收？
+
+**答案：这是设计选择，留给上层处理。**
+
+**原因分析**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Socket 类的定位                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Socket 类 = 底层封装层                                                  │
+│  ├─ 职责：封装系统调用，提供统一接口                                      │
+│  ├─ 特点：简单、透明，不添加额外逻辑                                      │
+│  └─ 返回：原样返回系统调用的结果                                          │
+│                                                                         │
+│  为什么不循环？                                                          │
+│  ├─ 1. 保持底层简单（单一职责）                                           │
+│  ├─ 2. 让调用者知道实际收发字节数（便于上层处理）                          │
+│  ├─ 3. 上层可能有不同需求（如超时、进度显示）                              │
+│  └─ 4. 框架后续有 Stream 类专门处理这个问题                               │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**框架的解决方案：Stream 类**：
+
+```cpp
+// sylar/net/stream.h（计划实现）
+class Stream {
+public:
+    // 保证读取指定长度，内部会循环调用 recv
+    int readFixSize(void* buffer, size_t length);
+
+    // 保证写入指定长度，内部会循环调用 send
+    int writeFixSize(const void* buffer, size_t length);
+};
+
+// 实现
+int Stream::readFixSize(void* buffer, size_t length) {
+    size_t offset = 0;
+    while (offset < length) {
+        int n = read((char*)buffer + offset, length - offset);
+        if (n <= 0) {
+            return n;  // 出错或关闭
+        }
+        offset += n;
+    }
+    return length;  // 保证读取完整
+}
+```
+
+**分层设计**：
+- **Socket 类**：底层，简单封装系统调用
+- **SocketStream 类**：中层，继承 Stream，实现完整读写
+- **应用层**：使用 SocketStream 的 readFixSize/writeFixSize
+
+#### (2) 问题：UDP 为什么没有部分发送/接收问题？
+
+**答案：UDP 是数据报协议，天然保留消息边界。**
+
+**TCP vs UDP 本质区别**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     TCP 字节流 vs UDP 数据报                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  【TCP：字节流，无边界】                                                 │
+│                                                                         │
+│  发送端：send(100字节) + send(50字节)                                    │
+│                                                                         │
+│  网络传输：数据被合并成一串字节流                                         │
+│  ┌──────────────────────────────────────┐                              │
+│  │  100字节 + 50字节 = 150字节连续流     │                              │
+│  └──────────────────────────────────────┘                              │
+│                                                                         │
+│  接收端可能：                                                            │
+│  ├─ recv() 返回 150 字节（一次收完）                                     │
+│  ├─ recv() 返回 80 字节，再 recv() 返回 70 字节                         │
+│  └─ recv() 返回 1 字节，需要循环 150 次...                               │
+│                                                                         │
+│  ⚠️ 问题：消息边界丢失！不知道哪是第一条消息，哪是第二条                   │
+│                                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  【UDP：数据报，有边界】                                                 │
+│                                                                         │
+│  发送端：sendto(100字节) + sendto(50字节)                                │
+│                                                                         │
+│  网络传输：每个 sendto 是独立的数据包                                     │
+│  ┌────────────┐    ┌────────────┐                                      │
+│  │  包1: 100字节│    │  包2: 50字节│                                      │
+│  └────────────┘    └────────────┘                                      │
+│                                                                         │
+│  接收端一定：                                                            │
+│  ├─ recvfrom() 返回 100 字节（完整第一个包）                             │
+│  └─ recvfrom() 返回 50 字节（完整第二个包）                              │
+│                                                                         │
+│  ✅ 消息边界保留！一次 sendto = 一次 recvfrom                            │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**UDP 的注意事项**：
+
+虽然 UDP 没有部分接收问题，但有其他问题：
+
+```cpp
+// UDP 接收示例
+char buffer[100];
+int n = recvfrom(sock, buffer, sizeof(buffer), 0, ...);
+
+// 如果发送方发送了 200 字节：
+// - n = 100，只收到前 100 字节
+// - 剩余 100 字节被丢弃！
+// - 可以用 MSG_TRUNC 标志检测截断
+```
+
+**总结对比**：
+
+| 特性 | TCP | UDP |
+|------|-----|-----|
+| 传输单位 | 字节流 | 数据报 |
+| 消息边界 | ❌ 无 | ✅ 有 |
+| 部分发送 | 可能发生 | 不会发生 |
+| 部分接收 | 可能发生 | 不会发生 |
+| 循环读写 | 必须处理 | 不需要 |
+| 可靠性 | 可靠 | 不可靠 |
+| 适用场景 | 文件传输、HTTP | DNS、视频流 |
+
+**结论**：
+1. Socket 类作为底层封装，保持简单，不循环处理
+2. 完整读写由上层 Stream 类负责
+3. UDP 天然保留消息边界，不存在部分收发问题
+
+---
