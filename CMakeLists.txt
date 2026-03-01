@@ -28,6 +28,7 @@ set(SYLAR_SOURCES
     sylar/fiber/hook.cc
     sylar/net/address.cc
     sylar/net/socket.cc
+    sylar/net/bytearray.cc
 )
 
 # 生成共享库 libsylar.so
@@ -78,4 +79,8 @@ target_link_libraries(test_address sylar)
 
 add_executable(test_socket tests/test_socket.cc)
 target_link_libraries(test_socket sylar)
+
+add_executable(test_bytearray tests/test_bytearray.cc)
+target_link_libraries(test_bytearray sylar)
+
 
