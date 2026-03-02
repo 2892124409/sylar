@@ -123,7 +123,7 @@ void test_pipe_io()
         ssize_t n = read(g_pipefd[0], buffer, sizeof(buffer) - 1);
 
         if (n > 0) {
-            buffer[n] = '\\0';
+            buffer[n] = '\0';
             SYLAR_LOG_INFO(g_logger) << "读取协程: 成功读取 " << n << " 字节: " << buffer;
         } else if (n < 0) {
             SYLAR_LOG_ERROR(g_logger) << "读取协程: 读取失败, errno=" << errno;
@@ -214,9 +214,9 @@ void test_iov()
         ssize_t n = readv(g_pipefd[0], iov, 3);
 
         if (n > 0) {
-            buf1[iov[0].iov_len] = '\\0';
-            buf2[iov[1].iov_len] = '\\0';
-            buf3[iov[2].iov_len] = '\\0';
+            buf1[iov[0].iov_len] = '\0';
+            buf2[iov[1].iov_len] = '\0';
+            buf3[iov[2].iov_len] = '\0';
             SYLAR_LOG_INFO(g_logger) << "Iov读取: 成功读取 " << n << " 字节";
             SYLAR_LOG_INFO(g_logger) << "buf1=[" << buf1 << "] buf2=[" << buf2 << "] buf3=[" << buf3 << "]";
         } else if (n < 0) {
@@ -234,8 +234,6 @@ void test_iov()
 void test_fcntl_nonblock()
 {
     SYLAR_LOG_INFO(g_logger) << "========== 测试5: fcntl非阻塞测试 ==========";
-
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
 
     // 创建新pipe
     if (pipe(g_pipefd) < 0)

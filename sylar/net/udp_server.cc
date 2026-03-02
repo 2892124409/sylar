@@ -106,19 +106,17 @@ void UdpServer::stop() {
 
     auto self = shared_from_this();
 
-    // 使用信号量等待清理完成
-    auto sem = std::make_shared<Semaphore>(0);
-    m_recvWorker->schedule([this, self, sem]() {
+    // 异步清理资源（避免死锁）
+    m_recvWorker->schedule([this, self]() {
         for (auto& sock : m_socks) {
             sock->cancelAll();  // 取消所有事件
             sock->close();
         }
         m_socks.clear();
-        sem->notify();  // 通知清理完成
+        SYLAR_LOG_INFO(g_logger) << "UdpServer cleanup completed";
     });
 
-    sem->wait();  // 等待清理完成
-    SYLAR_LOG_INFO(g_logger) << "UdpServer stopped";
+    SYLAR_LOG_INFO(g_logger) << "UdpServer stop scheduled";
 }
 
 // ============================================================================
