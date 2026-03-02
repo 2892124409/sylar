@@ -253,7 +253,7 @@ namespace sylar
         /// 空闲线程数量
         std::atomic<size_t> m_idleThreadCount = {0};
         /// 是否正在停止
-        bool m_stopping = true;
+        bool m_stopping = false;
         /// 是否自动停止
         bool m_autoStop = false;
         /// 主线程id(use_caller)
