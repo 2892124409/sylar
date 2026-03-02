@@ -92,3 +92,6 @@ target_link_libraries(test_stream sylar)
 add_executable(test_tcp_server tests/test_tcp_server.cc)
 target_link_libraries(test_tcp_server sylar)
 
+add_executable(test_tcp_server_stress tests/test_tcp_server_stress.cc)
+target_link_libraries(test_tcp_server_stress sylar)
+

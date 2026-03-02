@@ -5,6 +5,7 @@
  * @date 2026-02-08
  */
 #include "sylar/fiber/scheduler.h"
+#include "sylar/fiber/hook.h"
 #include "sylar/log/logger.h"
 #include "sylar/base/macro.h"
 
@@ -185,6 +186,7 @@ namespace sylar
     {
         SYLAR_LOG_DEBUG(g_logger) << m_name << " run";
         setThis();
+        set_hook_enable(true);  // 在工作线程中启用 Hook
 
         // 如果当前线程不是主线程（即线程池创建的子线程）
         if (sylar::GetThreadId() != m_rootThread)

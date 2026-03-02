@@ -2,6 +2,7 @@
 #include "sylar/log/logger.h"
 #include "sylar/fiber/hook.h"
 #include "sylar/fiber/iomanager.h"
+#include "sylar/fiber/fd_manager.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
@@ -103,12 +104,18 @@ namespace sylar
 
     bool Socket::init(int sock)
     {
-        if (m_sock != -1)
+        // 将 socket fd 注册到 FdManager，auto_create=true 会创建 FdCtx 并初始化
+        FdCtx::ptr ctx = FdMgr::GetInstance()->get(sock, true);
+        if (ctx && ctx->isSocket() && !ctx->isClose())
         {
-            close();
+            m_sock = sock;
+            m_isConnected = true;
+            initSock();  // 设置 SO_REUSEADDR 和 TCP_NODELAY
+            getLocalAddress();
+            getRemoteAddress();
+            return true;
         }
-        m_sock = sock;
-        return isValid();
+        return false;
     }
 
     // ============================================================================
@@ -271,18 +278,21 @@ namespace sylar
 
     bool Socket::close()
     {
-        if (!isValid() || !m_isConnected)
+        if (!isValid())
         {
-            return true;
+            return true;  // 已经关闭
         }
+
         m_isConnected = false;
-        if (::close(m_sock))
+
+        if (::close(m_sock) != 0)
         {
             SYLAR_LOG_ERROR(g_logger) << "close sock=" << m_sock
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
             return false;
         }
+
         m_sock = -1;
         return true;
     }
