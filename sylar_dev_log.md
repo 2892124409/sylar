@@ -5304,3 +5304,283 @@ MyProtocol protocol(mockStream);  // 相同的代码，不同的流
 
 ---
 
+## TcpServer 模块 (网络服务器)
+
+### 1. 命名空间设计
+
+#### 为什么使用 `sylar::net` 嵌套命名空间？
+
+```
+sylar::net::TcpServer
+sylar::net::Socket
+sylar::net::SocketStream
+sylar::fiber::Scheduler
+sylar::fiber::IOManager
+```
+
+**好处**：
+1. **模块化组织** - 将网络相关类放在同一子命名空间，代码结构清晰
+2. **避免命名冲突** - 未来可能有 `sylar::ipc::Socket`（进程间通信）
+3. **表达清晰依赖** - 看到 `sylar::net::TcpServer` 立刻知道是网络模块
+4. **便于扩展** - 轻松添加 `sylar::http`、`sylar::rpc` 等新模块
+
+---
+
+### 2. 整体架构设计
+
+#### 类图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        TcpServer                             │
+│  继承: std::enable_shared_from_this<TcpServer>, Noncopyable │
+│                                                              │
+│  成员变量:                                                    │
+│  - m_socks[]        监听 Socket 数组（支持多端口）            │
+│  - m_ioWorker       处理客户端 I/O 的调度器                   │
+│  - m_acceptWorker   执行 accept 的调度器                      │
+│  - m_recvTimeout    接收超时时间                              │
+│  - m_isStop         停止标志                                  │
+│                                                              │
+│  核心方法:                                                    │
+│  - bind()      创建 Socket + 绑定地址 + 开始监听              │
+│  - start()     为每个监听 Socket 启动 accept 协程             │
+│  - stop()      优雅停止（使用 Semaphore 等待清理完成）         │
+│  - startAccept()   循环 accept，将客户端分发给 ioWorker       │
+│  - handleClient()  处理客户端（虚函数，子类重写）              │
+└─────────────────────────────────────────────────────────────┘
+                              ▲
+                              │ 继承
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                      EchoServer                              │
+│  重写 handleClient() 实现 Echo 功能                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 数据流
+
+```
+bind() → start() → startAccept() 协程
+                         │
+                    accept() 成功
+                         │
+                    schedule(handleClient)
+                         │
+              ┌──────────┴──────────┐
+              ▼                     ▼
+         ioWorker              ioWorker
+         handleClient          handleClient
+           协程1                 协程2
+```
+
+---
+
+### 3. 双调度器设计
+
+#### 为什么需要两个调度器？
+
+```cpp
+IOManager* m_ioWorker;       // 处理客户端 I/O
+IOManager* m_acceptWorker;   // 执行 accept
+```
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    accept_worker                            │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
+│  │ accept协程1 │  │ accept协程2 │  │ accept协程N │        │
+│  │  :8080      │  │  :8081      │  │  :8082      │        │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘        │
+│         │                │                │                │
+│         └────────────────┼────────────────┘                │
+│                          │ schedule()                      │
+│                          ▼                                 │
+└────────────────────────────────────────────────────────────┘
+                           │
+┌────────────────────────────────────────────────────────────┐
+│                       io_worker                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
+│  │ handleClient│  │ handleClient│  │ handleClient│        │
+│  │   协程1      │  │   协程2      │  │   协程N      │        │
+│  └─────────────┘  └─────────────┘  └─────────────┘        │
+│  每个 handleClient 在独立协程中运行，互不阻塞              │
+└────────────────────────────────────────────────────────────┘
+```
+
+**好处**：
+- accept 不会被慢客户端阻塞
+- I/O 密集型任务不影响新连接接入
+- 可独立配置线程数
+
+---
+
+### 4. 主线程与工作线程
+
+#### use_caller 参数
+
+```cpp
+Scheduler(size_t threads = 1, bool use_caller = true, const std::string &name = "");
+```
+
+| use_caller | threads=2 时 | 实际线程数 |
+|------------|-------------|-----------|
+| true (默认) | 主线程参与调度 + 1 个工作线程 | 2 |
+| false | 创建 2 个工作线程，主线程不参与 | 2 |
+
+#### 测试代码示例
+
+```cpp
+sylar::IOManager iom(2);  // threads=2, use_caller=true
+EchoServer::ptr server(new EchoServer(&iom, &iom));
+// ioWorker 和 acceptWorker 是同一个 IOManager
+```
+
+---
+
+### 5. startAccept 协程调度机制
+
+```cpp
+void TcpServer::startAccept(Socket::ptr sock) {
+    while (!m_isStop) {
+        Socket::ptr client = sock->accept();  // Hook 后的 accept
+        if (client) {
+            client->setRecvTimeout(m_recvTimeout);
+            m_ioWorker->schedule(
+                std::bind(&TcpServer::handleClient, shared_from_this(), client)
+            );
+        }
+    }
+}
+```
+
+#### Hook 后的 accept 行为
+
+```
+accept(fd, ...)
+    ↓
+do_io() 检测到 EAGAIN（无连接）
+    ↓
+注册 EPOLLIN 事件到 IOManager
+    ↓
+Fiber::Yield()  // 协程让出 CPU，但不阻塞线程！
+    ↓
+线程去执行其他协程
+    ↓
+有新连接时，epoll_wait 返回
+    ↓
+IOManager 唤醒 accept 协程继续
+```
+
+**关键**：协程 yield 后线程不阻塞，可以执行其他协程！
+
+---
+
+### 6. handleClient 处理流程（模板方法模式）
+
+#### 基类（默认实现）
+
+```cpp
+void TcpServer::handleClient(Socket::ptr client) {
+    SYLAR_LOG_INFO(g_logger) << "handleClient: " << *client;
+    // 默认什么都不做
+}
+```
+
+#### 子类重写（EchoServer 示例）
+
+```cpp
+void EchoServer::handleClient(Socket::ptr client) {
+    SocketStream::ptr stream(new SocketStream(client));
+    char buf[1024];
+    while (true) {
+        int len = stream->read(buf, sizeof(buf));  // Hook 后，无数据时 yield
+        if (len <= 0) break;  // 客户端断开
+        stream->write(buf, len);  // Echo 回去
+    }
+    stream->close();
+}
+```
+
+#### 设计模式价值
+
+- TcpServer 提供连接管理框架
+- 子类只需关心业务逻辑
+- 可轻松实现 HttpServer、RpcServer 等
+
+---
+
+### 7. 遇到的关键 Bug
+
+#### Bug 1: Socket::init() 未注册到 FdManager
+
+**现象**：accept 返回的 socket 没有设置为非阻塞，导致 Hook 失效
+
+**修复** (socket.cc):
+```cpp
+bool Socket::init(int sock) {
+    // 注册到 FdManager，自动设置为非阻塞
+    FdCtx::ptr ctx = FdMgr::GetInstance()->get(sock, true);
+    if (ctx && ctx->isSocket() && !ctx->isClose()) {
+        m_sock = sock;
+        // ...
+    }
+}
+```
+
+#### Bug 2: Hook 未在 worker 线程中启用
+
+**现象**：Hook 使用 `thread_local` 变量，只在主线程启用，worker 线程中 Hook 失效
+
+**修复** (scheduler.cc):
+```cpp
+void Scheduler::run() {
+    setThis();
+    set_hook_enable(true);  // 在每个 worker 线程中启用 Hook
+    // ...
+}
+```
+
+**教训**：`thread_local` 变量需要每个线程单独初始化！
+
+---
+
+### 8. 关键设计要点总结
+
+| 设计点 | 说明 |
+|--------|------|
+| `enable_shared_from_this` | 允许成员函数安全获取 `shared_ptr`，用于协程调度时捕获 this |
+| `Noncopyable` | 服务器对象应该唯一，禁止拷贝 |
+| 双调度器 | 分离 accept 和 I/O 处理，提高并发性能 |
+| 虚函数 `handleClient` | 模板方法模式，子类重写实现具体业务 |
+| Hook 机制 | 让阻塞 I/O 变成非阻塞 + 协程调度 |
+| FdManager | 管理文件描述符，强制设置非阻塞模式 |
+
+---
+
+### 9. 使用示例
+
+```cpp
+// 1. 定义业务服务器
+class MyServer : public sylar::net::TcpServer {
+protected:
+    void handleClient(sylar::Socket::ptr client) override {
+        // 实现业务逻辑
+    }
+};
+
+// 2. 创建并启动
+sylar::IOManager iom(4);  // 4 个线程
+auto server = std::make_shared<MyServer>(&iom, &iom);
+server->bind(sylar::Address::LookupAny("0.0.0.0:8080"));
+server->start();
+
+// 3. IOManager 析构时自动停止
+```
+
+---
+
+### 10. 一句话总结
+
+**TcpServer 的核心是将 accept 和 I/O 处理分离到不同调度器，通过 Hook 机制让阻塞 I/O 变成协程调度，实现高并发服务器。**
+

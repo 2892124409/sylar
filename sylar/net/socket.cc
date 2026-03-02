@@ -373,7 +373,7 @@ namespace sylar
         return -1;
     }
 
-    int Socket::recvFrom(void *buffer, size_t length, Address::ptr from, int flags)
+    int Socket::recvFrom(void *buffer, size_t length, Address::ptr& from, int flags)
     {
         if (!isValid())
         {
@@ -389,7 +389,7 @@ namespace sylar
         return n;
     }
 
-    int Socket::recvFrom(iovec *buffers, size_t length, Address::ptr from, int flags)
+    int Socket::recvFrom(iovec *buffers, size_t length, Address::ptr& from, int flags)
     {
         if (!isValid())
         {
@@ -399,8 +399,9 @@ namespace sylar
         memset(&msg, 0, sizeof(msg));
         msg.msg_iov = buffers;
         msg.msg_iovlen = length;
-        msg.msg_name = (sockaddr *)&msg.msg_name;
-        msg.msg_namelen = sizeof(msg.msg_name);
+        sockaddr_storage addr;
+        msg.msg_name = &addr;
+        msg.msg_namelen = sizeof(addr);
         int n = ::recvmsg(m_sock, &msg, flags);
         if (n > 0)
         {

@@ -292,27 +292,27 @@ namespace sylar
          * @brief 接收数据 (UDP)
          * @param[out] buffer 接收数据的内存
          * @param[in] length 接收数据的内存大小
-         * @param[out] from 发送端地址
+         * @param[out] from 发送端地址（引用传递）
          * @param[in] flags 标志字
          * @return
          *      @retval >0 接收到对应大小的数据
          *      @retval =0 socket 被关闭
          *      @retval <0 socket 出错
          */
-        virtual int recvFrom(void *buffer, size_t length, Address::ptr from, int flags = 0);
+        virtual int recvFrom(void *buffer, size_t length, Address::ptr& from, int flags = 0);
 
         /**
          * @brief 接收数据 (UDP, iovec 分散接收)
          * @param[out] buffers 接收数据的内存 (iovec 数组)
          * @param[in] length 接收数据的内存大小 (iovec 数组长度)
-         * @param[out] from 发送端地址
+         * @param[out] from 发送端地址（引用传递）
          * @param[in] flags 标志字
          * @return
          *      @retval >0 接收到对应大小的数据
          *      @retval =0 socket 被关闭
          *      @retval <0 socket 出错
          */
-        virtual int recvFrom(iovec *buffers, size_t length, Address::ptr from, int flags = 0);
+        virtual int recvFrom(iovec *buffers, size_t length, Address::ptr& from, int flags = 0);
 
         /**
          * @brief 获取远端地址
