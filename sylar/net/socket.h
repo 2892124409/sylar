@@ -279,7 +279,7 @@ namespace sylar
         /**
          * @brief 接收数据 (iovec 分散接收)
          * @param[out] buffers 接收数据的内存 (iovec 数组)
-         * @param[in] length 接收数据的内存大小 (iovec 数组长度)
+         * @param[in] length 接收数据的内存大小 (iovec 数组长度/元素个数)
          * @param[in] flags 标志字
          * @return
          *      @retval >0 接收到对应大小的数据
