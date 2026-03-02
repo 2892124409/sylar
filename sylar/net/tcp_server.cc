@@ -111,18 +111,18 @@ void TcpServer::stop() {
 
     auto self = shared_from_this();
 
-    // 使用信号量等待清理完成
-    Semaphore sem(0);
-    m_acceptWorker->schedule([this, self, &sem]() {
+    // 使用信号量等待清理完成（使用 shared_ptr 避免栈变量引用问题）
+    auto sem = std::make_shared<Semaphore>(0);
+    m_acceptWorker->schedule([this, self, sem]() {
         for (auto& sock : m_socks) {
             sock->cancelAll();  // 取消所有事件
             sock->close();
         }
         m_socks.clear();
-        sem.notify();  // 通知清理完成
+        sem->notify();  // 通知清理完成
     });
 
-    sem.wait();  // 等待清理完成
+    sem->wait();  // 等待清理完成
     SYLAR_LOG_INFO(g_logger) << "TcpServer stopped";
 }
 

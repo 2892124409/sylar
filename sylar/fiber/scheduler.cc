@@ -48,6 +48,7 @@ namespace sylar
             t_scheduler_fiber = m_rootFiber.get();
             m_rootThread = sylar::GetThreadId();
             m_threadIds.push_back(m_rootThread);
+            m_autoStop = true;
         }
         else
         {
@@ -285,7 +286,8 @@ namespace sylar
                             cb_fiber.reset();
                         } else if(cb_fiber->getState() == Fiber::EXCEPT
                                 || cb_fiber->getState() == Fiber::TERM) {
-                            // 函数跑完了，不重置 cb_fiber，留在下轮复用
+                            // 函数跑完了，重置 cb_fiber 避免状态累积
+                            cb_fiber.reset();
                         } else {
                             cb_fiber->setState(Fiber::HOLD);
                             cb_fiber.reset();
