@@ -29,6 +29,8 @@ set(SYLAR_SOURCES
     sylar/net/address.cc
     sylar/net/socket.cc
     sylar/net/bytearray.cc
+    sylar/net/stream.cc
+    sylar/net/socket_stream.cc
 )
 
 # 生成共享库 libsylar.so
@@ -83,4 +85,6 @@ target_link_libraries(test_socket sylar)
 add_executable(test_bytearray tests/test_bytearray.cc)
 target_link_libraries(test_bytearray sylar)
 
+add_executable(test_stream tests/test_stream.cc)
+target_link_libraries(test_stream sylar)
 
