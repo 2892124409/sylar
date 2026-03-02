@@ -104,16 +104,26 @@ bool TcpServer::start() {
 }
 
 void TcpServer::stop() {
+    if (m_isStop) {
+        return;  // 已经停止
+    }
     m_isStop = true;
 
     auto self = shared_from_this();
-    m_acceptWorker->schedule([this, self]() {
+
+    // 使用信号量等待清理完成
+    Semaphore sem(0);
+    m_acceptWorker->schedule([this, self, &sem]() {
         for (auto& sock : m_socks) {
             sock->cancelAll();  // 取消所有事件
             sock->close();
         }
         m_socks.clear();
+        sem.notify();  // 通知清理完成
     });
+
+    sem.wait();  // 等待清理完成
+    SYLAR_LOG_INFO(g_logger) << "TcpServer stopped";
 }
 
 // ============================================================================
@@ -134,10 +144,20 @@ void TcpServer::startAccept(Socket::ptr sock) {
             m_ioWorker->schedule(std::bind(&TcpServer::handleClient,
                                            shared_from_this(), client));
         } else {
+            // accept 失败，检查是否应该退出
+            if (m_isStop) {
+                break;
+            }
             SYLAR_LOG_ERROR(g_logger) << "accept errno=" << errno
                                       << " str=" << strerror(errno);
+            // 如果是致命错误（socket已关闭），退出循环
+            if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK) {
+                SYLAR_LOG_ERROR(g_logger) << "accept socket error, exit accept loop";
+                break;
+            }
         }
     }
+    SYLAR_LOG_INFO(g_logger) << "startAccept exit";
 }
 
 // ============================================================================
