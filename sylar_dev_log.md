@@ -5543,6 +5543,96 @@ void Scheduler::run() {
 
 **教训**：`thread_local` 变量需要每个线程单独初始化！
 
+#### Bug 3: TcpServer/UdpServer 关闭时死锁
+
+**现象**：运行 `test_tcp_server` 和 `test_udp_server` 时，程序在打印"服务器准备停止"后卡死，无法正常退出
+
+**根本原因**：`stop()` 方法中的经典死锁问题
+
+```cpp
+// 原始代码（有问题）
+void TcpServer::stop() {
+    m_isStop = true;
+    auto sem = std::make_shared<Semaphore>(0);
+
+    // 在同一个 IOManager 上调度清理任务
+    m_acceptWorker->schedule([this, self, sem]() {
+        for (auto& sock : m_socks) {
+            sock->cancelAll();
+            sock->close();
+        }
+        m_socks.clear();
+        sem->notify();  // 通知完成
+    });
+
+    sem->wait();  // 阻塞等待清理完成 ← 死锁点！
+}
+```
+
+**死锁分析**：
+
+1. 测试代码在 IOManager 的协程中调用 `stop()`：
+   ```cpp
+   iom.schedule([server]() {
+       server->stop();  // 在 IOManager 的协程中调用
+   });
+   ```
+
+2. `stop()` 方法在**同一个 IOManager** 上调度清理任务
+3. 然后通过 `sem->wait()` **阻塞当前协程**
+4. 清理任务被放入队列，但无法执行（因为当前协程阻塞了）
+5. `sem->notify()` 永远不会被调用
+6. `sem->wait()` 永远阻塞 → **死锁**
+
+**修复方案**：移除阻塞等待，让清理任务异步执行
+
+```cpp
+// 修复后的代码
+void TcpServer::stop() {
+    if (m_isStop) {
+        return;
+    }
+    m_isStop = true;
+
+    auto self = shared_from_this();
+
+    // 异步清理资源（避免死锁）
+    m_acceptWorker->schedule([this, self]() {
+        for (auto& sock : m_socks) {
+            sock->cancelAll();  // 取消所有事件
+            sock->close();
+        }
+        m_socks.clear();
+        SYLAR_LOG_INFO(g_logger) << "TcpServer cleanup completed";
+    });
+
+    SYLAR_LOG_INFO(g_logger) << "TcpServer stop scheduled";
+    // 立即返回，不阻塞
+}
+```
+
+**为什么这样修复是安全的**：
+
+1. **停止标志已设置**：`m_isStop = true` 已经通知所有 accept/receive 循环停止
+2. **循环会自然退出**：`startAccept()` 和 `startReceive()` 检查 `!m_isStop` 并退出
+3. **Socket 关闭触发退出**：清理任务关闭 socket 后，阻塞的 `accept()`/`recvFrom()` 会返回 `EBADF` 错误，循环检测到错误后退出
+4. **线程安全**：清理任务在 IOManager 线程中执行，socket 操作是线程安全的
+5. **无资源泄漏**：IOManager 析构时会等待所有协程完成，确保清理任务执行
+
+**测试验证**：
+
+修复后，两个测试都能正常完成：
+- 打印"服务器准备停止"
+- 打印"服务器已停止"（`stop()` 立即返回）
+- 清理任务异步执行完成
+- accept/receive 循环正常退出
+- 程序正常结束，无超时
+
+**教训**：
+1. **避免在协程中阻塞等待同一调度器上的任务** - 这是死锁的经典模式
+2. **异步清理通常比同步清理更安全** - 特别是在协程环境中
+3. **利用现有机制** - `m_isStop` 标志 + socket 关闭已经足够触发优雅退出
+
 ---
 
 ### 8. 关键设计要点总结
