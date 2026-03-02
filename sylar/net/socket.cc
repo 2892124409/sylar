@@ -185,6 +185,7 @@ namespace sylar
     {
         sockaddr_in6 addr;
         socklen_t len = sizeof(addr);
+        // 调用全局的 accept 函数（会被 hook）
         int client_sock = ::accept(m_sock, (sockaddr *)&addr, &len);
         if (client_sock < 0)
         {
