@@ -4556,7 +4556,190 @@ int age = ba.readInt32();                // 读 Varint
 
 ---
 
-### 10. Sylar 后续如何保证协议？
+### 10. Node vs iovec：为什么需要两种结构？（重要！）
+
+#### 问题背景
+既然 `iovec` 这么好用（用于 scatter-gather I/O），为什么 ByteArray 还要自己定义 `Node` 结构体？它们看起来很相似。
+
+#### 答案：职责完全不同
+
+##### Node：数据的拥有者和管理者
+
+```cpp
+struct Node {
+    char *ptr;      // 拥有的内存块
+    Node *next;     // 链表指针（管理多个块）
+    size_t size;    // 块大小
+
+    Node(size_t s); // 构造时分配内存
+    ~Node();        // 析构时释放内存
+};
+```
+
+**职责：**
+- ✅ **拥有内存**：`ptr` 指向的内存由 Node 分配和释放
+- ✅ **管理生命周期**：构造时 `new[]`，析构时 `delete[]`
+- ✅ **组织数据结构**：通过 `next` 指针形成链表
+- ✅ **持久存储**：数据一直保存在 ByteArray 中
+
+##### iovec：临时的内存描述符
+
+```cpp
+struct iovec {
+    void  *iov_base;  // 只是指向内存，不拥有
+    size_t iov_len;   // 内存长度
+};
+```
+
+**职责：**
+- ❌ **不拥有内存**：只是借用别人的内存地址
+- ❌ **不管理生命周期**：不负责分配和释放
+- ✅ **临时描述**：只在系统调用时使用
+- ✅ **接口适配**：把 ByteArray 的内存暴露给操作系统
+
+#### 实际工作流程（核心理解！）
+
+**场景：通过 SocketStream 接收 1000 字节数据**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  第1步：ByteArray 内部有 Node 链表（持久存储）               │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Node1 (拥有4KB内存)  →  Node2 (拥有4KB内存)  →  Node3      │
+│  ┌──────────────┐        ┌──────────────┐                  │
+│  │ ptr: 0x1000  │───────▶│ ptr: 0x2000  │                  │
+│  │ size: 4096   │        │ size: 4096   │                  │
+│  │ next: ───────┘        │ next: ───────┘                  │
+│  └──────────────┘        └──────────────┘                  │
+│                                                             │
+│  这些 Node 一直存在，直到 ByteArray 析构                     │
+└─────────────────────────────────────────────────────────────┘
+
+                          ↓ getWriteBuffers()
+
+┌─────────────────────────────────────────────────────────────┐
+│  第2步：临时构建 iovec 数组（只在系统调用时存在）            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  iovec[0] = {base: 0x1000, len: 300}  ← 借用 Node1 的内存   │
+│  iovec[1] = {base: 0x2000, len: 400}  ← 借用 Node2 的内存   │
+│  iovec[2] = {base: 0x2400, len: 300}  ← 借用 Node2 的内存   │
+│                                                             │
+│  这个数组只是"地址清单"，不拥有内存                          │
+└─────────────────────────────────────────────────────────────┘
+
+                          ↓ recvmsg()
+
+┌─────────────────────────────────────────────────────────────┐
+│  第3步：操作系统直接写入 Node 的内存（零拷贝）               │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  网络数据 → 内核缓冲区 → Node1[300字节] + Node2[700字节]    │
+│                                                             │
+│  recvmsg 根据 iovec 数组，把数据分散写入多个内存块           │
+│  避免了临时缓冲区，实现零拷贝                                │
+└─────────────────────────────────────────────────────────────┘
+
+                          ↓ 系统调用结束
+
+┌─────────────────────────────────────────────────────────────┐
+│  第4步：iovec 数组销毁，但数据已安全存储在 Node 中           │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Node1: [已写入300字节]                                     │
+│  Node2: [已写入700字节]                                     │
+│                                                             │
+│  数据持久保存在 ByteArray 中，可以随时读取                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 代码流程
+
+```cpp
+// 1. ByteArray 内部有 Node 链表（持久存储）
+ByteArray::ptr ba(new ByteArray(4096));
+// 内部：m_root = new Node(4096);  // 拥有内存
+
+// 2. 准备接收数据时，临时构建 iovec 数组
+std::vector<iovec> iovs;
+ba->getWriteBuffers(iovs, 1000);
+// 内部逻辑：
+//   遍历 Node 链表，找到可写区域
+//   iovs[0] = {Node1->ptr + offset, 剩余空间}
+//   iovs[1] = {Node2->ptr, 剩余空间}
+//   ...
+// 注意：iovec 只是"借用"Node 的内存地址
+
+// 3. 系统调用（iovec 作为临时接口）
+socket->recv(&iovs[0], iovs.size());
+// recvmsg 直接把数据写入 Node 的内存
+
+// 4. 系统调用结束，iovec 数组销毁
+// 但数据已经安全存储在 Node 中了
+```
+
+#### scatter-gather I/O 原理
+
+**传统方式（需要额外拷贝）：**
+
+```cpp
+// ❌ 低效：需要两次拷贝
+char temp[1000];
+socket->recv(temp, 1000);        // 1. 从网络读到临时缓冲区
+ba->write(temp, 1000);           // 2. 从临时缓冲区拷贝到 ByteArray
+// 缺点：多了一次内存拷贝
+```
+
+**scatter-gather I/O（零拷贝）：**
+
+```cpp
+// ✅ 高效：零拷贝
+std::vector<iovec> iovs;
+ba->getWriteBuffers(iovs, 1000);  // 获取 ByteArray 的多个可写内存块
+// iovs[0] = {ptr: Node1的剩余空间, len: 300}
+// iovs[1] = {ptr: Node2的剩余空间, len: 400}
+// iovs[2] = {ptr: Node3的剩余空间, len: 300}
+
+socket->recv(&iovs[0], iovs.size());  // 一次系统调用直接写入多个内存块
+// 优点：数据直接从网络写到 ByteArray，零拷贝
+```
+
+#### 设计模式：适配器模式
+
+```
+Node     = 房子（实际拥有，长期居住）
+iovec    = 地址（临时告诉快递员往哪送货）
+
+你不能住在"地址"里，但快递员需要"地址"才能送货。
+```
+
+**关系**：`getWriteBuffers()` 把 Node 的内存地址"翻译"成 iovec 数组，让操作系统能直接写入
+
+这是典型的**适配器模式**：
+- ByteArray 用自己的方式管理内存（Node 链表）
+- 在需要和操作系统交互时，临时转换成操作系统认识的格式（iovec）
+
+#### 为什么需要两者？
+
+| 需求 | 用 Node | 用 iovec |
+|------|---------|----------|
+| **持久存储数据** | ✅ Node 拥有内存 | ❌ iovec 不拥有 |
+| **动态扩容** | ✅ Node 链表可以增长 | ❌ iovec 只是描述 |
+| **管理生命周期** | ✅ Node 构造/析构 | ❌ iovec 无生命周期 |
+| **与系统调用交互** | ❌ 系统不认识 Node | ✅ 系统认识 iovec |
+| **零拷贝 I/O** | ❌ 不是标准接口 | ✅ recvmsg 需要 iovec |
+
+#### 总结
+
+- **Node**：ByteArray 的**内部实现**，负责实际存储和管理内存
+- **iovec**：**系统调用接口**，临时描述内存位置，不拥有内存
+- **关系**：`getWriteBuffers()` 把 Node 的内存地址"翻译"成 iovec 数组，让操作系统能直接写入
+- **核心优势**：实现零拷贝 I/O，数据直接从网络卡 → 内核缓冲区 → ByteArray 的多个内存块
+
+---
+
+### 11. Sylar 后续如何保证协议？
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -4587,3 +4770,537 @@ int age = ba.readInt32();                // 读 Varint
 ```
 
 ---
+
+## Stream + SocketStream 模块
+
+### 1. 核心问题：为什么需要这两个类？
+
+#### TCP 的部分读写问题
+
+```
+TCP 是字节流协议，存在部分读写问题：
+
+发送 1000 字节 → recv() 可能只收到 300 字节
+需要多次调用才能收完
+
+这不是 bug，而是 TCP 的特性！
+```
+
+#### 实际例子
+
+```cpp
+// 场景：读取一个协议消息
+// 协议格式：[4字节长度][消息内容]
+
+// ❌ 直接用 Socket（危险！）
+uint32_t len;
+socket->recv(&len, 4);  // 问题：可能只收到 2 字节！
+                        // len 的值是错的，后续全乱了
+
+char buf[1000];
+socket->recv(buf, len); // 问题：可能只收到一部分
+                        // 消息不完整
+
+// ✅ 用 SocketStream（安全！）
+uint32_t len;
+stream->readFixSize(&len, 4);  // 保证读满 4 字节
+                               // 内部循环调用直到读完
+
+char buf[1000];
+stream->readFixSize(buf, len); // 保证读满 len 字节
+                               // 消息完整
+```
+
+---
+
+### 2. Stream 类的作用
+
+**核心作用：定义"可靠读写"的接口**
+
+```cpp
+class Stream {
+public:
+    // 原始读写（可能部分读写）- 纯虚函数，子类实现
+    virtual int read(void* buffer, size_t length) = 0;
+    virtual int write(const void* buffer, size_t length) = 0;
+    
+    // 可靠读写（保证完整）- 基类实现，所有子类继承
+    int readFixSize(void* buffer, size_t length);   // 循环读，直到读满
+    int writeFixSize(const void* buffer, size_t length); // 循环写，直到写完
+};
+```
+
+#### readFixSize 的实现原理
+
+```cpp
+int Stream::readFixSize(void* buffer, size_t length) {
+    size_t offset = 0;
+    int64_t left = length;
+    while (left > 0) {
+        // 调用子类实现的 read()（多态）
+        int64_t len = read((char*)buffer + offset, left);
+        if (len <= 0) {
+            return len;  // 出错或关闭
+        }
+        offset += len;
+        left -= len;
+    }
+    return length;  // 保证读满
+}
+```
+
+**关键点**：
+- `readFixSize()` 调用的是**子类实现的 `read()`**（虚函数多态）
+- 在 SocketStream 中，`read()` 实际调用 `m_socket->recv()`
+- 循环调用直到读满指定长度
+
+---
+
+### 3. SocketStream 类的作用
+
+**核心作用：将 Socket 包装成 Stream，自动获得可靠读写能力**
+
+```cpp
+class SocketStream : public Stream {
+public:
+    // 实现原始读写（委托给 Socket）
+    int read(void* buffer, size_t length) override {
+        if (!isConnected()) return -1;
+        return m_socket->recv(buffer, length);  // 可能部分读
+    }
+    
+    int write(const void* buffer, size_t length) override {
+        if (!isConnected()) return -1;
+        return m_socket->send(buffer, length);  // 可能部分写
+    }
+    
+    // 自动继承 readFixSize/writeFixSize（保证完整）
+    
+    // 辅助方法
+    Address::ptr getRemoteAddress();      // 获取对方地址
+    Address::ptr getLocalAddress();       // 获取自己地址
+    std::string getRemoteAddressString(); // 获取对方地址字符串
+    std::string getLocalAddressString();  // 获取自己地址字符串
+};
+```
+
+---
+
+### 4. 分层设计
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  上层协议（HTTP / RPC / 自定义协议）                         │
+│  - 只需要调用 readFixSize/writeFixSize                      │
+│  - 不用担心部分读写问题                                      │
+│  - 专注业务逻辑                                              │
+└─────────────────────────────────────────────────────────────┘
+                          ↓ 使用
+┌─────────────────────────────────────────────────────────────┐
+│  Stream 层（SocketStream）                                  │
+│  - 提供 readFixSize/writeFixSize                            │
+│  - 保证读写完整性                                            │
+│  - 解决 TCP 部分读写问题                                     │
+└─────────────────────────────────────────────────────────────┘
+                          ↓ 委托
+┌─────────────────────────────────────────────────────────────┐
+│  Socket 层                                                  │
+│  - 提供原始的 send/recv                                      │
+│  - 可能部分读写（这是 TCP 的特性）                           │
+│  - 处理网络细节                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 5. 设计模式：为什么需要继承？
+
+#### 问题：只有 SocketStream 一个子类，为什么还要搞抽象基类？
+
+**答案：Stream 会被多个类继承，这是良好的架构设计。**
+
+#### 5.1 可能的 Stream 子类
+
+```cpp
+// 已实现
+class SocketStream : public Stream { ... };
+
+// 未来可能实现
+class FileStream : public Stream {      // 文件流
+    // 读写文件，支持 readFixSize
+};
+
+class ZlibStream : public Stream {      // 压缩流
+    // 透明的压缩/解压缩
+};
+
+class SSLStream : public Stream {       // SSL/TLS 加密流
+    // 加密的网络通信
+};
+
+class MemoryStream : public Stream {    // 内存流
+    // 用于测试或缓存
+};
+```
+
+#### 5.2 抽象基类的核心价值
+
+##### 价值1：代码复用（readFixSize/writeFixSize）
+
+```cpp
+// Stream 基类实现一次
+int Stream::readFixSize(void* buffer, size_t length) {
+    size_t offset = 0;
+    int64_t left = length;
+    while (left > 0) {
+        int64_t len = read((char*)buffer + offset, left);  // 调用子类实现
+        if (len <= 0) return len;
+        offset += len;
+        left -= len;
+    }
+    return length;
+}
+
+// 所有子类自动继承这个功能
+// SocketStream、FileStream、SSLStream 都不需要重复写这段逻辑
+```
+
+**如果没有基类**：每个类都要自己实现 readFixSize，代码重复！
+
+##### 价值2：多态性（统一接口）
+
+```cpp
+// 通用的数据处理函数
+void processProtocol(Stream::ptr stream) {
+    // 读取协议头（固定4字节长度）
+    uint32_t len;
+    stream->readFixSize(&len, 4);
+    
+    // 读取消息体
+    char* buf = new char[len];
+    stream->readFixSize(buf, len);
+    
+    // 处理数据...
+    delete[] buf;
+}
+
+// 可以传入任何 Stream 子类
+processProtocol(socketStream);   // 从网络读
+processProtocol(fileStream);     // 从文件读
+processProtocol(memoryStream);   // 从内存读
+```
+
+**如果没有基类**：需要为每种流写一个处理函数，代码爆炸！
+
+##### 价值3：可扩展性（开闭原则）
+
+```cpp
+// HTTP 模块可能这样使用
+class HttpConnection {
+public:
+    HttpConnection(Stream::ptr stream) : m_stream(stream) {}
+    
+    HttpRequest::ptr recvRequest() {
+        // 从 stream 读取 HTTP 请求
+        // 不关心底层是 Socket、SSL 还是其他
+    }
+    
+private:
+    Stream::ptr m_stream;  // 可以是任何流
+};
+
+// 使用时
+HttpConnection http1(socketStream);    // 普通 HTTP
+HttpConnection http2(sslStream);       // HTTPS
+HttpConnection http3(memoryStream);    // 测试用
+```
+
+#### 5.3 总结
+
+| 问题 | 有基类 | 没有基类 |
+|------|--------|----------|
+| **代码复用** | ✅ readFixSize 只写一次 | ❌ 每个类都要写 |
+| **多态性** | ✅ 可以写通用函数 | ❌ 每种类型写一遍 |
+| **可扩展性** | ✅ 轻松添加新流类型 | ❌ 改动大量代码 |
+| **可测试性** | ✅ 可以 mock | ❌ 难以测试 |
+| **设计原则** | ✅ 符合 SOLID | ❌ 违反开闭原则 |
+
+**结论**：Stream 基类不是过度设计，而是**良好的架构设计**。
+
+---
+
+### 6. 常见误解：SocketStream 与粘包问题
+
+#### 误解：SocketStream 能解决粘包问题
+
+**正确理解：SocketStream 本身不能解决粘包，需要协议层配合。**
+
+#### 6.1 两个问题的区别
+
+```
+问题1：部分读写（SocketStream 解决）
+┌─────────────────────────────────────────────────┐
+│ 发送：1000 字节                                  │
+│ 接收：第1次 recv() 只收到 300 字节              │
+│       第2次 recv() 收到 400 字节                │
+│       第3次 recv() 收到 300 字节                │
+│                                                 │
+│ 问题：需要多次调用才能收完                      │
+│ 解决：readFixSize() 内部循环，保证读满          │
+└─────────────────────────────────────────────────┘
+
+问题2：粘包（SocketStream 不能解决）
+┌─────────────────────────────────────────────────┐
+│ 发送：[消息1: 100字节][消息2: 200字节]          │
+│ 接收：一次 recv() 收到 300 字节                 │
+│                                                 │
+│ 问题：不知道消息1在哪里结束，消息2从哪里开始    │
+│ 解决：需要协议定义消息边界！                    │
+└─────────────────────────────────────────────────┘
+```
+
+#### 6.2 SocketStream 的真实作用
+
+```cpp
+// SocketStream 只做一件事：保证读满指定长度
+
+// ❌ 直接用 Socket（可能部分读）
+char buf[100];
+int n = socket->recv(buf, 100);  // 可能只收到 30 字节
+
+// ✅ 用 SocketStream（保证读满）
+char buf[100];
+stream->readFixSize(buf, 100);   // 保证读满 100 字节
+                                 // 但不知道这 100 字节是几条消息！
+```
+
+**SocketStream 不知道消息边界在哪里，它只是"读满指定长度"。**
+
+#### 6.3 粘包问题的真正解决方案
+
+**核心：协议层定义消息格式**
+
+##### 方案1：长度前缀（最常用）
+
+```cpp
+// 协议定义：[4字节长度][消息内容]
+
+// 发送端
+void sendMessage(SocketStream::ptr stream, const std::string& msg) {
+    uint32_t len = msg.size();
+    stream->writeFixSize(&len, 4);         // 先发长度
+    stream->writeFixSize(msg.c_str(), len); // 再发内容
+}
+
+// 接收端
+std::string recvMessage(SocketStream::ptr stream) {
+    // 第1步：读取长度（知道消息有多长）
+    uint32_t len;
+    stream->readFixSize(&len, 4);  // ← SocketStream 保证读满 4 字节
+    
+    // 第2步：根据长度读取消息（知道边界在哪里）
+    char* buf = new char[len];
+    stream->readFixSize(buf, len);  // ← SocketStream 保证读满 len 字节
+    
+    std::string msg(buf, len);
+    delete[] buf;
+    return msg;  // 完整的一条消息，不会和下一条粘在一起
+}
+
+// 连续接收多条消息
+while (true) {
+    std::string msg1 = recvMessage(stream);  // 第1条消息
+    std::string msg2 = recvMessage(stream);  // 第2条消息
+    std::string msg3 = recvMessage(stream);  // 第3条消息
+    // 每条消息都是完整的，不会粘包
+}
+```
+
+##### 方案2：固定长度
+
+```cpp
+// 协议定义：每条消息固定 100 字节
+
+// 接收端
+while (true) {
+    char buf[100];
+    stream->readFixSize(buf, 100);  // 每次读 100 字节就是一条消息
+    // 不会粘包，因为长度固定
+}
+```
+
+##### 方案3：分隔符
+
+```cpp
+// 协议定义：消息以 \n 结尾
+
+// 接收端
+std::string recvMessage(SocketStream::ptr stream) {
+    std::string msg;
+    char ch;
+    while (true) {
+        stream->readFixSize(&ch, 1);  // 一次读 1 字节
+        if (ch == '\n') break;        // 遇到分隔符就是消息结束
+        msg += ch;
+    }
+    return msg;
+}
+```
+
+#### 6.4 分层职责
+
+```
+┌─────────────────────────────────────────────────┐
+│ 协议层（解决粘包）                               │
+│ - 定义消息格式：[长度][内容]                     │
+│ - 定义消息边界                                   │
+│ - 知道应该读多少字节                             │
+└─────────────────────────────────────────────────┘
+                    ↓ 使用
+┌─────────────────────────────────────────────────┐
+│ SocketStream 层（解决部分读写）                  │
+│ - 提供 readFixSize(buf, len)                    │
+│ - 保证读满 len 字节                              │
+│ - 不关心 len 是什么，只负责读满                  │
+└─────────────────────────────────────────────────┘
+                    ↓ 使用
+┌─────────────────────────────────────────────────┐
+│ Socket 层（原始网络 I/O）                        │
+│ - 提供 recv(buf, len)                           │
+│ - 可能只读到部分数据                             │
+│ - 可能把多条消息粘在一起                         │
+└─────────────────────────────────────────────────┘
+```
+
+#### 6.5 总结
+
+| 问题 | 谁解决 | 怎么解决 |
+|------|--------|----------|
+| **部分读写** | SocketStream | `readFixSize()` 内部循环，保证读满 |
+| **粘包** | 协议层 | 定义消息格式（长度前缀/固定长度/分隔符） |
+
+**正确的理解**：
+1. SocketStream **不能**直接解决粘包
+2. SocketStream **提供了**实现协议的工具（readFixSize）
+3. 协议层**基于** SocketStream 来解决粘包
+
+**一句话总结**：SocketStream 是工具，协议是方案。SocketStream 保证"读满指定长度"，协议定义"应该读多少长度"，两者配合才能解决粘包。
+
+---
+
+### 7. 实际应用场景
+
+#### 场景1：实现一个简单的协议
+
+```cpp
+// 协议：[4字节长度][消息内容]
+
+// 发送端
+void sendMessage(SocketStream::ptr stream, const std::string& msg) {
+    uint32_t len = msg.size();
+    stream->writeFixSize(&len, 4);        // 保证发送完整的长度
+    stream->writeFixSize(msg.c_str(), len); // 保证发送完整的消息
+}
+
+// 接收端
+std::string recvMessage(SocketStream::ptr stream) {
+    uint32_t len;
+    stream->readFixSize(&len, 4);         // 保证读取完整的长度
+    
+    char* buf = new char[len];
+    stream->readFixSize(buf, len);        // 保证读取完整的消息
+    
+    std::string msg(buf, len);
+    delete[] buf;
+    return msg;
+}
+```
+
+#### 场景2：HTTP 模块使用 Stream
+
+```cpp
+class HttpConnection {
+public:
+    HttpConnection(Stream::ptr stream) : m_stream(stream) {}
+    
+    HttpRequest::ptr recvRequest() {
+        // 读取请求行
+        std::string line = readLine();
+        
+        // 读取请求头
+        while (true) {
+            std::string header = readLine();
+            if (header.empty()) break;
+            // 解析 header...
+        }
+        
+        // 读取请求体（如果有 Content-Length）
+        if (contentLength > 0) {
+            char* body = new char[contentLength];
+            m_stream->readFixSize(body, contentLength);  // 保证读完
+            // 处理 body...
+            delete[] body;
+        }
+    }
+    
+private:
+    Stream::ptr m_stream;
+    
+    std::string readLine() {
+        std::string line;
+        char ch;
+        while (true) {
+            m_stream->readFixSize(&ch, 1);  // 保证读到 1 字节
+            if (ch == '\n') break;
+            if (ch != '\r') line += ch;
+        }
+        return line;
+    }
+};
+```
+
+#### 场景3：测试时使用 MemoryStream
+
+```cpp
+// 生产环境
+Stream::ptr stream = std::make_shared<SocketStream>(socket);
+MyProtocol protocol(stream);
+
+// 测试环境（不需要真实网络）
+Stream::ptr mockStream = std::make_shared<MemoryStream>(testData);
+MyProtocol protocol(mockStream);  // 相同的代码，不同的流
+```
+
+---
+
+### 8. 总结
+
+#### 核心要点
+
+1. **Stream 的作用**：
+   - 定义统一的流式读写接口
+   - 提供 readFixSize/writeFixSize 保证完整读写
+   - 让不同数据源（Socket、文件、内存）有相同接口
+
+2. **SocketStream 的作用**：
+   - 将 Socket 包装成 Stream
+   - 解决 TCP 部分读写问题
+   - 为上层协议提供可靠的读写基础
+
+3. **设计价值**：
+   - 代码复用：readFixSize/writeFixSize 只实现一次
+   - 多态性：可以写通用的处理函数
+   - 可扩展性：轻松添加新的流类型
+   - 分层清晰：Socket → Stream → 协议
+
+4. **常见误解**：
+   - SocketStream 不能直接解决粘包
+   - 粘包需要协议层定义消息边界
+   - SocketStream 提供工具，协议提供方案
+
+#### 一句话总结
+
+**Stream/SocketStream 的作用就是让你在 TCP 上安全地读写固定长度的数据，不用担心只读到一半。**
+
+---
+
