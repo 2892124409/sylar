@@ -9,7 +9,9 @@
 #include "sylar/net/socket.h"
 #include "sylar/fiber/iomanager.h"
 #include "sylar/base/noncopyable.h"
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace sylar {
@@ -73,7 +75,7 @@ public:
     std::string getName() const { return m_name; }
     void setRecvTimeout(uint64_t v) { m_recvTimeout = v; }
     virtual void setName(const std::string& v) { m_name = v; }
-    bool isStop() const { return m_isStop; }
+    bool isStop() const { return m_isStop.load(std::memory_order_acquire); }
 
     /**
      * @brief 转换为字符串（用于调试）
@@ -100,7 +102,8 @@ protected:
     uint64_t m_recvTimeout;                // 接收超时时间（毫秒）
     std::string m_name;                    // 服务器名称
     std::string m_type;                    // 服务器类型
-    bool m_isStop;                         // 是否停止
+    std::atomic<bool> m_isStop;            // 是否停止
+    mutable std::mutex m_mutex;            // 保护 m_socks
 };
 
 } // namespace net

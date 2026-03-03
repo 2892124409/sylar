@@ -20,42 +20,70 @@ namespace sylar
 
     Socket::ptr Socket::CreateTCP(sylar::Address::ptr address)
     {
-        return Socket::ptr(new Socket(address->getFamily(), TCP, 0));
+        if (!address)
+        {
+            return nullptr;
+        }
+        Socket::ptr sock(new Socket(address->getFamily(), TCP, 0));
+        sock->newSock();
+        return sock;
     }
 
     Socket::ptr Socket::CreateUDP(sylar::Address::ptr address)
     {
-        return Socket::ptr(new Socket(address->getFamily(), UDP, 0));
+        if (!address)
+        {
+            return nullptr;
+        }
+        Socket::ptr sock(new Socket(address->getFamily(), UDP, 0));
+        sock->newSock();
+        sock->m_isConnected = true;
+        return sock;
     }
 
     Socket::ptr Socket::CreateTCPSocket()
     {
-        return Socket::ptr(new Socket(IPv4, TCP, 0));
+        Socket::ptr sock(new Socket(IPv4, TCP, 0));
+        sock->newSock();
+        return sock;
     }
 
     Socket::ptr Socket::CreateUDPSocket()
     {
-        return Socket::ptr(new Socket(IPv4, UDP, 0));
+        Socket::ptr sock(new Socket(IPv4, UDP, 0));
+        sock->newSock();
+        sock->m_isConnected = true;
+        return sock;
     }
 
     Socket::ptr Socket::CreateTCPSocket6()
     {
-        return Socket::ptr(new Socket(IPv6, TCP, 0));
+        Socket::ptr sock(new Socket(IPv6, TCP, 0));
+        sock->newSock();
+        return sock;
     }
 
     Socket::ptr Socket::CreateUDPSocket6()
     {
-        return Socket::ptr(new Socket(IPv6, UDP, 0));
+        Socket::ptr sock(new Socket(IPv6, UDP, 0));
+        sock->newSock();
+        sock->m_isConnected = true;
+        return sock;
     }
 
     Socket::ptr Socket::CreateUnixTCPSocket()
     {
-        return Socket::ptr(new Socket(UNIX, TCP, 0));
+        Socket::ptr sock(new Socket(UNIX, TCP, 0));
+        sock->newSock();
+        return sock;
     }
 
     Socket::ptr Socket::CreateUnixUDPSocket()
     {
-        return Socket::ptr(new Socket(UNIX, UDP, 0));
+        Socket::ptr sock(new Socket(UNIX, UDP, 0));
+        sock->newSock();
+        sock->m_isConnected = true;
+        return sock;
     }
 
     // ============================================================================
@@ -65,7 +93,6 @@ namespace sylar
     Socket::Socket(int family, int type, int protocol)
         : m_sock(-1), m_family(family), m_type(type), m_protocol(protocol), m_isConnected(false)
     {
-        newSock();
     }
 
     Socket::~Socket()
@@ -124,8 +151,11 @@ namespace sylar
 
     int64_t Socket::getSendTimeout()
     {
-        timeval tv;
-        getOption(SOL_SOCKET, SO_SNDTIMEO, tv);
+        timeval tv = {0, 0};
+        if (!getOption(SOL_SOCKET, SO_SNDTIMEO, tv))
+        {
+            return -1;
+        }
         return tv.tv_sec * 1000 + tv.tv_usec / 1000;
     }
 
@@ -139,8 +169,11 @@ namespace sylar
 
     int64_t Socket::getRecvTimeout()
     {
-        timeval tv;
-        getOption(SOL_SOCKET, SO_RCVTIMEO, tv);
+        timeval tv = {0, 0};
+        if (!getOption(SOL_SOCKET, SO_RCVTIMEO, tv))
+        {
+            return -1;
+        }
         return tv.tv_sec * 1000 + tv.tv_usec / 1000;
     }
 
@@ -202,7 +235,11 @@ namespace sylar
             return nullptr;
         }
         Socket::ptr client(new Socket(m_family, m_type, m_protocol));
-        client->init(client_sock);
+        if (!client->init(client_sock))
+        {
+            ::close(client_sock);
+            return nullptr;
+        }
         client->m_isConnected = true;
         client->m_remoteAddress = Address::Create((sockaddr *)&addr, len);
         return client;
@@ -212,7 +249,11 @@ namespace sylar
     {
         if (!isValid())
         {
-            return false;
+            newSock();
+            if (!isValid())
+            {
+                return false;
+            }
         }
         if (::bind(m_sock, addr->getAddr(), addr->getAddrLen()))
         {
@@ -230,7 +271,11 @@ namespace sylar
     {
         if (!isValid())
         {
-            return false;
+            newSock();
+            if (!isValid())
+            {
+                return false;
+            }
         }
         if (timeout_ms != (uint64_t)-1)
         {

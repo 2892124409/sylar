@@ -53,7 +53,7 @@ protected:
         char buf[1024];
         while (true) {
             // 读取数据
-            int len = stream->read(buf, sizeof(buf));
+            int len = stream->read(buf, sizeof(buf) - 1);
             if (len <= 0) {
                 SYLAR_LOG_INFO(g_logger) << "client disconnected: " << client->toString();
                 break;
@@ -124,7 +124,7 @@ void test_echo_server()
             std::cout << "[客户端1] 发送: " << msg << "\n";
 
             char buf[1024];
-            int len = stream->read(buf, sizeof(buf));
+            int len = stream->read(buf, sizeof(buf) - 1);
             if (len > 0) {
                 buf[len] = '\0';
                 std::cout << "[客户端1] 收到回显: " << buf << "\n";
@@ -144,7 +144,7 @@ void test_echo_server()
             std::cout << "[客户端2] 发送: " << msg << "\n";
 
             char buf[1024];
-            int len = stream->read(buf, sizeof(buf));
+            int len = stream->read(buf, sizeof(buf) - 1);
             if (len > 0) {
                 buf[len] = '\0';
                 std::cout << "[客户端2] 收到回显: " << buf << "\n";

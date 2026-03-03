@@ -5,8 +5,8 @@
 
 #include "sylar/net/udp_server.h"
 #include "sylar/log/logger.h"
-#include <sstream>
 #include <cstring>
+#include <sstream>
 
 namespace sylar {
 namespace net {
@@ -30,11 +30,15 @@ UdpServer::UdpServer(IOManager* io_worker,
 }
 
 UdpServer::~UdpServer() {
-    // 析构时停止服务器
-    for (auto& sock : m_socks) {
+    std::vector<Socket::ptr> socks;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_isStop.store(true, std::memory_order_release);
+        socks.swap(m_socks);
+    }
+    for (auto& sock : socks) {
         sock->close();
     }
-    m_socks.clear();
 }
 
 // ============================================================================
@@ -50,6 +54,7 @@ bool UdpServer::bind(Address::ptr addr) {
 
 bool UdpServer::bind(const std::vector<Address::ptr>& addrs,
                      std::vector<Address::ptr>& fails) {
+    std::vector<Socket::ptr> new_socks;
     for (auto& addr : addrs) {
         // 创建 UDP Socket
         Socket::ptr sock = Socket::CreateUDP(addr);
@@ -67,16 +72,25 @@ bool UdpServer::bind(const std::vector<Address::ptr>& addrs,
             continue;
         }
 
-        m_socks.push_back(sock);
+        new_socks.push_back(sock);
         SYLAR_LOG_INFO(g_logger) << "udp server bind success: " << addr->toString();
     }
 
     // 如果有失败的绑定，清空所有 Socket
     if (!fails.empty()) {
+        for (auto& sock : new_socks) {
+            sock->close();
+        }
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& sock : m_socks) {
+            sock->close();
+        }
         m_socks.clear();
         return false;
     }
 
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_socks.insert(m_socks.end(), new_socks.begin(), new_socks.end());
     return true;
 }
 
@@ -85,13 +99,19 @@ bool UdpServer::bind(const std::vector<Address::ptr>& addrs,
 // ============================================================================
 
 bool UdpServer::start() {
-    if (!m_isStop) {
+    bool expected = true;
+    if (!m_isStop.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
         return true;  // 已经启动
     }
-    m_isStop = false;
+
+    std::vector<Socket::ptr> socks;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        socks = m_socks;
+    }
 
     // 为每个绑定 Socket 启动 recvfrom 协程
-    for (auto& sock : m_socks) {
+    for (auto& sock : socks) {
         m_recvWorker->schedule(std::bind(&UdpServer::startReceive,
                                          shared_from_this(), sock));
     }
@@ -99,20 +119,24 @@ bool UdpServer::start() {
 }
 
 void UdpServer::stop() {
-    if (m_isStop) {
+    bool expected = false;
+    if (!m_isStop.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return;  // 已经停止
     }
-    m_isStop = true;
 
     auto self = shared_from_this();
 
     // 异步清理资源（避免死锁）
     m_recvWorker->schedule([this, self]() {
-        for (auto& sock : m_socks) {
+        std::vector<Socket::ptr> socks;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            socks.swap(m_socks);
+        }
+        for (auto& sock : socks) {
             sock->cancelAll();  // 取消所有事件
             sock->close();
         }
-        m_socks.clear();
         SYLAR_LOG_INFO(g_logger) << "UdpServer cleanup completed";
     });
 
@@ -124,12 +148,22 @@ void UdpServer::stop() {
 // ============================================================================
 
 int UdpServer::sendTo(const void* buffer, size_t length, Address::ptr to, size_t sockIndex) {
-    if (sockIndex >= m_socks.size()) {
+    Socket::ptr sock;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (sockIndex >= m_socks.size()) {
+            SYLAR_LOG_ERROR(g_logger) << "sendTo invalid sockIndex=" << sockIndex
+                                      << " socks.size()=" << m_socks.size();
+            return -1;
+        }
+        sock = m_socks[sockIndex];
+    }
+    if (!sock) {
         SYLAR_LOG_ERROR(g_logger) << "sendTo invalid sockIndex=" << sockIndex
-                                  << " socks.size()=" << m_socks.size();
+                                  << " sock is null";
         return -1;
     }
-    return m_socks[sockIndex]->sendTo(buffer, length, to);
+    return sock->sendTo(buffer, length, to);
 }
 
 // ============================================================================
@@ -146,10 +180,12 @@ void UdpServer::handleDatagram(const void* data, size_t len,
 }
 
 void UdpServer::startReceive(Socket::ptr sock) {
+    sock->setRecvTimeout(m_recvTimeout);
+
     // 分配接收缓冲区
     char* buffer = new char[m_bufferSize];
 
-    while (!m_isStop) {
+    while (!m_isStop.load(std::memory_order_acquire)) {
         Address::ptr from;
         int n = sock->recvFrom(buffer, m_bufferSize, from);
         if (n > 0) {
@@ -161,7 +197,7 @@ void UdpServer::startReceive(Socket::ptr sock) {
             });
         } else if (n < 0) {
             // 出错，检查是否应该退出
-            if (m_isStop) {
+            if (m_isStop.load(std::memory_order_acquire)) {
                 break;
             }
             SYLAR_LOG_ERROR(g_logger) << "recvfrom errno=" << errno
@@ -184,16 +220,22 @@ void UdpServer::startReceive(Socket::ptr sock) {
 // ============================================================================
 
 std::string UdpServer::toString(const std::string& prefix) {
+    std::vector<Socket::ptr> socks;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        socks = m_socks;
+    }
+
     std::stringstream ss;
     ss << prefix << "[UdpServer name=" << m_name
        << " type=" << m_type
        << " recvTimeout=" << m_recvTimeout
        << " bufferSize=" << m_bufferSize
-       << " isStop=" << m_isStop
+       << " isStop=" << m_isStop.load(std::memory_order_acquire)
        << "]" << std::endl;
 
-    for (size_t i = 0; i < m_socks.size(); ++i) {
-        ss << prefix << "  sock[" << i << "]: " << m_socks[i]->toString() << std::endl;
+    for (size_t i = 0; i < socks.size(); ++i) {
+        ss << prefix << "  sock[" << i << "]: " << socks[i]->toString() << std::endl;
     }
     return ss.str();
 }
