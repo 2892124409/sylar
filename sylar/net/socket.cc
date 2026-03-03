@@ -104,7 +104,6 @@ namespace sylar
     // Socket 初始化方法
     // ============================================================================
 
-    
     void Socket::newSock()
     {
         m_sock = socket(m_family, m_type, m_protocol);
@@ -137,7 +136,7 @@ namespace sylar
         {
             m_sock = sock;
             m_isConnected = true;
-            initSock();  // 设置 SO_REUSEADDR 和 TCP_NODELAY
+            initSock(); // 设置 SO_REUSEADDR 和 TCP_NODELAY
             getLocalAddress();
             getRemoteAddress();
             return true;
@@ -325,7 +324,7 @@ namespace sylar
     {
         if (!isValid())
         {
-            return true;  // 已经关闭
+            return true; // 已经关闭
         }
 
         m_isConnected = false;
@@ -418,7 +417,7 @@ namespace sylar
         return -1;
     }
 
-    int Socket::recvFrom(void *buffer, size_t length, Address::ptr& from, int flags)
+    int Socket::recvFrom(void *buffer, size_t length, Address::ptr &from, int flags)
     {
         if (!isValid())
         {
@@ -434,7 +433,7 @@ namespace sylar
         return n;
     }
 
-    int Socket::recvFrom(iovec *buffers, size_t length, Address::ptr& from, int flags)
+    int Socket::recvFrom(iovec *buffers, size_t length, Address::ptr &from, int flags)
     {
         if (!isValid())
         {

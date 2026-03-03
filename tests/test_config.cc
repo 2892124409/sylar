@@ -15,7 +15,8 @@ sylar::ConfigVar<std::vector<int>>::ptr g_int_vec_value_config =
 sylar::ConfigVar<std::map<std::string, int>>::ptr g_int_map_value_config =
     sylar::Config::Lookup("system.int_map", std::map<std::string, int>{{"k", 2}}, "system int map");
 
-void test_yaml() {
+void test_yaml()
+{
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "--- Before LoadFromYaml ---";
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "int_vec: " << g_int_vec_value_config->toString();
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "int_map: " << g_int_map_value_config->toString();
@@ -35,11 +36,11 @@ void test_yaml() {
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "int_map: " << g_int_map_value_config->toString();
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv)
+{
     // 监听器测试
-    g_int_value_config->addListener([](const int& old_value, const int& new_value){
-        SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "port changed from " << old_value << " to " << new_value;
-    });
+    g_int_value_config->addListener([](const int &old_value, const int &new_value)
+                                    { SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "port changed from " << old_value << " to " << new_value; });
 
     test_yaml();
 

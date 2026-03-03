@@ -13,7 +13,7 @@
 #include "sylar/net/address.h"
 #include "sylar/log/logger.h"
 #include "sylar/fiber/iomanager.h"
-#include "sylar/fiber/hook.h"  // 添加 hook 头文件
+#include "sylar/fiber/hook.h" // 添加 hook 头文件
 #include <iostream>
 #include <cstring>
 
@@ -30,13 +30,15 @@ static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 /**
  * @brief Echo 服务器 - 将收到的数据原样返回
  */
-class EchoServer : public sylar::net::TcpServer {
+class EchoServer : public sylar::net::TcpServer
+{
 public:
     typedef std::shared_ptr<EchoServer> ptr;
 
-    EchoServer(sylar::IOManager* io_worker = sylar::IOManager::GetThis(),
-               sylar::IOManager* accept_worker = sylar::IOManager::GetThis())
-        : TcpServer(io_worker, accept_worker) {
+    EchoServer(sylar::IOManager *io_worker = sylar::IOManager::GetThis(),
+               sylar::IOManager *accept_worker = sylar::IOManager::GetThis())
+        : TcpServer(io_worker, accept_worker)
+    {
         setName("EchoServer/1.0.0");
     }
 
@@ -44,17 +46,20 @@ protected:
     /**
      * @brief 处理客户端连接 - Echo 实现
      */
-    virtual void handleClient(sylar::Socket::ptr client) override {
+    virtual void handleClient(sylar::Socket::ptr client) override
+    {
         SYLAR_LOG_INFO(g_logger) << "EchoServer::handleClient: " << *client;
 
         // 使用 SocketStream 包装 Socket
         sylar::SocketStream::ptr stream(new sylar::SocketStream(client));
 
         char buf[1024];
-        while (true) {
+        while (true)
+        {
             // 读取数据
             int len = stream->read(buf, sizeof(buf) - 1);
-            if (len <= 0) {
+            if (len <= 0)
+            {
                 SYLAR_LOG_INFO(g_logger) << "client disconnected: " << client->toString();
                 break;
             }
@@ -92,22 +97,26 @@ void test_echo_server()
     addrs.push_back(sylar::Address::LookupAny("0.0.0.0:8081"));
 
     std::vector<sylar::Address::ptr> fails;
-    if (!server->bind(addrs, fails)) {
+    if (!server->bind(addrs, fails))
+    {
         SYLAR_LOG_ERROR(g_logger) << "bind fail";
-        for (auto& addr : fails) {
+        for (auto &addr : fails)
+        {
             std::cout << "  绑定失败: " << addr->toString() << "\n";
         }
         return;
     }
 
-    std::cout << "[服务器] 多地址绑定成功:\n" << server->toString("  ");
+    std::cout << "[服务器] 多地址绑定成功:\n"
+              << server->toString("  ");
 
     // 启动服务器
     server->start();
     std::cout << "[服务器] Echo 服务器启动成功\n";
 
     // 客户端测试协程
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sleep(1);
 
         std::cout << "\n---------- 客户端测试 ----------\n";
@@ -152,16 +161,15 @@ void test_echo_server()
             stream->close();
         }
 
-        std::cout << "---------- 测试完成 ----------\n";
-    });
+        std::cout << "---------- 测试完成 ----------\n"; });
 
     // 等待测试完成后停止服务器
-    iom.schedule([server]() {
+    iom.schedule([server]()
+                 {
         sleep(3);  // 等待测试完成
         std::cout << "\n[服务器] 准备停止...\n";
         server->stop();
-        std::cout << "[服务器] 已停止\n";
-    });
+        std::cout << "[服务器] 已停止\n"; });
 
     // IOManager 析构时会等待所有任务完成
 }
@@ -170,7 +178,7 @@ void test_echo_server()
 // 主函数
 // ============================================================================
 
-int main(int argc, char** argv)
+int main(int argc, char **argv)
 {
     std::cout << "========================================\n";
     std::cout << "  TcpServer 模块测试\n";

@@ -21,12 +21,12 @@ namespace sylar
      *          超时时间初始化为 (uint64_t)-1，表示无限超时
      */
     FdCtx::FdCtx(int fd)
-        : m_isInit(false),          // 初始化标志，默认未初始化
-          m_isSocket(false),         // socket标志，默认不是socket
-          m_sysNonblock(false),      // 系统非阻塞标志，默认阻塞
-          m_userNonblock(false),     // 用户非阻塞标志，默认阻塞
-          m_isClosed(false),         // 关闭标志，默认未关闭
-          m_fd(fd),                  // 保存文件描述符
+        : m_isInit(false),             // 初始化标志，默认未初始化
+          m_isSocket(false),           // socket标志，默认不是socket
+          m_sysNonblock(false),        // 系统非阻塞标志，默认阻塞
+          m_userNonblock(false),       // 用户非阻塞标志，默认阻塞
+          m_isClosed(false),           // 关闭标志，默认未关闭
+          m_fd(fd),                    // 保存文件描述符
           m_recvTimeout((uint64_t)-1), // 接收超时，-1表示永不超时
           m_sendTimeout((uint64_t)-1)  // 发送超时，-1表示永不超时
     {

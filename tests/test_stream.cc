@@ -43,7 +43,8 @@ void test_basic_read_write()
     sylar::IOManager iom(2);
 
     // 服务端
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         // 创建服务器 Socket
         sylar::Socket::ptr server = sylar::Socket::CreateTCPSocket();
         sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:8090");
@@ -85,11 +86,11 @@ void test_basic_read_write()
             std::cout << "[服务端] 发送: " << response << "\n";
         }
 
-        stream->close();
-    });
+        stream->close(); });
 
     // 客户端（延迟启动，确保服务器先启动）
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sleep(1);  // 等待服务器启动
 
         // 创建客户端 Socket
@@ -119,8 +120,7 @@ void test_basic_read_write()
             std::cout << "[客户端] 收到: " << buf << " (" << len << " 字节)\n";
         }
 
-        stream->close();
-    });
+        stream->close(); });
 }
 
 // ============================================================================
@@ -142,7 +142,8 @@ void test_fix_size()
     sylar::IOManager iom(2);
 
     // 服务端
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sylar::Socket::ptr server = sylar::Socket::CreateTCPSocket();
         sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:8091");
 
@@ -179,11 +180,11 @@ void test_fix_size()
         std::cout << "[服务端] 收到完整消息: " << buf << "\n";
 
         delete[] buf;
-        stream->close();
-    });
+        stream->close(); });
 
     // 客户端
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sleep(1);
 
         sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
@@ -206,8 +207,7 @@ void test_fix_size()
         stream->writeFixSize(message, len);
         std::cout << "[客户端] 发送消息: " << message << "\n";
 
-        stream->close();
-    });
+        stream->close(); });
 }
 
 // ============================================================================
@@ -229,7 +229,8 @@ void test_bytearray()
     sylar::IOManager iom(2);
 
     // 服务端
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sylar::Socket::ptr server = sylar::Socket::CreateTCPSocket();
         sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:8092");
 
@@ -267,11 +268,11 @@ void test_bytearray()
             std::cout << "    Age: " << age << "\n";
         }
 
-        stream->close();
-    });
+        stream->close(); });
 
     // 客户端
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sleep(1);
 
         sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
@@ -300,8 +301,7 @@ void test_bytearray()
 
         std::cout << "[客户端] 发送完成\n";
 
-        stream->close();
-    });
+        stream->close(); });
 }
 
 // ============================================================================
@@ -322,7 +322,8 @@ void test_address_info()
     sylar::IOManager iom(2);
 
     // 服务端
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sylar::Socket::ptr server = sylar::Socket::CreateTCPSocket();
         sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:8093");
 
@@ -339,11 +340,11 @@ void test_address_info()
         std::cout << "    远端地址: " << stream->getRemoteAddressString() << "\n";
 
         sleep(1);
-        stream->close();
-    });
+        stream->close(); });
 
     // 客户端
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sleep(1);
 
         sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
@@ -357,15 +358,14 @@ void test_address_info()
         std::cout << "    远端地址: " << stream->getRemoteAddressString() << "\n";
 
         sleep(2);
-        stream->close();
-    });
+        stream->close(); });
 }
 
 // ============================================================================
 // 主函数
 // ============================================================================
 
-int main(int argc, char** argv)
+int main(int argc, char **argv)
 {
     std::cout << "========================================\n";
     std::cout << "  Stream + SocketStream 模块测试\n";

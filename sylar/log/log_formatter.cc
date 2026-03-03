@@ -8,53 +8,62 @@
 #include <time.h>
 #include "logger.h" // 引入logger.h，以便使用Logger的方法
 
-namespace sylar {
+namespace sylar
+{
 
-// ======================= 各类格式化子项实现 =======================
+    // ======================= 各类格式化子项实现 =======================
 
-/**
- * @brief 消息内容格式化器 (%m)
- */
-class MessageFormatItem : public LogFormatter::FormatItem {
-public:
-    MessageFormatItem(const std::string& str = "") {}
-    void format(std::ostream& os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override {
-        os << event->getContent();
-    }
-};
+    /**
+     * @brief 消息内容格式化器 (%m)
+     */
+    class MessageFormatItem : public LogFormatter::FormatItem
+    {
+    public:
+        MessageFormatItem(const std::string &str = "") {}
+        void format(std::ostream &os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override
+        {
+            os << event->getContent();
+        }
+    };
 
-/**
- * @brief 日志级别格式化器 (%p)
- */
-class LevelFormatItem : public LogFormatter::FormatItem {
-public:
-    LevelFormatItem(const std::string& str = "") {}
-    void format(std::ostream& os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override {
-        os << LogLevel::ToString(level);
-    }
-};
+    /**
+     * @brief 日志级别格式化器 (%p)
+     */
+    class LevelFormatItem : public LogFormatter::FormatItem
+    {
+    public:
+        LevelFormatItem(const std::string &str = "") {}
+        void format(std::ostream &os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override
+        {
+            os << LogLevel::ToString(level);
+        }
+    };
 
-/**
- * @brief 累计毫秒数格式化器 (%r)
- */
-class ElapseFormatItem : public LogFormatter::FormatItem {
-public:
-    ElapseFormatItem(const std::string& str = "") {}
-    void format(std::ostream& os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override {
-        os << event->getElapse();
-    }
-};
+    /**
+     * @brief 累计毫秒数格式化器 (%r)
+     */
+    class ElapseFormatItem : public LogFormatter::FormatItem
+    {
+    public:
+        ElapseFormatItem(const std::string &str = "") {}
+        void format(std::ostream &os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override
+        {
+            os << event->getElapse();
+        }
+    };
 
-/**
- * @brief 日志器名称格式化器 (%c)
- */
-class NameFormatItem : public LogFormatter::FormatItem {
-public:
-    NameFormatItem(const std::string& str = "") {}
-    void format(std::ostream& os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override {
-        os << logger->getName(); 
-    }
-};
+    /**
+     * @brief 日志器名称格式化器 (%c)
+     */
+    class NameFormatItem : public LogFormatter::FormatItem
+    {
+    public:
+        NameFormatItem(const std::string &str = "") {}
+        void format(std::ostream &os, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override
+        {
+            os << logger->getName();
+        }
+    };
 
     /**
      * @brief 线程ID格式化器 (%t)
