@@ -6002,3 +6002,155 @@ void TcpServer::stop() {
 - `sylar/net/udp_server.cc`
 - `tests/test_tcp_server.cc`
 - `tests/test_udp_server.cc`
+
+---
+
+### 12. 2026-03-04 稳定性补丁（Fiber + Hook 主链路）
+
+本轮修复目标：只改源码，不改测试用例逻辑，优先提升后续网络服务稳定性（`Fiber/Scheduler/Hook/FdCtx`）。
+
+#### Bug G：`Fiber` 在无 `Scheduler` 场景下可能空指针崩溃
+
+**现象**：独立使用 `Fiber`（未进入 `Scheduler/IOManager` 上下文）时，`resume()/yield()` 会走调度协程分支，存在空指针风险，表现为段错误。
+
+**出现原因**：
+
+- `m_runInScheduler=true` 的协程直接使用 `Scheduler::GetMainFiber()->m_ctx`。
+- 当前线程若没有调度器主协程，`GetMainFiber()` 为 `nullptr`。
+
+**修复过程**：
+
+1. 在 `Fiber::resume()` 中加入运行时判定：
+   - 若存在调度主协程，保持原切换路径；
+   - 若不存在，回退到线程主协程 `t_thread_fiber` 路径并打印 `WARN`。
+2. 在 `Fiber::yield()` 中做对称回退逻辑，保证切入/切出路径一致。
+3. 增加 `t_thread_fiber` 可用性断言，防止静默错误。
+
+**涉及文件**：
+
+- `sylar/fiber/fiber.cc`
+
+---
+
+#### Bug H：`Scheduler::stop()` 存在 root 协程重入风险
+
+**现象**：在某些时序下，`stop()` 可能对 root 协程重复 `call()`，导致协程状态机不稳定，出现断言异常风险。
+
+**出现原因**：
+
+- `stop()` 仅判断 `!stopping()`，对 root 协程状态约束不够严格。
+
+**修复过程**：
+
+1. 在进入 `m_rootFiber->call()` 前增加状态门禁：
+   - 禁止在 `EXEC/TERM/EXCEPT` 状态下重入 `call()`。
+2. 保留原有 stop 流程，不改变外部接口行为。
+
+**涉及文件**：
+
+- `sylar/fiber/scheduler.cc`
+
+---
+
+#### Bug I：`hook.cc` 中 `fcntl` 变参处理存在 UB 风险
+
+**现象**：`fcntl` 分支里 `va_end/va_arg` 处理不规范，存在未定义行为，可能导致随机崩溃或异常返回。
+
+**出现原因**：
+
+- 部分分支直接 `return` 未统一 `va_end`；
+- 存在 `va_end` 后继续 `va_arg` 的错误顺序；
+- 不同 `cmd` 的参数类型未细分。
+
+**修复过程**：
+
+1. 重写 `fcntl` 分支参数提取逻辑，保证每条路径一次性正确 `va_arg` + `va_end`。
+2. 按 `cmd` 区分参数类型：
+   - 无第三参：直接透传；
+   - `int` 参数类；
+   - `struct flock*` 参数类；
+   - `uint64_t*` 参数类（若平台支持相关宏）。
+3. 保留 `F_SETFL/F_GETFL` 与 `FdCtx` 的非阻塞语义联动。
+
+**涉及文件**：
+
+- `sylar/fiber/hook.cc`
+
+---
+
+#### Bug J：`ioctl(FIONBIO)` 参数类型处理不安全
+
+**现象**：`FIONBIO` 参数原实现按整数取值，语义上应处理为指针参数，存在兼容性风险。
+
+**出现原因**：
+
+- 变参读取类型与系统调用实际使用方式不一致。
+
+**修复过程**：
+
+1. `ioctl` 变参统一按 `void*` 读取。
+2. 对 `request == FIONBIO` 时按 `int*` 解析并同步 `FdCtx::m_userNonblock`。
+3. 其余请求保持透传原始 `ioctl_f`。
+
+**涉及文件**：
+
+- `sylar/fiber/hook.cc`
+
+---
+
+#### Bug K：`setsockopt` 超时选项语义“假成功”
+
+**现象**：设置 `SO_RCVTIMEO/SO_SNDTIMEO` 时，原实现只写 `FdCtx` 并直接返回 0，可能掩盖系统调用失败。
+
+**出现原因**：
+
+- Hook 层没有返回真实内核调用结果。
+
+**修复过程**：
+
+1. 先执行 `setsockopt_f`，并返回真实 `rt/errno`。
+2. 仅在系统调用成功后，再同步 `FdCtx` 中的超时缓存。
+3. 对 `optval/optlen` 做基础有效性判断。
+
+**涉及文件**：
+
+- `sylar/fiber/hook.cc`
+
+---
+
+#### Bug L：`close` 后 `FdCtx` 关闭状态一致性不足
+
+**现象**：关闭 fd 的路径中，`FdCtx` 关闭状态与管理器清理动作之间语义不够明确。
+
+**出现原因**：
+
+- 原路径主要直接 `del(fd)`，未显式标记关闭状态。
+
+**修复过程**：
+
+1. 为 `FdCtx` 新增 `setClose(bool)`。
+2. 在 Hook `close` 中先执行真实 `close_f`，成功（或 `EBADF`）后标记 `setClose(true)` 并从 `FdMgr` 删除。
+
+**涉及文件**：
+
+- `sylar/fiber/fd_manager.h`
+- `sylar/fiber/hook.cc`
+
+---
+
+#### 回归验证记录（本轮）
+
+1. `cmake --build build -j4` 编译通过。
+2. `test_fiber` 由“历史段错误”恢复为稳定退出（`exit code 0`）。
+3. `test_hook` 由“历史断言中止”恢复为稳定退出（`exit code 0`）。
+4. `test_scheduler`、`test_iomanager` 回归通过。
+5. `test_tcp_server` 在当前受限环境仍因 `socket()` 权限（`Operation not permitted`）无法进行真实 bind/回环，但进程稳定退出（`exit code 0`），未出现本轮修复引入的崩溃。
+
+---
+
+#### 本轮修复涉及文件清单
+
+- `sylar/fiber/fd_manager.h`
+- `sylar/fiber/fiber.cc`
+- `sylar/fiber/hook.cc`
+- `sylar/fiber/scheduler.cc`
