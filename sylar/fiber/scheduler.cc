@@ -142,7 +142,10 @@ namespace sylar
         // 如果开启了 use_caller，主线程在这里加入战斗，跑一遍 run
         if (m_rootFiber)
         {
-            if (!stopping())
+            // root 协程正在执行 run() 时，禁止重入 call()，否则会破坏上下文切换栈
+            Fiber::State root_state = m_rootFiber->getState();
+            if (!stopping() && root_state != Fiber::EXEC &&
+                root_state != Fiber::TERM && root_state != Fiber::EXCEPT)
             {
                 m_rootFiber->call();
             }

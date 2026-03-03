@@ -537,9 +537,14 @@ extern "C"
                     iom->cancelAll(fd);
                 }
             }
+        }
+        int rt = close_f(fd);
+        if (ctx && (rt == 0 || errno == EBADF))
+        {
+            ctx->setClose(true);
             sylar::FdMgr::GetInstance()->del(fd);
         }
-        return close_f(fd);
+        return rt;
     }
 
     int fcntl(int fd, int cmd, ...)
@@ -585,17 +590,93 @@ extern "C"
             return ctx->getUserNonblock() ? (arg | O_NONBLOCK) : (arg & ~O_NONBLOCK);
         }
         break;
-        case F_SETFD:
         case F_GETFD:
+        case F_GETOWN:
+#ifdef F_GETSIG
+        case F_GETSIG:
+#endif
+#ifdef F_GETLEASE
+        case F_GETLEASE:
+#endif
+#ifdef F_GETPIPE_SZ
+        case F_GETPIPE_SZ:
+#endif
+#ifdef F_GET_SEALS
+        case F_GET_SEALS:
+#endif
+            va_end(va);
+            return fcntl_f(fd, cmd);
+        case F_DUPFD:
+#ifdef F_DUPFD_CLOEXEC
+        case F_DUPFD_CLOEXEC:
+#endif
+        case F_SETFD:
+        case F_SETOWN:
+#ifdef F_SETSIG
+        case F_SETSIG:
+#endif
+#ifdef F_SETLEASE
+        case F_SETLEASE:
+#endif
+#ifdef F_NOTIFY
+        case F_NOTIFY:
+#endif
+#ifdef F_SETPIPE_SZ
+        case F_SETPIPE_SZ:
+#endif
+#ifdef F_ADD_SEALS
+        case F_ADD_SEALS:
+#endif
+        {
+            int arg = va_arg(va, int);
+            va_end(va);
+            return fcntl_f(fd, cmd, arg);
+        }
         case F_SETLK:
         case F_GETLK:
         case F_SETLKW:
-        case F_GETOWN:
-        case F_SETOWN:
-            return fcntl_f(fd, cmd, va_arg(va, long));
-        default:
+        {
+            struct flock *arg = va_arg(va, struct flock *);
             va_end(va);
-            return fcntl_f(fd, cmd, va_arg(va, long));
+            return fcntl_f(fd, cmd, arg);
+        }
+#ifdef F_OFD_GETLK
+        case F_OFD_GETLK:
+#endif
+#ifdef F_OFD_SETLK
+        case F_OFD_SETLK:
+#endif
+#ifdef F_OFD_SETLKW
+        case F_OFD_SETLKW:
+#endif
+        {
+            struct flock *arg = va_arg(va, struct flock *);
+            va_end(va);
+            return fcntl_f(fd, cmd, arg);
+        }
+#ifdef F_GET_RW_HINT
+        case F_GET_RW_HINT:
+#endif
+#ifdef F_GET_FILE_RW_HINT
+        case F_GET_FILE_RW_HINT:
+#endif
+#ifdef F_SET_RW_HINT
+        case F_SET_RW_HINT:
+#endif
+#ifdef F_SET_FILE_RW_HINT
+        case F_SET_FILE_RW_HINT:
+#endif
+        {
+            uint64_t *arg = va_arg(va, uint64_t *);
+            va_end(va);
+            return fcntl_f(fd, cmd, arg);
+        }
+        default:
+        {
+            long arg = va_arg(va, long);
+            va_end(va);
+            return fcntl_f(fd, cmd, arg);
+        }
         }
     }
 
@@ -603,7 +684,7 @@ extern "C"
     {
         va_list va;
         va_start(va, request);
-        int arg = va_arg(va, int);
+        void *arg = va_arg(va, void *);
         va_end(va);
 
         if (!sylar::is_hook_enable())
@@ -619,8 +700,11 @@ extern "C"
 
         if (request == FIONBIO)
         {
-            bool user_nonblock = !!arg;
-            ctx->setUserNonblock(user_nonblock);
+            if (arg)
+            {
+                bool user_nonblock = !!(*static_cast<int *>(arg));
+                ctx->setUserNonblock(user_nonblock);
+            }
         }
         return ioctl_f(d, request, arg);
     }
@@ -636,20 +720,27 @@ extern "C"
         {
             return setsockopt_f(sockfd, level, optname, optval, optlen);
         }
+        int rt = setsockopt_f(sockfd, level, optname, optval, optlen);
+        if (rt != 0)
+        {
+            return rt;
+        }
         if (level == SOL_SOCKET)
         {
             if (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO)
             {
-                sylar::FdCtx::ptr ctx = sylar::FdMgr::GetInstance()->get(sockfd);
-                if (ctx)
+                if (optval && optlen >= (socklen_t)sizeof(timeval))
                 {
-                    const timeval *v = (const timeval *)optval;
-                    ctx->setTimeout(optname, v->tv_sec * 1000 + v->tv_usec / 1000);
+                    sylar::FdCtx::ptr ctx = sylar::FdMgr::GetInstance()->get(sockfd);
+                    if (ctx)
+                    {
+                        const timeval *v = static_cast<const timeval *>(optval);
+                        ctx->setTimeout(optname, v->tv_sec * 1000 + v->tv_usec / 1000);
+                    }
                 }
-                return 0;
             }
         }
-        return setsockopt_f(sockfd, level, optname, optval, optlen);
+        return rt;
     }
 
 } // extern "C"

@@ -58,6 +58,11 @@ namespace sylar
         bool isClose() const { return m_isClosed; }
 
         /**
+         * @brief 设置关闭状态
+         */
+        void setClose(bool v) { m_isClosed = v; }
+
+        /**
          * @brief 设置用户主动设置非阻塞
          * @param[in] v 是否非阻塞
          */

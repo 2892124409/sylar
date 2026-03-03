@@ -143,16 +143,27 @@ namespace sylar
         SetThis(this);
         m_state = EXEC;
 
-        // 如果参与调度，则与调度协程切换；否则与主协程切换
+        Fiber *scheduler_fiber = nullptr;
         if (m_runInScheduler)
         {
-            if (swapcontext(&Scheduler::GetMainFiber()->m_ctx, &m_ctx))
+            scheduler_fiber = Scheduler::GetMainFiber();
+            if (!scheduler_fiber)
+            {
+                SYLAR_LOG_WARN(SYLAR_LOG_ROOT()) << "Fiber::resume fallback to thread fiber, id=" << m_id;
+            }
+        }
+
+        // 如果参与调度，则与调度协程切换；否则与主协程切换
+        if (m_runInScheduler && scheduler_fiber)
+        {
+            if (swapcontext(&scheduler_fiber->m_ctx, &m_ctx))
             {
                 SYLAR_ASSERT2(false, "swapcontext");
             }
         }
         else
         {
+            SYLAR_ASSERT2(t_thread_fiber, "resume without thread main fiber");
             if (swapcontext(&t_thread_fiber->m_ctx, &m_ctx))
             {
                 SYLAR_ASSERT2(false, "swapcontext");
@@ -167,13 +178,24 @@ namespace sylar
     {
         SYLAR_ASSERT(m_state == EXEC || m_state == TERM || m_state == EXCEPT);
 
-        // 如果参与调度，则切换回调度协程；否则切换回主协程
+        Fiber *scheduler_fiber = nullptr;
         if (m_runInScheduler)
         {
-            SetThis(Scheduler::GetMainFiber());
+            scheduler_fiber = Scheduler::GetMainFiber();
+            if (!scheduler_fiber)
+            {
+                SYLAR_LOG_WARN(SYLAR_LOG_ROOT()) << "Fiber::yield fallback to thread fiber, id=" << m_id;
+            }
+        }
+
+        // 如果参与调度，则切换回调度协程；否则切换回主协程
+        if (m_runInScheduler && scheduler_fiber)
+        {
+            SetThis(scheduler_fiber);
         }
         else
         {
+            SYLAR_ASSERT2(t_thread_fiber, "yield without thread main fiber");
             SetThis(t_thread_fiber.get());
         }
 
@@ -182,15 +204,16 @@ namespace sylar
             m_state = HOLD;
         }
 
-        if (m_runInScheduler)
+        if (m_runInScheduler && scheduler_fiber)
         {
-            if (swapcontext(&m_ctx, &Scheduler::GetMainFiber()->m_ctx))
+            if (swapcontext(&m_ctx, &scheduler_fiber->m_ctx))
             {
                 SYLAR_ASSERT2(false, "swapcontext");
             }
         }
         else
         {
+            SYLAR_ASSERT2(t_thread_fiber, "yield swap without thread main fiber");
             if (swapcontext(&m_ctx, &t_thread_fiber->m_ctx))
             {
                 SYLAR_ASSERT2(false, "swapcontext");
