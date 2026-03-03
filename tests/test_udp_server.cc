@@ -29,13 +29,15 @@ static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 /**
  * @brief Echo UDP 服务器 - 将收到的数据原样返回
  */
-class EchoUdpServer : public sylar::net::UdpServer {
+class EchoUdpServer : public sylar::net::UdpServer
+{
 public:
     typedef std::shared_ptr<EchoUdpServer> ptr;
 
-    EchoUdpServer(sylar::IOManager* io_worker = sylar::IOManager::GetThis(),
-                  sylar::IOManager* recv_worker = sylar::IOManager::GetThis())
-        : UdpServer(io_worker, recv_worker) {
+    EchoUdpServer(sylar::IOManager *io_worker = sylar::IOManager::GetThis(),
+                  sylar::IOManager *recv_worker = sylar::IOManager::GetThis())
+        : UdpServer(io_worker, recv_worker)
+    {
         setName("EchoUdpServer/1.0.0");
     }
 
@@ -43,17 +45,21 @@ protected:
     /**
      * @brief 处理数据报 - Echo 实现
      */
-    virtual void handleDatagram(const void* data, size_t len,
-                                sylar::Address::ptr from, sylar::Socket::ptr sock) override {
+    virtual void handleDatagram(const void *data, size_t len,
+                                sylar::Address::ptr from, sylar::Socket::ptr sock) override
+    {
         std::cout << "[EchoUdpServer] received " << len << " bytes from "
                   << from->toString() << ": "
-                  << std::string((const char*)data, len) << "\n";
+                  << std::string((const char *)data, len) << "\n";
 
         // Echo 回去
         int n = sock ? sock->sendTo(data, len, from) : -1;
-        if (n < 0) {
+        if (n < 0)
+        {
             std::cout << "[EchoUdpServer] sendto failed\n";
-        } else {
+        }
+        else
+        {
             std::cout << "[EchoUdpServer] sent " << n << " bytes back\n";
         }
     }
@@ -81,22 +87,26 @@ void test_echo_udp_server()
     addrs.push_back(sylar::Address::LookupAny("0.0.0.0:9091"));
 
     std::vector<sylar::Address::ptr> fails;
-    if (!server->bind(addrs, fails)) {
+    if (!server->bind(addrs, fails))
+    {
         std::cout << "[服务器] bind fail\n";
-        for (auto& addr : fails) {
+        for (auto &addr : fails)
+        {
             std::cout << "  绑定失败: " << addr->toString() << "\n";
         }
         return;
     }
 
-    std::cout << "[服务器] 多地址绑定成功:\n" << server->toString("  ");
+    std::cout << "[服务器] 多地址绑定成功:\n"
+              << server->toString("  ");
 
     // 启动服务器
     server->start();
     std::cout << "[服务器] Echo UDP 服务器启动成功\n";
 
     // 客户端测试协程
-    iom.schedule([server]() {
+    iom.schedule([server]()
+                 {
         sleep(1);
 
         std::cout << "\n---------- 客户端测试 ----------\n";
@@ -130,16 +140,15 @@ void test_echo_udp_server()
             std::cout << "[客户端] 收到回显: " << buf << "\n";
         }
 
-        std::cout << "---------- 测试完成 ----------\n";
-    });
+        std::cout << "---------- 测试完成 ----------\n"; });
 
     // 等待测试完成后停止服务器
-    iom.schedule([server]() {
+    iom.schedule([server]()
+                 {
         sleep(3);  // 等待测试完成
         std::cout << "\n[服务器] 准备停止...\n";
         server->stop();
-        std::cout << "[服务器] 已停止\n";
-    });
+        std::cout << "[服务器] 已停止\n"; });
 
     // IOManager 析构时会等待所有任务完成
 }
@@ -148,7 +157,7 @@ void test_echo_udp_server()
 // 主函数
 // ============================================================================
 
-int main(int argc, char** argv)
+int main(int argc, char **argv)
 {
     std::cout << "========================================\n";
     std::cout << "  UdpServer 模块测试\n";

@@ -406,7 +406,8 @@ namespace sylar
          * @param[in] cb 回调函数
          * @return 返回该回调函数的唯一id，用于删除回调
          */
-        uint64_t addListener(on_change_cb cb) {
+        uint64_t addListener(on_change_cb cb)
+        {
             static uint64_t s_fun_id = 0;
             std::lock_guard<MutexType> lock(m_mutex);
             ++s_fun_id;
@@ -418,7 +419,8 @@ namespace sylar
          * @brief 删除变化回调函数
          * @param[in] key 回调函数的唯一id
          */
-        void delListener(uint64_t key) {
+        void delListener(uint64_t key)
+        {
             std::lock_guard<MutexType> lock(m_mutex);
             m_cbs.erase(key);
         }
@@ -427,7 +429,8 @@ namespace sylar
          * @brief 获取回调函数
          * @param[in] key 回调函数的唯一id
          */
-        on_change_cb getListener(uint64_t key) {
+        on_change_cb getListener(uint64_t key)
+        {
             std::lock_guard<MutexType> lock(m_mutex);
             auto it = m_cbs.find(key);
             return it == m_cbs.end() ? nullptr : it->second;
@@ -436,7 +439,8 @@ namespace sylar
         /**
          * @brief 清空所有的回调函数
          */
-        void clearListener() {
+        void clearListener()
+        {
             std::lock_guard<MutexType> lock(m_mutex);
             m_cbs.clear();
         }
@@ -457,7 +461,7 @@ namespace sylar
         typedef std::mutex MutexType; // 这里的 MutexType 其实还没定义，我们需要引入mutex头文件或者使用 sylar::Logger::MutexType
         MutexType m_mutex;
     };
-    
+
     /**
      * @brief Config管理类
      */

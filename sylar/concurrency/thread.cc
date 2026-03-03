@@ -51,19 +51,18 @@ namespace sylar
             m_name = "UNKNOWN";
         }
 
-            // 创建线程，执行pthread_create会创建执行Thread::run函数的一个子线程
+        // 创建线程，执行pthread_create会创建执行Thread::run函数的一个子线程
 
-            // 参数 1: &m_thread, 线程句柄，用于存储系统分配的线程标识。
+        // 参数 1: &m_thread, 线程句柄，用于存储系统分配的线程标识。
 
-            // 参数 2: nullptr, 线程属性，nullptr 表示使用系统默认属性（如默认栈大小）。
+        // 参数 2: nullptr, 线程属性，nullptr 表示使用系统默认属性（如默认栈大小）。
 
-            // 参数 3: &Thread::run, 线程入口函数，静态成员函数符合 C 风格的函数指针要求。
+        // 参数 3: &Thread::run, 线程入口函数，静态成员函数符合 C 风格的函数指针要求。
 
-            // 参数 4: this, 传给入口函数的参数。我们将当前对象的指针传进去，使静态函数 run 能访问成员变量。
+        // 参数 4: this, 传给入口函数的参数。我们将当前对象的指针传进去，使静态函数 run 能访问成员变量。
 
-            int rt = pthread_create(&m_thread, nullptr, &Thread::run, this);
+        int rt = pthread_create(&m_thread, nullptr, &Thread::run, this);
 
-        
         if (rt)
         {
             std::cerr << "pthread_create error, rt=" << rt << " name=" << name << std::endl;
@@ -100,7 +99,7 @@ namespace sylar
 
     void *Thread::run(void *arg)
     {
-        Thread *thread = (Thread *)arg;//arg是Thread对象的指针，这里强转一下
+        Thread *thread = (Thread *)arg; // arg是Thread对象的指针，这里强转一下
 
         // 初始化 TLS 环境
         t_thread = thread;
@@ -118,7 +117,6 @@ namespace sylar
 
         // 环境初始化完成，通知主线程构造函数可以返回了
         thread->m_semaphore.notify();
-        
 
         // 执行真实的业务逻辑
         cb();

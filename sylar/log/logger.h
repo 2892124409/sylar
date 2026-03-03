@@ -21,12 +21,14 @@ namespace sylar
      * @brief 日志事件包装器
      * @details 关键点：利用析构函数触发日志写入
      */
-    class LogEventWrap {
+    class LogEventWrap
+    {
     public:
         LogEventWrap(LogEvent::ptr e);
         ~LogEventWrap();
-        std::stringstream& getSS();
+        std::stringstream &getSS();
         LogEvent::ptr getEvent() const { return m_event; }
+
     private:
         LogEvent::ptr m_event;
     };
@@ -37,8 +39,10 @@ namespace sylar
      * 1. 继承 enable_shared_from_this，以便在 log 方法中将自己的 shared_ptr 传给 LogEvent
      * 2. 包含多个 Appender，日志会分发给所有 Appender
      */
-    class Logger : public std::enable_shared_from_this<Logger> {
+    class Logger : public std::enable_shared_from_this<Logger>
+    {
         friend class LoggerManager;
+
     public:
         typedef std::shared_ptr<Logger> ptr;
         typedef std::mutex MutexType;
@@ -197,11 +201,12 @@ namespace sylar
  * @brief 使用流式方式将日志级别level的日志写入到logger
  * @details 核心点：创建临时LogEventWrap对象，行结束时触发析构执行log
  */
-#define SYLAR_LOG_LEVEL(logger, level) \
-    if(logger->getLevel() <= level) \
-        sylar::LogEventWrap(sylar::LogEvent::ptr(new sylar::LogEvent(logger, level, \
-                        __FILE__, __LINE__, 0, sylar::GetThreadId(), \
-                        sylar::GetFiberId(), time(0), "main"))).getSS()
+#define SYLAR_LOG_LEVEL(logger, level)                                                                        \
+    if (logger->getLevel() <= level)                                                                          \
+    sylar::LogEventWrap(sylar::LogEvent::ptr(new sylar::LogEvent(logger, level,                               \
+                                                                 __FILE__, __LINE__, 0, sylar::GetThreadId(), \
+                                                                 sylar::GetFiberId(), time(0), "main")))      \
+        .getSS()
 
 #define SYLAR_LOG_DEBUG(logger) SYLAR_LOG_LEVEL(logger, sylar::LogLevel::DEBUG)
 #define SYLAR_LOG_INFO(logger) SYLAR_LOG_LEVEL(logger, sylar::LogLevel::INFO)

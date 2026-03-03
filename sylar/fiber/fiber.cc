@@ -314,11 +314,14 @@ namespace sylar
          */
         auto raw_ptr = cur.get();
         cur.reset();
-        
+
         // 如果是参与调度的协程，执行完毕后切回调度协程
-        if (raw_ptr->m_runInScheduler) {
+        if (raw_ptr->m_runInScheduler)
+        {
             raw_ptr->yield();
-        } else {
+        }
+        else
+        {
             // 如果是不参与调度的协程（如 use_caller 的调度协程），执行完毕后切回线程主协程
             raw_ptr->back();
         }

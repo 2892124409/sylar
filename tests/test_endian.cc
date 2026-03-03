@@ -11,7 +11,8 @@
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
 
-void test_byteswap() {
+void test_byteswap()
+{
     SYLAR_LOG_INFO(g_logger) << "========== 测试字节序转换 ==========";
 
     // 测试 16 位
@@ -33,7 +34,8 @@ void test_byteswap() {
                              << " -> 0x" << swapped64 << std::dec;
 }
 
-void test_conditional_swap() {
+void test_conditional_swap()
+{
     SYLAR_LOG_INFO(g_logger) << "\n========== 测试条件字节序转换 ==========";
 
 #if SYLAR_BYTE_ORDER == SYLAR_LITTLE_ENDIAN
@@ -55,7 +57,8 @@ void test_conditional_swap() {
                              << ") = 0x" << result2 << std::dec;
 }
 
-void test_network_byte_order() {
+void test_network_byte_order()
+{
     SYLAR_LOG_INFO(g_logger) << "\n========== 测试网络字节序转换 ==========";
 
     // 模拟端口号转换（网络字节序是大端）
@@ -65,13 +68,14 @@ void test_network_byte_order() {
     SYLAR_LOG_INFO(g_logger) << "网络字节序端口: 0x" << std::hex << network_port << std::dec;
 
     // 模拟 IP 地址转换
-    uint32_t ip = 0xC0A80101;  // 192.168.1.1
+    uint32_t ip = 0xC0A80101; // 192.168.1.1
     uint32_t network_ip = sylar::byteswapOnLittleEndian(ip);
     SYLAR_LOG_INFO(g_logger) << "主机字节序 IP: 0x" << std::hex << ip;
     SYLAR_LOG_INFO(g_logger) << "网络字节序 IP: 0x" << network_ip << std::dec;
 }
 
-int main() {
+int main()
+{
     test_byteswap();
     test_conditional_swap();
     test_network_byte_order();

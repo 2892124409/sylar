@@ -12,43 +12,52 @@
 int count = 0;
 sylar::Mutex s_mutex;
 
-void func1() {
+void func1()
+{
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "thread name: " << sylar::Thread::GetName()
                                      << " this.name: " << sylar::Thread::GetThis()->getName()
                                      << " id: " << sylar::GetThreadId()
                                      << " this.id: " << sylar::Thread::GetThis()->getId();
 
-    for(int i = 0; i < 1000000; ++i) {
+    for (int i = 0; i < 1000000; ++i)
+    {
         sylar::Mutex::Lock lock(s_mutex);
         ++count;
     }
 }
 
-void func2() {
-    while(true) {
+void func2()
+{
+    while (true)
+    {
         SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
     }
 }
 
-void func3() {
-    while(true) {
+void func3()
+{
+    while (true)
+    {
         SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "========================================";
     }
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv)
+{
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "thread test begin";
-    
+
     std::vector<sylar::Thread::ptr> thrs;
-    for(int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 5; ++i)
+    {
         sylar::Thread::ptr thr(new sylar::Thread(&func1, "name_" + std::to_string(i)));
         thrs.push_back(thr);
     }
 
-    for(size_t i = 0; i < thrs.size(); ++i) {
+    for (size_t i = 0; i < thrs.size(); ++i)
+    {
         thrs[i]->join();
     }
-    
+
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "thread test end";
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "count=" << count;
 

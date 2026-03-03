@@ -299,7 +299,7 @@ namespace sylar
          *      @retval =0 socket 被关闭
          *      @retval <0 socket 出错
          */
-        virtual int recvFrom(void *buffer, size_t length, Address::ptr& from, int flags = 0);
+        virtual int recvFrom(void *buffer, size_t length, Address::ptr &from, int flags = 0);
 
         /**
          * @brief 接收数据 (UDP, iovec 分散接收)
@@ -312,7 +312,7 @@ namespace sylar
          *      @retval =0 socket 被关闭
          *      @retval <0 socket 出错
          */
-        virtual int recvFrom(iovec *buffers, size_t length, Address::ptr& from, int flags = 0);
+        virtual int recvFrom(iovec *buffers, size_t length, Address::ptr &from, int flags = 0);
 
         /**
          * @brief 获取远端地址

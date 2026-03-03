@@ -38,7 +38,7 @@ namespace sylar
              * 3. 在当前线程创建一个“调度控制协程”
              * 这里直接绑定 Scheduler::run 成员函数。
              * 注意：这个协程不会立即执行，直到 stop() 时被显式拉起来。
-             * 
+             *
              * 【微调】run_in_scheduler 设为 false。
              * 因为调度协程本身不应该被自己调度，它退出时应该直接回退到 main 函数。
              */
@@ -187,7 +187,7 @@ namespace sylar
     {
         SYLAR_LOG_DEBUG(g_logger) << m_name << " run";
         setThis();
-        set_hook_enable(true);  // 在工作线程中启用 Hook
+        set_hook_enable(true); // 在工作线程中启用 Hook
 
         // 如果当前线程不是主线程（即线程池创建的子线程）
         if (sylar::GetThreadId() != m_rootThread)
@@ -263,37 +263,47 @@ namespace sylar
                 }
                 ft.reset();
             }
-                    // 3. 【干活阶段 - 处理函数任务】
-                    else if(ft.cb) {
-                        if(cb_fiber) {
-                            // 增加状态检查：只有结束了的协程才能复用
-                            if(cb_fiber->getState() == Fiber::TERM 
-                               || cb_fiber->getState() == Fiber::EXCEPT) {
-                                cb_fiber->reset(ft.cb);
-                            } else {
-                                // 还没结束（说明可能在 HOLD），只能另起炉灶
-                                cb_fiber.reset(new Fiber(ft.cb));
-                            }
-                        } else {
-                            cb_fiber.reset(new Fiber(ft.cb));
-                        }
-                        ft.reset();
-                        cb_fiber->resume(); // 切入包装后的协程跑函数！
-                        --m_activeThreadCount;
-            
-                        if(cb_fiber->getState() == Fiber::READY) {
-                            schedule(cb_fiber);
-                            cb_fiber.reset();
-                        } else if(cb_fiber->getState() == Fiber::EXCEPT
-                                || cb_fiber->getState() == Fiber::TERM) {
-                            // 函数跑完了，重置 cb_fiber 避免状态累积
-                            cb_fiber.reset();
-                        } else {
-                            cb_fiber->setState(Fiber::HOLD);
-                            cb_fiber.reset();
-                        }
-                    } 
-            
+            // 3. 【干活阶段 - 处理函数任务】
+            else if (ft.cb)
+            {
+                if (cb_fiber)
+                {
+                    // 增加状态检查：只有结束了的协程才能复用
+                    if (cb_fiber->getState() == Fiber::TERM || cb_fiber->getState() == Fiber::EXCEPT)
+                    {
+                        cb_fiber->reset(ft.cb);
+                    }
+                    else
+                    {
+                        // 还没结束（说明可能在 HOLD），只能另起炉灶
+                        cb_fiber.reset(new Fiber(ft.cb));
+                    }
+                }
+                else
+                {
+                    cb_fiber.reset(new Fiber(ft.cb));
+                }
+                ft.reset();
+                cb_fiber->resume(); // 切入包装后的协程跑函数！
+                --m_activeThreadCount;
+
+                if (cb_fiber->getState() == Fiber::READY)
+                {
+                    schedule(cb_fiber);
+                    cb_fiber.reset();
+                }
+                else if (cb_fiber->getState() == Fiber::EXCEPT || cb_fiber->getState() == Fiber::TERM)
+                {
+                    // 函数跑完了，重置 cb_fiber 避免状态累积
+                    cb_fiber.reset();
+                }
+                else
+                {
+                    cb_fiber->setState(Fiber::HOLD);
+                    cb_fiber.reset();
+                }
+            }
+
             // 4. 【空闲阶段】真的没活干了
             else
             {
