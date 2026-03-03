@@ -5674,3 +5674,331 @@ server->start();
 
 **TcpServer 的核心是将 accept 和 I/O 处理分离到不同调度器，通过 Hook 机制让阻塞 I/O 变成协程调度，实现高并发服务器。**
 
+---
+
+### 11. 2026-03-03 代码审查补充（TcpServer 阶段 + UdpServer 扩展）
+
+本节记录一次针对当前项目（已完成 TcpServer，并新增 UdpServer）的专项审查结果，重点关注：
+
+1. 与参考仓库 `zhongluqiang/sylar-from-scratch` 同阶段行为是否一致
+2. 新增 UdpServer 是否引入回归
+3. stop/start/accept/recvfrom 等关键路径是否存在资源泄漏与并发风险
+
+---
+
+#### Bug A：`Socket::accept()` 存在 fd 泄漏（高优先级）
+
+**现象**：在高并发连接场景，fd 数会持续增长，最终可能触发 `EMFILE/ENFILE`。
+
+**出现原因**：
+
+- 之前 `Socket` 构造函数会立即 `newSock()` 创建一个 fd。
+- `Socket::accept()` 中 `new Socket(...)` 后，又把 `accept` 返回的 `client_sock` 通过 `init()` 赋给同一个对象。
+- 这样构造时创建的原始 fd 被覆盖且未关闭，形成泄漏。
+
+**修复过程**：
+
+1. 将“构造即创建 fd”改为“工厂函数显式创建 fd”：
+   - 构造函数只做成员初始化，不再 `newSock()`。
+   - `CreateTCP/CreateUDP/Create*Socket*` 统一调用 `newSock()`。
+2. 在 `accept()` 中增加防御：
+   - `client->init(client_sock)` 失败时立即 `::close(client_sock)`，避免异常路径泄漏。
+
+**代码对比（修复前 vs 修复后）**：
+
+```cpp
+// 修复前：构造函数直接创建 fd
+Socket::Socket(int family, int type, int protocol)
+    : m_sock(-1), m_family(family), m_type(type), m_protocol(protocol), m_isConnected(false) {
+    newSock();
+}
+
+Socket::ptr Socket::accept() {
+    int client_sock = ::accept(m_sock, ...);
+    Socket::ptr client(new Socket(m_family, m_type, m_protocol)); // 这里又 newSock() 了一次
+    client->init(client_sock); // 覆盖 m_sock，导致之前 fd 泄漏
+    return client;
+}
+```
+
+```cpp
+// 修复后：构造函数不再创建 fd，由工厂函数显式创建
+Socket::Socket(int family, int type, int protocol)
+    : m_sock(-1), m_family(family), m_type(type), m_protocol(protocol), m_isConnected(false) {
+}
+
+Socket::ptr Socket::CreateTCP(Address::ptr address) {
+    Socket::ptr sock(new Socket(address->getFamily(), TCP, 0));
+    sock->newSock();
+    return sock;
+}
+
+Socket::ptr Socket::accept() {
+    int client_sock = ::accept(m_sock, ...);
+    Socket::ptr client(new Socket(m_family, m_type, m_protocol));
+    if (!client->init(client_sock)) {
+        ::close(client_sock); // 失败路径显式关闭，避免泄漏
+        return nullptr;
+    }
+    return client;
+}
+```
+
+**涉及文件**：
+
+- `sylar/net/socket.cc`
+
+---
+
+#### Bug B：`getSendTimeout/getRecvTimeout` 在失败时返回未定义值
+
+**现象**：当 socket 无效或 `getsockopt` 失败时，超时时间偶发打印为超大随机数。
+
+**出现原因**：
+
+- `timeval tv` 未初始化。
+- `getOption()` 返回失败时仍直接读取 `tv`。
+
+**修复过程**：
+
+1. `timeval tv` 改为零初始化。
+2. `getOption()` 失败时统一返回 `-1`，表示“获取失败/无效”。
+
+**代码对比（修复前 vs 修复后）**：
+
+```cpp
+// 修复前：tv 未初始化，失败后仍会返回垃圾值
+int64_t Socket::getSendTimeout() {
+    timeval tv;
+    getOption(SOL_SOCKET, SO_SNDTIMEO, tv);
+    return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+```
+
+```cpp
+// 修复后：失败返回 -1
+int64_t Socket::getSendTimeout() {
+    timeval tv = {0, 0};
+    if (!getOption(SOL_SOCKET, SO_SNDTIMEO, tv)) {
+        return -1;
+    }
+    return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+```
+
+**涉及文件**：
+
+- `sylar/net/socket.cc`
+
+---
+
+#### Bug C：TCP Echo 测试存在缓冲区越界写
+
+**现象**：`char buf[1024]` 场景中，若 `read` 返回 1024，则 `buf[len] = '\0'` 越界。
+
+**出现原因**：
+
+- 读取长度使用 `sizeof(buf)`，没有给结尾 `\0` 预留空间。
+
+**修复过程**：
+
+1. 所有对应读取改为 `sizeof(buf) - 1`。
+2. 保留 `buf[len] = '\0'`，确保日志输出安全。
+
+**代码对比（修复前 vs 修复后）**：
+
+```cpp
+// 修复前：可能读满 1024，再写 buf[1024] 越界
+char buf[1024];
+int len = stream->read(buf, sizeof(buf));
+buf[len] = '\0';
+```
+
+```cpp
+// 修复后：预留 '\0' 的位置
+char buf[1024];
+int len = stream->read(buf, sizeof(buf) - 1);
+buf[len] = '\0';
+```
+
+**涉及文件**：
+
+- `tests/test_tcp_server.cc`
+
+---
+
+#### Bug D：UDP 多端口绑定时回包 socket 选择错误
+
+**现象**：`EchoUdpServer` 默认调用 `UdpServer::sendTo(data, len, from)`，未显式指定 socket，默认走 `sockIndex=0`。多端口场景下，回包源端口可能与接收端口不一致。
+
+**出现原因**：
+
+- 示例层回包逻辑没有使用“收到数据的那个 socket”。
+
+**修复过程**：
+
+1. 在 `EchoUdpServer::handleDatagram` 中改为优先使用回调参数 `sock` 回包：`sock->sendTo(...)`。
+2. 从示例层保证“哪个 socket 收到，就用哪个 socket 回”。
+
+**代码对比（修复前 vs 修复后）**：
+
+```cpp
+// 修复前：默认 sockIndex=0，多端口时可能从错误端口回包
+int n = sendTo(data, len, from);
+```
+
+```cpp
+// 修复后：使用收到该报文的 socket 回包
+int n = sock ? sock->sendTo(data, len, from) : -1;
+```
+
+**涉及文件**：
+
+- `tests/test_udp_server.cc`
+
+---
+
+#### Bug E：`UdpServer::m_recvTimeout` 配置未生效
+
+**现象**：虽然 `UdpServer` 有 `m_recvTimeout` 成员，但 `startReceive` 未应用，导致配置形同虚设。
+
+**出现原因**：
+
+- 收包循环入口没有对 socket 调用 `setRecvTimeout()`。
+
+**修复过程**：
+
+1. 在 `startReceive(Socket::ptr sock)` 开头调用 `sock->setRecvTimeout(m_recvTimeout)`。
+
+**代码对比（修复前 vs 修复后）**：
+
+```cpp
+// 修复前：m_recvTimeout 没有被应用
+void UdpServer::startReceive(Socket::ptr sock) {
+    char* buffer = new char[m_bufferSize];
+    while (!m_isStop) {
+        int n = sock->recvFrom(buffer, m_bufferSize, from);
+        ...
+    }
+}
+```
+
+```cpp
+// 修复后：进入接收循环前设置超时
+void UdpServer::startReceive(Socket::ptr sock) {
+    sock->setRecvTimeout(m_recvTimeout);
+    char* buffer = new char[m_bufferSize];
+    while (!m_isStop.load(std::memory_order_acquire)) {
+        int n = sock->recvFrom(buffer, m_bufferSize, from);
+        ...
+    }
+}
+```
+
+**涉及文件**：
+
+- `sylar/net/udp_server.cc`
+
+---
+
+#### Bug F：`TcpServer/UdpServer` 对 `m_socks` 与 `m_isStop` 存在竞态风险
+
+**现象**：`start/stop/sendTo/toString` 可能与清理协程并发访问 `m_socks`，存在数据竞争窗口。
+
+**出现原因**：
+
+- `m_isStop` 是普通 `bool`，跨线程读写无同步。
+- `m_socks` 在多个线程路径读写，没有互斥保护。
+
+**修复过程**：
+
+1. `m_isStop` 升级为 `std::atomic<bool>`。
+2. 为 `m_socks` 增加互斥量保护。
+3. `start/toString` 使用“加锁拷贝快照后在锁外使用”模式。
+4. `stop/析构` 使用 `swap` 交换容器，再在锁外做 `cancelAll/close`。
+5. `UdpServer::sendTo` 在锁内取出目标 socket 快照，锁外发送。
+
+**代码对比（修复前 vs 修复后）**：
+
+```cpp
+// 修复前：无同步保护
+bool m_isStop;
+std::vector<Socket::ptr> m_socks;
+
+bool TcpServer::start() {
+    if (!m_isStop) return true;
+    m_isStop = false;
+    for (auto& sock : m_socks) { ... }
+}
+
+void TcpServer::stop() {
+    m_isStop = true;
+    m_acceptWorker->schedule([this]() {
+        for (auto& sock : m_socks) { sock->cancelAll(); sock->close(); }
+        m_socks.clear();
+    });
+}
+```
+
+```cpp
+// 修复后：原子 + 互斥 + 快照模式
+std::atomic<bool> m_isStop;
+mutable std::mutex m_mutex;
+std::vector<Socket::ptr> m_socks;
+
+bool TcpServer::start() {
+    bool expected = true;
+    if (!m_isStop.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+        return true;
+    }
+    std::vector<Socket::ptr> socks;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        socks = m_socks;
+    }
+    for (auto& sock : socks) { ... }
+}
+
+void TcpServer::stop() {
+    bool expected = false;
+    if (!m_isStop.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    m_acceptWorker->schedule([this]() {
+        std::vector<Socket::ptr> socks;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            socks.swap(m_socks);
+        }
+        for (auto& sock : socks) { sock->cancelAll(); sock->close(); }
+    });
+}
+```
+
+**涉及文件**：
+
+- `sylar/net/tcp_server.h`
+- `sylar/net/tcp_server.cc`
+- `sylar/net/udp_server.h`
+- `sylar/net/udp_server.cc`
+
+---
+
+#### 回归验证记录
+
+1. `cmake --build build -j4` 编译通过。
+2. `test_tcp_server` / `test_udp_server` 在当前沙箱环境可启动，但由于环境限制 `socket()`（`Operation not permitted`）无法做真实网络回环验证。
+3. `test_socket` 在该受限环境仍会在后续测试路径崩溃（测试代码本身未覆盖“socket 创建失败后的优雅降级”分支），但本次修复已验证：
+   - timeout 获取失败时返回 `-1`（不再是未初始化随机值）。
+
+---
+
+#### 本次修复涉及文件清单
+
+- `sylar/net/socket.cc`
+- `sylar/net/tcp_server.h`
+- `sylar/net/tcp_server.cc`
+- `sylar/net/udp_server.h`
+- `sylar/net/udp_server.cc`
+- `tests/test_tcp_server.cc`
+- `tests/test_udp_server.cc`

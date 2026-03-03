@@ -50,7 +50,7 @@ protected:
                   << std::string((const char*)data, len) << "\n";
 
         // Echo 回去
-        int n = sendTo(data, len, from);
+        int n = sock ? sock->sendTo(data, len, from) : -1;
         if (n < 0) {
             std::cout << "[EchoUdpServer] sendto failed\n";
         } else {
