@@ -16,9 +16,9 @@ namespace sylar
     // 线程局部变量：当前线程的主协程（调度协程）
     static thread_local Fiber::ptr t_thread_fiber = nullptr;
 
-    // 配置项：默认协程栈大小 (1MB)
+    // 配置项：默认协程栈大小 (128KB)
     static ConfigVar<uint32_t>::ptr g_fiber_stack_size =
-        Config::Lookup<uint32_t>("fiber.stack_size", 1024 * 1024, "fiber stack size");
+        Config::Lookup<uint32_t>("fiber.stack_size", 128 * 1024, "fiber stack size");
 
     /**
      * @brief 简单的栈内存分配器（后续可优化为内存池）
