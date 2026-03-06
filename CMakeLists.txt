@@ -20,6 +20,7 @@ set(SYLAR_SOURCES
     sylar/base/config.cc
     sylar/concurrency/mutex/semaphore.cc
     sylar/concurrency/thread.cc
+    sylar/memorypool/memory_pool.cpp
     sylar/fiber/fiber.cc
     sylar/fiber/scheduler.cc
     sylar/fiber/iomanager.cc
@@ -96,3 +97,14 @@ target_link_libraries(test_tcp_server sylar)
 add_executable(test_udp_server tests/test_udp_server.cc)
 target_link_libraries(test_udp_server sylar)
 
+add_executable(test_shared_stack_helpers tests/test_shared_stack_helpers.cc)
+target_link_libraries(test_shared_stack_helpers sylar)
+
+add_executable(test_shared_stack_scheduler tests/test_shared_stack_scheduler.cc)
+target_link_libraries(test_shared_stack_scheduler sylar)
+
+add_executable(test_shared_stack_scheduler_mt tests/test_shared_stack_scheduler_mt.cc)
+target_link_libraries(test_shared_stack_scheduler_mt sylar)
+
+add_executable(test_shared_stack_stress tests/test_shared_stack_stress.cc)
+target_link_libraries(test_shared_stack_stress sylar)

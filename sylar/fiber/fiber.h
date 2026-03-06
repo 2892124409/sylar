@@ -110,6 +110,33 @@ namespace sylar
          */
         void setState(State s) { m_state = s; }
 
+        /**
+         * @brief 是否启用共享栈模式
+         * @note 当前仅预留 V1 线程绑定共享栈骨架，默认关闭
+         */
+        bool isSharedStackEnabled() const { return m_useSharedStack; }
+
+        /**
+         * @brief 共享栈上下文是否已初始化
+         */
+        bool isSharedStackContextInited() const { return m_ctxInited; }
+
+        /**
+         * @brief 获取共享栈 Fiber 绑定线程
+         * @return -1 表示尚未绑定线程
+         */
+        int getBoundThread() const { return m_boundThread; }
+
+        /**
+         * @brief 供 Scheduler 调用的共享栈 resume 前准备钩子（当前仅骨架）
+         */
+        void onSchedulerBeforeResume();
+
+        /**
+         * @brief 供 Scheduler 调用的共享栈 yield 返回后后处理钩子（当前仅骨架）
+         */
+        void onSchedulerAfterResume();
+
     public:
         /**
          * @brief 设置当前线程的运行协程
@@ -149,6 +176,57 @@ namespace sylar
         static uint64_t GetFiberId();
 
     private:
+        /**
+         * @brief 确保共享栈 Fiber 绑定到当前线程（Scheduler 后处理版骨架）
+         */
+        void ensureSharedStackBinding();
+
+        /**
+         * @brief 共享栈模式下 resume 前准备（Scheduler 后处理版骨架）
+         */
+        void prepareSharedStackBeforeResume();
+
+        /**
+         * @brief 共享栈模式下 yield 返回后，由 Scheduler 调用的后处理（骨架）
+         */
+        void finalizeSharedStackAfterYield();
+
+        /**
+         * @brief 初始化共享栈模式上下文（V1 线程绑定路径）
+         */
+        void initSharedStackContext();
+
+        /**
+         * @brief 计算共享栈实际使用量（V1 骨架，暂未接入运行路径）
+         */
+        size_t calculateStackUsage() const;
+
+        /**
+         * @brief 挂起前保存共享栈内容（V1 骨架，暂未接入运行路径）
+         */
+        void saveSharedStack();
+
+        /**
+         * @brief 恢复前加载共享栈内容（V1 骨架，暂未接入运行路径）
+         */
+        void restoreSharedStack();
+
+        /**
+         * @brief 将共享栈内容保存到缓冲区（Scheduler 后处理版骨架）
+         */
+        void saveSharedStackToBuffer();
+
+        /**
+         * @brief 从缓冲区恢复共享栈内容（Scheduler 后处理版骨架）
+         */
+        void restoreSharedStackFromBuffer();
+
+        /**
+         * @brief 归还当前共享栈到线程本地管理器（Scheduler 后处理版骨架）
+         */
+        void releaseSharedStackToTls();
+
+    private:
         /// 协程id
         uint64_t m_id = 0;
         /// 协程栈大小
@@ -159,6 +237,22 @@ namespace sylar
         ucontext_t m_ctx;
         /// 协程栈地址
         void *m_stack = nullptr;
+        /// V1: 是否启用线程绑定共享栈（当前默认关闭）
+        bool m_useSharedStack = false;
+        /// V1: 共享栈上下文是否已初始化
+        bool m_ctxInited = false;
+        /// V1: 共享栈 Fiber 绑定的线程 id，-1 表示未绑定
+        int m_boundThread = -1;
+        /// V1: 当前占用的共享栈指针
+        void *m_sharedStack = nullptr;
+        /// V1: 挂起时保存栈内容的缓冲区
+        void *m_savedStackBuf = nullptr;
+        /// V1: 保存的栈内容长度
+        size_t m_savedStackLen = 0;
+        /// V1: 保存区域相对共享栈基址的偏移
+        size_t m_savedStackOffset = 0;
+        /// V1: 当前 yield 返回后是否需要在 Scheduler 侧做保存后处理
+        bool m_needSharedStackFinalize = false;
         /// 协程运行函数
         std::function<void()> m_cb;
         /// 本协程是否参与调度器调度

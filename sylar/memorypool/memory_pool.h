@@ -118,10 +118,8 @@ namespace sylar
          * @tparam Sizes 整型参数类型。
          * @param slotSizes 槽位大小参数，例如 initMemoryPool(32, 4096)，必须为正数。
          */
-        // std::enable_if_t和std::is_integral_v<Sizes>配合确保参数必须是整数类型
-        //&& ..表示对可变参数展开，就是对所有参数进行整数判断
-        template <typename... Sizes,
-                  typename = std::enable_if_t<(std::is_integral_v<Sizes> && ...)>>
+        // 当前项目使用 C++11，直接把参数静态转换为 int 后转发给 initializer_list 版本
+        template <typename... Sizes>
         static void initMemoryPool(Sizes... slotSizes)
         {
             static_assert(sizeof...(slotSizes) > 0,
