@@ -251,13 +251,28 @@ namespace sylar
             // 2. 【干活阶段 - 处理协程任务】
             if (ft.fiber && (ft.fiber->getState() != Fiber::TERM && ft.fiber->getState() != Fiber::EXCEPT))
             {
+                if (ft.fiber->isSharedStackEnabled())
+                {
+                    ft.fiber->onSchedulerBeforeResume();
+                }
+
                 ft.fiber->resume();    // 切入业务协程！
                 --m_activeThreadCount; // 业务跑完了（或挂起了），活跃数减1
+
+                if (ft.fiber->isSharedStackEnabled())
+                {
+                    ft.fiber->onSchedulerAfterResume();
+                }
 
                 if (ft.fiber->getState() == Fiber::READY)
                 {
                     // 如果协程是主动让出的（Ready 状态），塞回队列下次接着跑
-                    schedule(ft.fiber);
+                    int target_thread = -1;
+                    if (ft.fiber->isSharedStackEnabled() && ft.fiber->getBoundThread() != -1)
+                    {
+                        target_thread = ft.fiber->getBoundThread();
+                    }
+                    schedule(ft.fiber, target_thread);
                 }
                 else if (ft.fiber->getState() != Fiber::TERM && ft.fiber->getState() != Fiber::EXCEPT)
                 {
@@ -287,12 +302,28 @@ namespace sylar
                     cb_fiber.reset(new Fiber(ft.cb));
                 }
                 ft.reset();
+
+                if (cb_fiber->isSharedStackEnabled())
+                {
+                    cb_fiber->onSchedulerBeforeResume();
+                }
+
                 cb_fiber->resume(); // 切入包装后的协程跑函数！
                 --m_activeThreadCount;
 
+                if (cb_fiber->isSharedStackEnabled())
+                {
+                    cb_fiber->onSchedulerAfterResume();
+                }
+
                 if (cb_fiber->getState() == Fiber::READY)
                 {
-                    schedule(cb_fiber);
+                    int target_thread = -1;
+                    if (cb_fiber->isSharedStackEnabled() && cb_fiber->getBoundThread() != -1)
+                    {
+                        target_thread = cb_fiber->getBoundThread();
+                    }
+                    schedule(cb_fiber, target_thread);
                     cb_fiber.reset();
                 }
                 else if (cb_fiber->getState() == Fiber::EXCEPT || cb_fiber->getState() == Fiber::TERM)
@@ -323,7 +354,19 @@ namespace sylar
                 }
 
                 ++m_idleThreadCount;
+
+                if (idle_fiber->isSharedStackEnabled())
+                {
+                    idle_fiber->onSchedulerBeforeResume();
+                }
+
                 idle_fiber->resume(); // 进 idle 协程待命
+
+                if (idle_fiber->isSharedStackEnabled())
+                {
+                    idle_fiber->onSchedulerAfterResume();
+                }
+
                 --m_idleThreadCount;
                 if (idle_fiber->getState() != Fiber::TERM && idle_fiber->getState() != Fiber::EXCEPT)
                 {

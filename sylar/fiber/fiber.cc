@@ -2,7 +2,11 @@
 #include "scheduler.h"
 #include "sylar/base/config.h"
 #include "sylar/base/macro.h"
+#include "sylar/base/util.h"
+#include "sylar/fiber/save_buffer_allocator.h"
+#include "sylar/fiber/thread_local_stack.h"
 #include <atomic>
+#include <cstring>
 
 namespace sylar
 {
@@ -19,6 +23,14 @@ namespace sylar
     // 配置项：默认协程栈大小 (128KB)
     static ConfigVar<uint32_t>::ptr g_fiber_stack_size =
         Config::Lookup<uint32_t>("fiber.stack_size", 128 * 1024, "fiber stack size");
+
+    // 配置项：V1 线程绑定共享栈（当前仅骨架，默认关闭）
+    static ConfigVar<bool>::ptr g_fiber_use_shared_stack =
+        Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack");
+
+    // 配置项：V1 共享栈大小（当前仅用于骨架记录）
+    static ConfigVar<uint32_t>::ptr g_fiber_shared_stack_size =
+        Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size");
 
     /**
      * @brief 简单的栈内存分配器（后续可优化为内存池）
@@ -63,7 +75,15 @@ namespace sylar
         : m_id(++s_fiber_id), m_cb(cb), m_runInScheduler(run_in_scheduler)
     {
         ++s_fiber_count;
+        m_useSharedStack = g_fiber_use_shared_stack->getValue() && run_in_scheduler;
         m_stacksize = stacksize ? stacksize : g_fiber_stack_size->getValue();
+
+        if (m_useSharedStack)
+        {
+            m_stacksize = g_fiber_shared_stack_size->getValue();
+            SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "Fiber::Fiber shared-stack V1 enabled id=" << m_id;
+            return;
+        }
 
         // 1. 为子协程分配独立的栈空间
         m_stack = StackAllocator::Alloc(m_stacksize);
@@ -89,7 +109,24 @@ namespace sylar
     Fiber::~Fiber()
     {
         --s_fiber_count;
-        if (m_stack)
+        if (m_savedStackBuf)
+        {
+            SaveBufferAllocator::Dealloc(m_savedStackBuf, m_savedStackLen);
+            m_savedStackBuf = nullptr;
+            m_savedStackLen = 0;
+            m_savedStackOffset = 0;
+        }
+        if (m_sharedStack)
+        {
+            ThreadLocalSharedStack::GetInstance()->release(m_sharedStack);
+            m_sharedStack = nullptr;
+        }
+        if (m_useSharedStack)
+        {
+            // 共享栈 Fiber 本身不拥有独立栈，但也不是线程主协程
+            SYLAR_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT || m_state == READY || m_state == HOLD);
+        }
+        else if (m_stack)
         {
             // 子协程：必须在 TERM 或 EXCEPT 状态下析构，并释放栈内存
             SYLAR_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT);
@@ -117,9 +154,30 @@ namespace sylar
      */
     void Fiber::reset(std::function<void()> cb)
     {
-        SYLAR_ASSERT(m_stack); // 只有子协程能 reset
+        SYLAR_ASSERT(m_stack || m_useSharedStack); // 子协程才能 reset
         SYLAR_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT);
         m_cb = cb;
+
+        if (m_useSharedStack)
+        {
+            if (m_savedStackBuf)
+            {
+                SaveBufferAllocator::Dealloc(m_savedStackBuf, m_savedStackLen);
+                m_savedStackBuf = nullptr;
+            }
+            if (m_sharedStack)
+            {
+                ThreadLocalSharedStack::GetInstance()->release(m_sharedStack);
+                m_sharedStack = nullptr;
+            }
+            m_savedStackLen = 0;
+            m_savedStackOffset = 0;
+            m_needSharedStackFinalize = false;
+            m_ctxInited = false;
+            m_boundThread = -1;
+            m_state = READY;
+            return;
+        }
 
         if (getcontext(&m_ctx))
         {
@@ -134,12 +192,241 @@ namespace sylar
         m_state = READY;
     }
 
+    void Fiber::initSharedStackContext()
+    {
+        SYLAR_ASSERT(m_useSharedStack);
+        SYLAR_ASSERT(m_sharedStack);
+        SYLAR_ASSERT(!m_ctxInited);
+
+        if (getcontext(&m_ctx))
+        {
+            SYLAR_ASSERT2(false, "getcontext");
+        }
+
+        m_ctx.uc_link = nullptr;
+        m_ctx.uc_stack.ss_sp = m_sharedStack;
+        m_ctx.uc_stack.ss_size = g_fiber_shared_stack_size->getValue();
+        makecontext(&m_ctx, &Fiber::MainFunc, 0);
+        m_ctxInited = true;
+    }
+
+    void Fiber::onSchedulerBeforeResume()
+    {
+        if (!m_useSharedStack)
+        {
+            return;
+        }
+        prepareSharedStackBeforeResume();
+    }
+
+    void Fiber::onSchedulerAfterResume()
+    {
+        if (!m_useSharedStack)
+        {
+            return;
+        }
+        finalizeSharedStackAfterYield();
+    }
+
+    void Fiber::ensureSharedStackBinding()
+    {
+        SYLAR_ASSERT(m_useSharedStack);
+        int tid = sylar::GetThreadId();
+        if (m_boundThread == -1)
+        {
+            m_boundThread = tid;
+            return;
+        }
+        SYLAR_ASSERT2(m_boundThread == tid, "shared-stack fiber resumed on wrong thread");
+    }
+
+    void Fiber::prepareSharedStackBeforeResume()
+    {
+        SYLAR_ASSERT(m_useSharedStack);
+        ensureSharedStackBinding();
+
+        if (!m_sharedStack)
+        {
+            m_sharedStack = ThreadLocalSharedStack::GetInstance()->acquire();
+        }
+        SYLAR_ASSERT2(m_sharedStack, "shared stack unavailable before resume");
+
+        if (!m_ctxInited)
+        {
+            initSharedStackContext();
+            return;
+        }
+
+        restoreSharedStackFromBuffer();
+    }
+
+    size_t Fiber::calculateStackUsage() const
+    {
+        if (!m_sharedStack)
+        {
+            return 0;
+        }
+
+        char marker;
+        const char *stack_base = static_cast<const char *>(m_sharedStack);
+        const char *stack_top = stack_base + ThreadLocalSharedStack::STACK_SIZE;
+        const char *current_sp = &marker;
+
+        if (current_sp >= stack_top || current_sp < stack_base)
+        {
+            return 0;
+        }
+
+        size_t used = static_cast<size_t>(stack_top - current_sp);
+        const size_t align = 4096;
+        return (used + align - 1) & ~(align - 1);
+    }
+
+    void Fiber::saveSharedStack()
+    {
+        if (!m_useSharedStack || !m_sharedStack)
+        {
+            return;
+        }
+
+        size_t used = calculateStackUsage();
+        if (used == 0)
+        {
+            ThreadLocalSharedStack::GetInstance()->release(m_sharedStack);
+            m_sharedStack = nullptr;
+            return;
+        }
+
+        void *buf = SaveBufferAllocator::Alloc(used);
+        if (!buf)
+        {
+            return;
+        }
+
+        std::memcpy(buf, m_sharedStack, used);
+        if (m_savedStackBuf)
+        {
+            SaveBufferAllocator::Dealloc(m_savedStackBuf, m_savedStackLen);
+        }
+        m_savedStackBuf = buf;
+        m_savedStackLen = used;
+        ThreadLocalSharedStack::GetInstance()->release(m_sharedStack);
+        m_sharedStack = nullptr;
+    }
+
+    void Fiber::saveSharedStackToBuffer()
+    {
+        SYLAR_ASSERT(m_useSharedStack);
+        SYLAR_ASSERT(m_sharedStack);
+
+        if (m_savedStackLen == 0)
+        {
+            return;
+        }
+
+        void *buf = SaveBufferAllocator::Alloc(m_savedStackLen);
+        SYLAR_ASSERT2(buf, "save buffer allocation failed");
+
+        char *base = static_cast<char *>(m_sharedStack);
+        std::memcpy(buf, base + m_savedStackOffset, m_savedStackLen);
+
+        if (m_savedStackBuf)
+        {
+            SaveBufferAllocator::Dealloc(m_savedStackBuf, m_savedStackLen);
+        }
+        m_savedStackBuf = buf;
+    }
+
+    void Fiber::restoreSharedStack()
+    {
+        if (!m_useSharedStack)
+        {
+            return;
+        }
+
+        if (m_boundThread != -1 && m_boundThread != sylar::GetThreadId())
+        {
+            SYLAR_LOG_WARN(SYLAR_LOG_ROOT())
+                << "shared-stack fiber bound to thread " << m_boundThread
+                << ", but resumed on thread " << sylar::GetThreadId();
+            return;
+        }
+
+        void *stack = ThreadLocalSharedStack::GetInstance()->acquire();
+        if (!stack)
+        {
+            return;
+        }
+
+        m_sharedStack = stack;
+        if (m_savedStackBuf && m_savedStackLen > 0)
+        {
+            std::memcpy(m_sharedStack, m_savedStackBuf, m_savedStackLen);
+            SaveBufferAllocator::Dealloc(m_savedStackBuf, m_savedStackLen);
+            m_savedStackBuf = nullptr;
+            m_savedStackLen = 0;
+        }
+    }
+
+    void Fiber::restoreSharedStackFromBuffer()
+    {
+        if (!m_useSharedStack || !m_sharedStack || !m_savedStackBuf || m_savedStackLen == 0)
+        {
+            return;
+        }
+
+        char *base = static_cast<char *>(m_sharedStack);
+        std::memcpy(base + m_savedStackOffset, m_savedStackBuf, m_savedStackLen);
+        SaveBufferAllocator::Dealloc(m_savedStackBuf, m_savedStackLen);
+        m_savedStackBuf = nullptr;
+        m_savedStackLen = 0;
+        m_savedStackOffset = 0;
+    }
+
+    void Fiber::releaseSharedStackToTls()
+    {
+        if (!m_sharedStack)
+        {
+            return;
+        }
+        ThreadLocalSharedStack::GetInstance()->release(m_sharedStack);
+        m_sharedStack = nullptr;
+    }
+
+    void Fiber::finalizeSharedStackAfterYield()
+    {
+        SYLAR_ASSERT(m_useSharedStack);
+
+        if (!m_sharedStack)
+        {
+            return;
+        }
+
+        if (m_state == TERM || m_state == EXCEPT)
+        {
+            m_needSharedStackFinalize = false;
+            m_savedStackLen = 0;
+            m_savedStackOffset = 0;
+            releaseSharedStackToTls();
+            return;
+        }
+
+        if (m_needSharedStackFinalize)
+        {
+            saveSharedStackToBuffer();
+            m_needSharedStackFinalize = false;
+        }
+
+        releaseSharedStackToTls();
+    }
+
     /**
      * @brief 切换到当前协程运行
      */
     void Fiber::resume()
     {
         SYLAR_ASSERT(m_state != EXEC && m_state != TERM && m_state != EXCEPT);
+
         SetThis(this);
         m_state = EXEC;
 
@@ -176,7 +463,8 @@ namespace sylar
      */
     void Fiber::yield()
     {
-        SYLAR_ASSERT(m_state == EXEC || m_state == TERM || m_state == EXCEPT);
+        SYLAR_ASSERT(m_state == EXEC || m_state == READY || m_state == HOLD ||
+                     m_state == TERM || m_state == EXCEPT);
 
         Fiber *scheduler_fiber = nullptr;
         if (m_runInScheduler)
@@ -199,9 +487,31 @@ namespace sylar
             SetThis(t_thread_fiber.get());
         }
 
-        if (m_state != TERM && m_state != EXCEPT)
+        if (m_state == EXEC)
         {
             m_state = HOLD;
+        }
+
+        if (m_useSharedStack)
+        {
+            char marker;
+            const char *stack_base = static_cast<const char *>(m_sharedStack);
+            const char *stack_top = stack_base + g_fiber_shared_stack_size->getValue();
+            const char *current_sp = &marker;
+            SYLAR_ASSERT2(current_sp >= stack_base && current_sp < stack_top,
+                          "shared-stack current sp out of range before yield");
+
+            size_t used = static_cast<size_t>(stack_top - current_sp);
+            const size_t align = 4096;
+            used = (used + align - 1) & ~(align - 1);
+            if (used > g_fiber_shared_stack_size->getValue())
+            {
+                used = g_fiber_shared_stack_size->getValue();
+            }
+
+            m_savedStackLen = used;
+            m_savedStackOffset = g_fiber_shared_stack_size->getValue() - used;
+            m_needSharedStackFinalize = true;
         }
 
         if (m_runInScheduler && scheduler_fiber)
