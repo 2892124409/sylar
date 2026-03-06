@@ -304,8 +304,8 @@ namespace sylar
         // 为每个槽位大小创建一个对应的 MemoryPool
         for (int slotSize : storedSizes)
         {
-            // 创建新的内存池，使用 make_unique 更安全
-            auto pool = std::make_unique<MemoryPool>();
+            // C++11 环境下没有 std::make_unique，这里直接 new
+            std::unique_ptr<MemoryPool> pool(new MemoryPool());
             // 初始化内存池的槽位大小
             pool->init(slotSize);
             // 将内存池移动到列表中（unique_ptr 不能拷贝，只能移动）
