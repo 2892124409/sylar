@@ -117,11 +117,11 @@ namespace sylar
          * @brief 使用可变参数初始化桶内存池。
          * @tparam Sizes 整型参数类型。
          * @param slotSizes 槽位大小参数，例如 initMemoryPool(32, 4096)，必须为正数。
-         *
-         * @note 这里不再依赖 C++17 的 std::enable_if_t 和折叠表达式，
-         *       而是简单地将所有参数静态转换为 int 再下发给列表版本。
          */
-        template <typename... Sizes>
+        // std::enable_if_t和std::is_integral_v<Sizes>配合确保参数必须是整数类型
+        //&& ..表示对可变参数展开，就是对所有参数进行整数判断
+        template <typename... Sizes,
+                  typename = std::enable_if_t<(std::is_integral_v<Sizes> && ...)>>
         static void initMemoryPool(Sizes... slotSizes)
         {
             static_assert(sizeof...(slotSizes) > 0,
