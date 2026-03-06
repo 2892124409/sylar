@@ -6385,3 +6385,491 @@ void TcpServer::stop() {
 - 共享栈：`sylar/fiber/shared_stack.h/cc`、`sylar/fiber/fiber.h/cc`
 - C++20 协程：需要重写整个协程框架
 
+---
+
+## 线程本地共享栈 + CentralCache Save Buffer 方案（最终设计）
+
+**日期**：2026-03-05  
+**状态**：设计已定，尚未实现
+
+### 1. 设计目标
+
+在保持现有协程模型的前提下做“栈内存优化”：
+
+- 保留现有 `Fiber + Scheduler + ucontext` 结构，不改上层接口；
+- 继续支持“协程可跨线程调度”，不强制绑定线程；
+- 把“每协程固定占用一块栈内存”改为“按**活跃协程数 + 实际栈使用量**计费”，降低整体内存占用；
+- 单次切换开销控制在 ucontext 级别（增加几十 KB memcpy，而不是引入更重的系统调用）。
+
+
+### 2. 总体思路
+
+采用“**线程本地共享栈 + 全局 Save Buffer**”组合：
+
+1. 每个工作线程维护少量共享栈（例如 2 块 128KB，`thread_local` 持有），协程运行时占用所在线程的一个共享栈；
+2. 协程挂起（`yield`）时：
+   - 计算当前栈实际使用量（从栈顶到当前 SP）；
+   - 将这段内存拷贝到堆上的 Save Buffer；
+   - 归还共享栈给当前线程的共享栈管理器；
+3. 协程在任意线程恢复（`resume`）时：
+   - 从该线程本地共享栈池取一块共享栈；
+   - 将 Save Buffer 内容拷回共享栈；
+   - 更新 `ucontext_t.uc_stack` 指向新的共享栈，再执行 `swapcontext`；
+4. Save Buffer 统一通过 CentralCache 分配/释放，支持“在 A 线程分配，在 B 线程释放”，从而保证协程可以跨线程调度而不出现内存所有权问题。
+
+同时保留“独立栈模式”作为兼容路径：
+
+- `Fiber` 可以按配置关闭共享栈，继续使用当前的“每协程一块独立栈”；
+- 共享栈不足或某些协程需要更大栈时，可降级到独立栈。
+
+
+### 3. 核心组件
+
+#### 3.1 线程本地共享栈管理器 `ThreadLocalSharedStack`
+
+作用：为**当前线程**提供有限数量的共享栈指针，线程内无锁访问。当前调度模型下，理论上 1 块共享栈就够用，这里把数量设计成可配置常量，默认取 1，后续如有嵌套场景可以提高到 2 及以上。
+
+草案接口：
+
+```cpp
+// sylar/fiber/thread_local_stack.h
+
+class ThreadLocalSharedStack {
+public:
+    static constexpr size_t STACK_SIZE   = 128 * 1024; // 每块共享栈大小
+    static constexpr size_t STACK_COUNT  = 1;          // 默认每线程 1 块共享栈
+
+    static ThreadLocalSharedStack* GetInstance() {
+        static thread_local ThreadLocalSharedStack instance;
+        return &instance;
+    }
+
+    // 获取一个空闲共享栈；无空闲时返回 nullptr（由上层决定降级策略）
+    void* acquire();
+
+    // 归还共享栈
+    void  release(void* stack);
+
+    bool  hasIdleStack() const;
+
+private:
+    ThreadLocalSharedStack();
+    ~ThreadLocalSharedStack();
+
+    void ensureStacksAllocated();  // 惰性分配共享栈
+
+    void* stacks_[STACK_COUNT];
+    bool  in_use_[STACK_COUNT];
+};
+```
+
+设计要点：
+
+- 使用 `thread_local`，每线程独立，无需加锁；
+- 惰性初始化：首次真正需要共享栈时再 `malloc`；
+- 当前调度模型下，每线程 1 块共享栈即可覆盖“调度协程 + 单个业务协程”的情况；如未来引入更复杂的嵌套切换场景，可通过调整 `STACK_COUNT` 提升为 2 块或更多；
+- 不做复杂池化，仅用静态数组维护若干指针和标志位，结构简单可控。
+
+
+#### 3.2 Save Buffer 分配器 `SaveBufferAllocator`
+
+作用：为挂起协程保存栈内容分配堆内存，必须支持跨线程释放。
+
+草案接口（基于现有 `sylar/memorypool`）：
+
+```cpp
+// sylar/fiber/save_buffer_allocator.h
+
+#include "sylar/memorypool/memory_pool.h"  // HashBucket + MemoryPool
+
+class SaveBufferAllocator {
+public:
+    static void* alloc(size_t size) {
+        return sylar::HashBucket::useMemory(static_cast<int>(size));
+    }
+
+    static void dealloc(void* ptr, size_t size) {
+        sylar::HashBucket::freeMemory(ptr, static_cast<int>(size));
+    }
+};
+```
+
+设计要点：
+
+- 通过全局 `HashBucket` 做尺寸路由，底层使用多个 `MemoryPool` 管理不同大小槽位；
+- `HashBucket` 本身是线程安全的，支持在 A 线程分配、在 B 线程释放，满足 Save Buffer 跨线程调度需求；
+- 槽位大小在程序初始化阶段通过 `HashBucket::initMemoryPool({4KB, 8KB, …, 128KB})` 一次性配置，之后按“第一个 >= size 的槽位”分配；
+- 超出最大槽位的极大缓冲区退回系统 `operator new/delete` 处理。
+
+
+### 4. Fiber 改造方案
+
+在 `Fiber` 中增加共享栈相关成员与配置，同时保留现有独立栈字段：
+
+```cpp
+class Fiber : public std::enable_shared_from_this<Fiber> {
+public:
+    struct Config {
+        bool   use_shared_stack = true;       // 是否启用共享栈
+        size_t stack_size       = 128 * 1024; // 独立栈大小
+    };
+
+private:
+    // 共享栈模式相关
+    void*  m_sharedStack   = nullptr; // 当前运行时占用的共享栈
+    void*  m_savedStackBuf = nullptr; // 挂起时保存栈内容的缓冲区
+    size_t m_savedStackLen = 0;       // 保存的栈大小
+    bool   m_useSharedStack = true;   // 当前 Fiber 是否启用共享栈
+
+    // 现有独立栈字段保留
+    void*   m_stack     = nullptr;
+    uint32_t m_stacksize = 0;
+    // ... 其他字段不动
+};
+```
+
+#### 4.1 栈使用量计算 `calculateStackUsage()`
+
+共享栈模式下，协程挂起前需要估算当前使用了多少栈：
+
+```cpp
+size_t Fiber::calculateStackUsage() {
+    if (!m_sharedStack) return 0;
+
+    // 栈从高地址向低地址增长
+    char* stack_base = static_cast<char*>(m_sharedStack);
+    char* stack_top  = stack_base + ThreadLocalSharedStack::STACK_SIZE;
+
+    // 用局部变量地址近似当前 SP
+    char marker;
+    char* current_sp = &marker;
+
+    size_t used = stack_top - current_sp;
+    if (used > ThreadLocalSharedStack::STACK_SIZE) {
+        used = ThreadLocalSharedStack::STACK_SIZE;
+    }
+
+    // 对齐到 4KB，减少碎片
+    const size_t align = 4096;
+    used = (used + align - 1) & ~(align - 1);
+    return used;
+}
+```
+
+> 实现阶段需要结合实际 `uc_stack` 设置做压测与断言，保证没有越界与明显漏算。
+
+
+#### 4.2 挂起时保存栈 `saveStack()`
+
+在 `yield()`（以及 `YieldToReady/YieldToHold` 内部调用路径）中，在真正 `swapcontext` 之前执行：
+
+```cpp
+void Fiber::saveStack() {
+    if (!m_useSharedStack || !m_sharedStack) return;
+
+    m_savedStackLen = calculateStackUsage();
+    if (m_savedStackLen == 0) {
+        ThreadLocalSharedStack::GetInstance()->release(m_sharedStack);
+        m_sharedStack = nullptr;
+        return;
+    }
+
+    m_savedStackBuf = SaveBufferAllocator::alloc(m_savedStackLen);
+    memcpy(m_savedStackBuf, m_sharedStack, m_savedStackLen);
+
+    ThreadLocalSharedStack::GetInstance()->release(m_sharedStack);
+    m_sharedStack = nullptr;
+}
+```
+
+挂起后的协程：
+
+- 不再占用任何线程的共享栈；
+- 完整的栈内容保存在 Save Buffer 中，位置由 `HashBucket` 管理，可被任意线程访问。
+
+
+#### 4.3 恢复时加载栈 `restoreStack()`
+
+在 `resume()` 中，在进入 `swapcontext` 前执行：
+
+```cpp
+void Fiber::restoreStack() {
+    if (!m_useSharedStack) {
+        // 独立栈模式：m_ctx.uc_stack 已长期绑定 m_stack
+        return;
+    }
+
+    auto* tls = ThreadLocalSharedStack::GetInstance();
+    tls->ensureStacksAllocated();
+    m_sharedStack = tls->acquire();
+
+    if (!m_sharedStack) {
+        // 当前线程两个共享栈都在用，属于极端情况，具体降级策略实现阶段确定
+        SYLAR_LOG_WARN(SYLAR_LOG_ROOT())
+            << "Fiber " << m_id << " no idle shared stack, need fallback";
+        return;
+    }
+
+    if (m_savedStackBuf && m_savedStackLen > 0) {
+        memcpy(m_sharedStack, m_savedStackBuf, m_savedStackLen);
+        SaveBufferAllocator::dealloc(m_savedStackBuf, m_savedStackLen);
+        m_savedStackBuf = nullptr;
+        m_savedStackLen = 0;
+    }
+
+    m_ctx.uc_stack.ss_sp   = m_sharedStack;
+    m_ctx.uc_stack.ss_size = ThreadLocalSharedStack::STACK_SIZE;
+}
+```
+
+
+#### 4.4 与 `resume()/yield()` 的结合
+
+在共享栈模式下，`resume`/`yield` 的时序大致变为：
+
+```cpp
+void Fiber::resume() {
+    SYLAR_ASSERT(m_state != EXEC && m_state != TERM && m_state != EXCEPT);
+
+    if (m_useSharedStack) {
+        restoreStack();   // 确保 m_ctx 使用当前线程的共享栈
+    }
+
+    // 下面保留现有逻辑：选择调度协程或线程主协程做 swapcontext
+    SetThis(this);
+    m_state = EXEC;
+    // ... 按 m_runInScheduler 决定从哪个上下文切入
+}
+
+void Fiber::yield() {
+    SYLAR_ASSERT(m_state == EXEC || m_state == TERM || m_state == EXCEPT);
+
+    // 先切换 SetThis / 状态标记，保持与当前实现一致
+    // ... 选好要跳回的目标上下文（调度协程 / 主协程）
+
+    if (m_useSharedStack) {
+        saveStack();      // 拷贝栈内容并归还共享栈
+    }
+
+    // 再执行 swapcontext(&m_ctx, &target_ctx)
+}
+```
+
+> 核心要求：`saveStack()` 一定要在当前协程栈内、在 `swapcontext` 之前执行；`restoreStack()` 一定要在切入该协程栈之前执行，且与 `ucontext` 中记录的栈区一致。
+
+
+### 5. 跨线程调度行为
+
+协程在 A 线程挂起再在 B 线程恢复的流程：
+
+1. A 线程挂起时：
+   - Save Buffer 由 A 通过 `HashBucket` 内存池分配；
+   - 共享栈归还给 A 线程的 `ThreadLocalSharedStack`；
+2. 调度器把该 Fiber 重新 `schedule` 到 B 线程；
+3. B 线程 `resume`：
+   - 从 B 线程本地共享栈池取一块共享栈；
+   - 将 Save Buffer 内容拷入共享栈；
+   - 在 B 线程通过 `HashBucket` 释放 Save Buffer；
+   - 继续运行协程。
+
+整个过程中：
+
+- 共享栈始终只在本线程申请/归还，无锁、无跨线程；
+- Save Buffer 通过 CentralCache 做跨线程分配/释放；
+- 调度器仍然可以自由地在任意工作线程之间迁移协程。
+
+
+### 6. 内存与性能预期（简要）
+
+假设：8 线程、10000 协程，其中 1000 活跃、9000 挂起，平均每个协程栈使用 50KB：
+
+- 线程本地共享栈：8 × 2 × 128KB ≈ 2MB；
+- 活跃协程：占用共享栈（已计入上面）；
+- 挂起协程 Save Buffer：9000 × 50KB ≈ 450MB；
+- Fiber 对象：10000 × 200B ≈ 2MB；
+- 总计 ≈ 454MB。
+
+对比当前“独立栈 128KB/协程”方案：
+
+- 10000 × 128KB ≈ 1.25GB；
+- 栈相关内存约下降 60% 左右。
+
+额外开销：每次挂起/恢复需要一次栈 memcpy（几十 KB 量级）和一次 CentralCache 操作，单次在数十微秒量级，仍明显小于一次系统调用+线程上下文切换成本。
+
+
+### 7. 集成步骤与风险控制
+
+推荐实现顺序：
+
+1. **确认内存池配置**：
+   - 复用现有 `sylar/memorypool/memory_pool.{h,cpp}`；
+   - 在初始化阶段调用一次 `HashBucket::initMemoryPool(...)`，配置适合 Save Buffer 的槽位列表（例如 4KB–128KB 若干档）；
+   - 写一个简单压测验证 `HashBucket::useMemory/freeMemory` 的性能与线程安全；
+2. **实现 `ThreadLocalSharedStack`/`SaveBufferAllocator`**：
+   - 编写小测试验证多线程场景下行为；
+3. **在 Fiber 中接线但默认关闭共享栈**：
+   - 加入共享栈成员与 `saveStack/restoreStack`；
+   - 配置层默认 `use_shared_stack=false`，跑完所有现有测试；
+4. **测试环境开启共享栈模式**：
+   - 构造大量 Fiber + 深栈调用 + 跨线程调度场景；
+   - 重点观察：随机崩溃、栈溢出、内存泄漏；
+5. **线上灰度**：
+   - 按业务模块/实例逐步开启，配合监控观察内存和 CPU；
+   - 统计“共享栈用尽时的 fallback 次数”，评估参数是否需要调整。
+
+主要风险点：
+
+- 与 `ucontext` 的栈/上下文配合需要非常精确，错误通常表现为“低概率随机崩溃”；
+- 栈使用量估算不准可能导致保存/恢复越界，必须配合断言和压力测试；
+- 共享栈用尽时的降级策略如果设计不好，会把内存重新推高到接近“每协程一块栈”的水平；
+- gdb / sanitizer 对“手动搬运栈”的支持有限，建议在开发环境提供配置开关，允许临时关闭共享栈。
+
+
+### 8. 涉及文件（规划）
+
+- 新增：
+  - `sylar/fiber/thread_local_stack.h`；
+  - `sylar/fiber/save_buffer_allocator.h`。
+- 修改：
+  - `sylar/fiber/fiber.h` / `sylar/fiber/fiber.cc`：增加共享栈相关字段与逻辑；
+  - `sylar/CMakeLists.txt`：编译纳入新文件。
+
+总体评价：
+
+- 该方案在不改变现有调度模型的前提下，提供了一个“成本可控、实现复杂度中等”的栈内存优化路径；
+- 相比简单减小栈、纯协程池等方案，它能在大规模并发场景下显著降低内存占用，同时保持跨线程调度能力；
+- 实现过程中需要严密的测试和监控，但从架构上看，已经是当前项目条件下最合适的共享栈实现方向。
+
+---
+
+## Fiber 嵌套调用 Route A 方案规划（逻辑嵌套，统一调度）
+
+**日期**：2026-03-06  
+**状态**：仅设计记录，暂不实施
+
+### 1. 背景
+
+当前调度模型是“星型结构”：
+
+- 每个线程有一个调度协程（或线程主协程作为调度协程）；
+- 所有业务 Fiber 都是由调度协程 `resume`，再 `yield` 回调度协程；
+- 调度器认为“一个线程任一时刻只执行一个业务 Fiber”。
+
+很多时候业务上希望有“逻辑上的嵌套调用”效果：
+
+- 在 Fiber A 中“调用” Fiber B；
+- 等 B 跑完之后 A 再继续，就像函数调用一样；
+- 但**物理调度仍由 Scheduler 统一负责**，不在 A 里直接 `resume(B)`。
+
+
+### 2. 基本思路（Route A）
+
+核心思想：
+
+- “嵌套”只体现在业务语义上；
+- 协程切换仍是：调度协程 ↔ 业务 Fiber（单层）；
+- 父/子 Fiber 之间用同步原语（类似 future/promise）串联。
+
+典型流程：
+
+```cpp
+// 父 Fiber 逻辑（伪代码）
+void parent() {
+    auto done = std::make_shared<FutureLike>();
+
+    // 让 Scheduler 去跑子任务
+    Scheduler::GetThis()->schedule([done]{
+        child_logic();
+        done->set_value();  // 标记完成
+    });
+
+    // 等子任务完成：当前 Fiber 挂起
+    wait(done);  // 内部调用 YieldToHold，注册自己到等待队列
+
+    // 被唤醒后继续，相当于“子 Fiber 调用结束”
+    continue_parent_logic();
+}
+```
+
+调度器看到的仍然是“多个独立任务”排队执行，只是父任务会在某个点上挂起等待子任务完成。
+
+
+### 3. 需要的基础设施（规划）
+
+1. **轻量级等待对象 / Future-like 抽象**
+
+   需求：
+
+   - 能在 Fiber 上挂 `wait()`；
+   - 完成时能唤醒挂在上面的一个或多个 Fiber；
+   - 内部用 `Scheduler::schedule` 把等待的 Fiber 丢回调度器。
+
+   粗略接口：
+
+   ```cpp
+   class FiberFuture {
+   public:
+       void set();                 // 在任意 Fiber/线程中调用，标记完成
+       void wait();                // 在当前 Fiber 中等待，内部 YieldToHold
+
+   private:
+       std::atomic<bool> m_ready;
+       std::vector<Fiber::ptr> m_waiters;
+       Mutex m_mutex;
+   };
+   ```
+
+2. **`wait()` 实现约定**
+
+   - 只能在 Fiber 中调用（非线程主协程）；
+   - 内部流程：
+     1. 如果已完成，直接返回；
+     2. 否则把当前 Fiber 加入 `m_waiters`；
+     3. 调用 `Fiber::YieldToHold()`，让当前 Fiber 进入 HOLD 状态，由 Scheduler 继续调度其他任务；
+   - `set()` 中：
+     1. 标记完成；
+     2. 把 `m_waiters` 中的 Fiber 逐个 `Scheduler::schedule()` 回去。
+
+3. **不改 Scheduler/Fiber 主协议**
+
+   - Scheduler 仍然只负责“从队列取一个 Fiber，`resume`，等它 `yield/TERM` 回来”；
+   - Fiber 仍然只在两类上下文之间切换：调度协程 / 线程主协程；
+   - 不引入“父 Fiber 栈”、“子 Fiber 直接从父 Fiber `resume`”等额外栈关系。
+
+
+### 4. 与共享栈方案的兼容性
+
+- Route A 不改变 Fiber 的物理切换关系，只是在业务层引入“等待子任务完成”的语义；
+- 共享栈方案假定“每线程任一时刻只有一个业务 Fiber 在运行”，Route A 仍然满足这个假设；
+- 实现顺序建议：
+  1. 先稳定共享栈/内存池等底层优化；
+  2. 再在上层加 `FiberFuture`/`spawn_and_wait` 这类工具，不动底层调度协议。
+
+
+### 5. 未来可能的 API 形态（示意）
+
+```cpp
+// 辅助函数：在当前 Scheduler 中启动子 Fiber 并等待完成
+void spawn_and_wait(std::function<void()> fn) {
+    FiberFuture::ptr fut(new FiberFuture);
+
+    Scheduler::GetThis()->schedule([fn, fut]{
+        fn();
+        fut->set();
+    });
+
+    fut->wait();
+}
+
+// 使用示例
+void parent_fiber_logic() {
+    // 在同一调度器下“嵌套调用”一个子 Fiber
+    spawn_and_wait([]{
+        // 子 Fiber 逻辑
+    });
+
+    // 这里就像“子函数返回”一样继续执行
+}
+```
+
+本节只记录设计方向，具体实现细节（接口命名、线程安全策略、异常传播等）留到未来需要时再展开。
