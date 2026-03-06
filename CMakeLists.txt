@@ -120,3 +120,6 @@ target_link_libraries(test_shared_stack_longrun sylar)
 
 add_executable(test_shared_stack_workeronly tests/test_shared_stack_workeronly.cc)
 target_link_libraries(test_shared_stack_workeronly sylar)
+
+add_executable(test_bytearray_pool_perf tests/test_bytearray_pool_perf.cc)
+target_link_libraries(test_bytearray_pool_perf sylar)

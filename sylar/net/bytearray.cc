@@ -6,11 +6,14 @@
 #include "bytearray.h"
 #include "sylar/log/logger.h"
 #include "sylar/base/endian.h"
+#include "sylar/memorypool/memory_pool.h"
 #include <fstream>
 #include <sstream>
 #include <string.h>
 #include <iomanip>
 #include <cmath>
+#include <mutex>
+#include <set>
 
 namespace sylar
 {
@@ -18,11 +21,53 @@ namespace sylar
     static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
     // ============================================================================
+    // ByteArray 内存池管理
+    // ============================================================================
+
+    /**
+     * @brief 确保指定 base_size 的数据块池已初始化
+     * @details 采用懒初始化 + 去重策略，避免重复初始化相同尺寸的桶
+     */
+    static void ensureDataBlockPoolInitialized(size_t base_size)
+    {
+        static std::mutex s_init_mutex;
+        static std::set<size_t> s_initialized_sizes;
+
+        std::lock_guard<std::mutex> lock(s_init_mutex);
+        if (s_initialized_sizes.find(base_size) == s_initialized_sizes.end())
+        {
+            // 初始化三个桶：Node 本体(~32字节)、数据块(base_size)、以及常见的 4096
+            // 这样可以覆盖大多数场景，避免每次都重新初始化
+            if (s_initialized_sizes.empty())
+            {
+                HashBucket::initMemoryPool(32, 4096, static_cast<int>(base_size));
+            }
+            else if (base_size != 4096 && base_size != 32)
+            {
+                // 如果 base_size 不是常见值，追加初始化
+                HashBucket::initMemoryPool(static_cast<int>(base_size));
+            }
+            s_initialized_sizes.insert(base_size);
+        }
+    }
+
+    /**
+     * @brief 创建 ByteArray 节点（确保内存池先初始化）
+     */
+    static ByteArray::Node *createByteArrayNode(size_t base_size)
+    {
+        ensureDataBlockPoolInitialized(base_size);
+        return newElement<ByteArray::Node>(base_size);
+    }
+
+    // ============================================================================
     // Node 实现
     // ============================================================================
 
     ByteArray::Node::Node(size_t s)
-        : ptr(new char[s]), next(nullptr), size(s)
+        : ptr(static_cast<char *>(HashBucket::useMemory(static_cast<int>(s)))),
+          next(nullptr),
+          size(s)
     {
     }
 
@@ -35,7 +80,7 @@ namespace sylar
     {
         if (ptr)
         {
-            delete[] ptr;
+            HashBucket::freeMemory(ptr, static_cast<int>(size));
         }
     }
 
@@ -45,7 +90,7 @@ namespace sylar
 
     ByteArray::ByteArray(size_t base_size)
         : m_baseSize(base_size), m_position(0), m_capacity(base_size), m_size(0),
-          m_endian(SYLAR_BIG_ENDIAN), m_root(new Node(base_size)), m_cur(m_root)
+          m_endian(SYLAR_BIG_ENDIAN), m_root(createByteArrayNode(base_size)), m_cur(m_root)
     {
     }
 
@@ -56,7 +101,7 @@ namespace sylar
         {
             m_cur = tmp;
             tmp = tmp->next;
-            delete m_cur;
+            deleteElement(m_cur);
         }
     }
 
@@ -707,7 +752,7 @@ namespace sylar
         Node *first = NULL;
         for (size_t i = 0; i < count; ++i)
         {
-            tmp->next = new Node(m_baseSize);
+            tmp->next = newElement<Node>(m_baseSize);
             if (first == NULL)
             {
                 first = tmp->next;
