@@ -20,6 +20,7 @@ set(SYLAR_SOURCES
     sylar/base/config.cc
     sylar/concurrency/mutex/semaphore.cc
     sylar/concurrency/thread.cc
+    sylar/memorypool/memory_pool.cpp
     sylar/fiber/fiber.cc
     sylar/fiber/scheduler.cc
     sylar/fiber/iomanager.cc
@@ -95,4 +96,3 @@ target_link_libraries(test_tcp_server sylar)
 
 add_executable(test_udp_server tests/test_udp_server.cc)
 target_link_libraries(test_udp_server sylar)
-
