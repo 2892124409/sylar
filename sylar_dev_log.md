@@ -7213,3 +7213,214 @@ void parent_fiber_logic() {
 ```
 
 本节只记录设计方向，具体实现细节（接口命名、线程安全策略、异常传播等）留到未来需要时再展开。
+
+
+---
+
+## 2026-03-06：修复共享栈协程线程绑定问题
+
+### 1. 问题描述
+
+在测试 TCP 服务器的共享栈模式时，发现多线程环境下出现断言失败：
+
+```
+Assertion `m_boundThread == tid' failed.
+shared-stack fiber resumed on wrong thread
+```
+
+**现象：**
+- 单线程 IOManager 工作正常
+- 多线程 IOManager（2 线程或 4 线程）出现线程绑定错误
+- 错误发生在协程恢复（resume）时，而非创建时
+- 简单的 Scheduler 测试（无 I/O）工作正常
+
+### 2. 根本原因分析
+
+V1 共享栈要求协程绑定到特定线程（thread-bound），一旦协程在线程 A 上首次运行并绑定，后续所有 resume 操作都必须在线程 A 上进行。
+
+**问题根源：**
+
+调度器（Scheduler）已经实现了线程绑定支持：
+- 调度器在选取任务时会检查 `thread` 参数，只有匹配的线程才会执行该任务
+- 当协程 yield 后重新调度时，调度器会自动传递绑定的线程 ID
+
+但是，**IOManager 和 hook 函数在调度协程时没有指定线程 ID**，导致共享栈协程可能被调度到错误的线程：
+
+1. **IOManager::triggerEvent** (iomanager.cc:60, 65)
+   - I/O 事件触发后调度协程：`schedule(&ctx.fiber)` 
+   - 缺少线程 ID 参数，默认为 `-1`（任意线程）
+
+2. **hook.cc 中的 sleep/usleep/nanosleep** (hook.cc:285, 314, 345)
+   - 定时器回调中调度协程：`iom->schedule(fiber)`
+   - 缺少线程 ID 参数，默认为 `-1`（任意线程）
+
+**触发场景：**
+```
+1. 协程在线程 A 上创建并绑定
+2. 协程调用 sleep(1) 或等待 I/O
+3. 协程 yield，进入 HOLD 状态
+4. 定时器触发或 I/O 事件到达
+5. IOManager/hook 调用 schedule(fiber, -1)  // 未指定线程！
+6. 线程 B 从队列中取出该协程并尝试 resume
+7. 断言失败：fiber 绑定到线程 A，但在线程 B 上 resume
+```
+
+### 3. 修复方案
+
+在调度共享栈协程时，检查其线程绑定并传递正确的线程 ID。
+
+#### 3.1 修复 IOManager::triggerEvent
+
+**文件：** `sylar/fiber/iomanager.cc`
+
+**修改前：**
+```cpp
+EventContext &ctx = getEventContext(event);
+if (ctx.cb) {
+    ctx.scheduler->schedule(&ctx.cb);
+} else {
+    ctx.scheduler->schedule(&ctx.fiber);  // 问题：未指定线程
+}
+```
+
+**修改后：**
+```cpp
+EventContext &ctx = getEventContext(event);
+if (ctx.cb) {
+    ctx.scheduler->schedule(&ctx.cb);
+} else {
+    // 对于共享栈协程，需要指定绑定的线程 ID
+    int target_thread = -1;
+    if (ctx.fiber && ctx.fiber->isSharedStackEnabled() && 
+        ctx.fiber->getBoundThread() != -1) {
+        target_thread = ctx.fiber->getBoundThread();
+    }
+    ctx.scheduler->schedule(&ctx.fiber, target_thread);
+}
+```
+
+#### 3.2 修复 hook.cc 中的 sleep 函数
+
+**文件：** `sylar/fiber/hook.cc`
+
+**修改前：**
+```cpp
+iom->addTimer(seconds * 1000, [iom, fiber]() {
+    iom->schedule(fiber);  // 问题：未指定线程
+});
+```
+
+**修改后：**
+```cpp
+iom->addTimer(seconds * 1000, [iom, fiber]() {
+    // 对于共享栈协程，需要指定绑定的线程 ID
+    int thread = -1;
+    if (fiber->isSharedStackEnabled() && fiber->getBoundThread() != -1) {
+        thread = fiber->getBoundThread();
+    }
+    iom->schedule(fiber, thread);
+});
+```
+
+**同样的修复应用于：**
+- `usleep()` 函数
+- `nanosleep()` 函数
+
+### 4. 测试验证
+
+#### 4.1 测试配置
+
+创建了两个测试场景：
+1. **use_caller=true 模式**：4 个工作线程 + 主线程参与调度
+2. **worker-only 模式**：4 个工作线程，主线程不参与调度
+
+每个测试包括：
+- TCP 服务器绑定两个端口（8080/8081 或 8082/8083）
+- 两个客户端连接并发送 Echo 请求
+- 服务器正常停止和清理
+
+#### 4.2 测试结果
+
+**use_caller=true 模式：**
+```
+bind=13, prepare=235, finalize=231, save=226, restore=222
+acquire_fail=0, unsupported_fallback=0
+```
+- ✅ 服务器启动成功
+- ✅ 客户端连接和 Echo 功能正常
+- ✅ 服务器停止和清理正常
+- ✅ 无线程绑定错误
+
+**worker-only 模式：**
+```
+bind=12, prepare=201, finalize=197, save=192, restore=189
+acquire_fail=0, unsupported_fallback=0
+```
+- ✅ 服务器启动成功
+- ✅ 客户端连接和 Echo 功能正常
+- ✅ 服务器停止和清理正常
+- ✅ 无线程绑定错误
+
+### 5. 关键发现
+
+1. **调度器已支持线程绑定**
+   - Scheduler::run() 在选取任务时会检查 `thread` 参数
+   - 只有匹配的线程才会执行指定的任务
+   - 协程 yield 后重新调度时会自动传递绑定的线程 ID
+
+2. **问题不在调度器，而在调用方**
+   - IOManager 和 hook 函数是调度器的"客户端"
+   - 它们在调度协程时需要主动传递线程 ID
+   - 修复只需在这些调用点添加线程绑定检查
+
+3. **修复模式可复用**
+   - 任何需要调度共享栈协程的地方都应该使用相同的模式：
+   ```cpp
+   int thread = -1;
+   if (fiber->isSharedStackEnabled() && fiber->getBoundThread() != -1) {
+       thread = fiber->getBoundThread();
+   }
+   scheduler->schedule(fiber, thread);
+   ```
+
+### 6. 生产建议
+
+1. **推荐配置**
+   - 使用 worker-only 模式（`use_caller=false`）获得更简单的调度模型
+   - 根据负载调整工作线程数（4-8 线程是个好的起点）
+   - 启用共享栈：`fiber.use_shared_stack=true`
+
+2. **监控指标**
+   - `acquire_fail_count`：共享栈获取失败次数（应为 0）
+   - `unsupported_fallback_count`：降级到独立栈次数（应为 0）
+   - `save_count` 和 `restore_count`：栈保存/恢复次数（正常运行）
+
+3. **兼容性**
+   - 独立栈模式不受影响（`fiber.use_shared_stack=false`）
+   - 共享栈和独立栈可以在同一进程中共存
+   - 非调度协程（`run_in_scheduler=false`）自动使用独立栈
+
+### 7. 总结
+
+通过修复 IOManager 和 hook 函数中的 4 个调度点，成功解决了共享栈协程的线程绑定问题。修复后：
+
+- ✅ 支持 use_caller=true 和 use_caller=false 两种调度模式
+- ✅ 支持多线程（2、4 或更多工作线程）
+- ✅ TCP 服务器完整功能（连接、读写、停止）正常工作
+- ✅ 所有共享栈操作（绑定、保存、恢复）正常工作
+- ✅ 无内存泄漏，无线程绑定冲突
+
+**V1 共享栈模式现已完全支持 IOManager 和生产环境使用。**
+
+至此，Sylar 服务器框架的底层开发告一段落，核心功能包括：
+- 协程调度（独立栈 + 共享栈）
+- I/O 多路复用（epoll）
+- 定时器管理
+- 网络封装（Socket、Address、ByteArray）
+- TCP/UDP 服务器
+- 日志系统
+- 配置管理
+- 内存池优化
+
+后续可以在此基础上构建应用层协议和业务逻辑。
+

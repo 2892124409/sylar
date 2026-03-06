@@ -283,7 +283,15 @@ extern "C"
         if (iom)
         {
             iom->addTimer(seconds * 1000, [iom, fiber]()
-                          { iom->schedule(fiber); });
+                          {
+                              // 对于共享栈协程，需要指定绑定的线程 ID
+                              int thread = -1;
+                              if (fiber->isSharedStackEnabled() && fiber->getBoundThread() != -1)
+                              {
+                                  thread = fiber->getBoundThread();
+                              }
+                              iom->schedule(fiber, thread);
+                          });
             sylar::Fiber::YieldToHold();
         }
         else
@@ -304,7 +312,15 @@ extern "C"
         if (iom)
         {
             iom->addTimer(usec / 1000, [iom, fiber]()
-                          { iom->schedule(fiber); });
+                          {
+                              // 对于共享栈协程，需要指定绑定的线程 ID
+                              int thread = -1;
+                              if (fiber->isSharedStackEnabled() && fiber->getBoundThread() != -1)
+                              {
+                                  thread = fiber->getBoundThread();
+                              }
+                              iom->schedule(fiber, thread);
+                          });
             sylar::Fiber::YieldToHold();
         }
         else
@@ -327,7 +343,15 @@ extern "C"
         if (iom)
         {
             iom->addTimer(timeout_ms, [iom, fiber]()
-                          { iom->schedule(fiber); });
+                          {
+                              // 对于共享栈协程，需要指定绑定的线程 ID
+                              int thread = -1;
+                              if (fiber->isSharedStackEnabled() && fiber->getBoundThread() != -1)
+                              {
+                                  thread = fiber->getBoundThread();
+                              }
+                              iom->schedule(fiber, thread);
+                          });
             sylar::Fiber::YieldToHold();
         }
         else
