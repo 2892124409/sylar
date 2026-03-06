@@ -2,7 +2,6 @@
 #include "scheduler.h"
 #include "sylar/base/config.h"
 #include "sylar/base/macro.h"
-#include "sylar/memorypool/memory_pool.h"
 #include <atomic>
 
 namespace sylar
@@ -22,38 +21,20 @@ namespace sylar
         Config::Lookup<uint32_t>("fiber.stack_size", 128 * 1024, "fiber stack size");
 
     /**
-     * @brief 协程栈内存分配器（基于 HashBucket 内存池）
+     * @brief 简单的栈内存分配器（后续可优化为内存池）
      */
     class StackAllocator
     {
     public:
         static void *Alloc(size_t size)
         {
-            return sylar::HashBucket::useMemory(static_cast<int>(size));
+            return malloc(size);
         }
         static void Dealloc(void *vp, size_t size)
         {
-            sylar::HashBucket::freeMemory(vp, static_cast<int>(size));
+            return free(vp);
         }
     };
-
-    /**
-     * @brief 初始化协程栈使用的内存池槽位配置
-     * @details 仅初始化一次，多次调用 initMemoryPool 会直接返回
-     */
-    struct FiberStackMemoryPoolInit
-    {
-        FiberStackMemoryPoolInit()
-        {
-            // 为常见协程栈大小预配置几个档位，按需向上取整
-            // 默认栈 128KB，允许用户配置到 256KB/512KB/1MB 等
-            sylar::HashBucket::initMemoryPool({64 * 1024, 128 * 1024,
-                                               256 * 1024, 512 * 1024,
-                                               1024 * 1024});
-        }
-    };
-
-    static FiberStackMemoryPoolInit s_fiber_stack_pool_init;
 
     /**
      * @brief 私有构造函数：用于包装当前线程的原始执行流为“主协程”
