@@ -62,7 +62,13 @@ namespace sylar
         else
         {
             // 如果注册的是协程，则将协程推入调度任务队列
-            ctx.scheduler->schedule(&ctx.fiber);
+            // 对于共享栈协程，需要指定绑定的线程 ID
+            int target_thread = -1;
+            if (ctx.fiber && ctx.fiber->isSharedStackEnabled() && ctx.fiber->getBoundThread() != -1)
+            {
+                target_thread = ctx.fiber->getBoundThread();
+            }
+            ctx.scheduler->schedule(&ctx.fiber, target_thread);
         }
 
         ctx.scheduler = nullptr;
