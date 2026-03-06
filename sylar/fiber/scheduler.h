@@ -59,6 +59,12 @@ namespace sylar
         static Fiber *GetMainFiber();
 
         /**
+         * @brief 当前调度器是否支持 V1 线程绑定共享栈
+         * @details 当前仅在 use_caller=true 的调度模式下视为已验证路径
+         */
+        bool supportsSharedStackV1() const { return m_rootFiber != nullptr || m_threadCount > 0; }
+
+        /**
          * @brief 启动调度器
          */
         void start();

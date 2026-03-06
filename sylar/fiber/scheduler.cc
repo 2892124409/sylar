@@ -23,6 +23,7 @@ namespace sylar
         : m_name(name)
     {
         SYLAR_ASSERT(threads > 0);
+        m_stopping = true;
 
         if (use_caller)
         {

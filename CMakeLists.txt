@@ -108,3 +108,15 @@ target_link_libraries(test_shared_stack_scheduler_mt sylar)
 
 add_executable(test_shared_stack_stress tests/test_shared_stack_stress.cc)
 target_link_libraries(test_shared_stack_stress sylar)
+
+add_executable(test_shared_stack_guard tests/test_shared_stack_guard.cc)
+target_link_libraries(test_shared_stack_guard sylar)
+
+add_executable(test_shared_stack_lifecycle tests/test_shared_stack_lifecycle.cc)
+target_link_libraries(test_shared_stack_lifecycle sylar)
+
+add_executable(test_shared_stack_longrun tests/test_shared_stack_longrun.cc)
+target_link_libraries(test_shared_stack_longrun sylar)
+
+add_executable(test_shared_stack_workeronly tests/test_shared_stack_workeronly.cc)
+target_link_libraries(test_shared_stack_workeronly sylar)

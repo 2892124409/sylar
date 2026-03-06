@@ -7,6 +7,7 @@
 #include "sylar/fiber/thread_local_stack.h"
 #include <atomic>
 #include <cstring>
+#include <sstream>
 
 namespace sylar
 {
@@ -14,6 +15,13 @@ namespace sylar
     // 全局静态变量，用于生成协程 ID 和统计协程总数，因为没加thread_local所以统计的是当前进程中的协程数和 ID
     static std::atomic<uint64_t> s_fiber_id{0};
     static std::atomic<uint64_t> s_fiber_count{0};
+    static std::atomic<uint64_t> s_shared_bind_count{0};
+    static std::atomic<uint64_t> s_shared_prepare_count{0};
+    static std::atomic<uint64_t> s_shared_finalize_count{0};
+    static std::atomic<uint64_t> s_shared_save_count{0};
+    static std::atomic<uint64_t> s_shared_restore_count{0};
+    static std::atomic<uint64_t> s_shared_acquire_fail_count{0};
+    static std::atomic<uint64_t> s_shared_unsupported_mode_count{0};
 
     // 线程局部变量：当前线程正在运行的协程
     static thread_local Fiber *t_fiber = nullptr;
@@ -75,12 +83,27 @@ namespace sylar
         : m_id(++s_fiber_id), m_cb(cb), m_runInScheduler(run_in_scheduler)
     {
         ++s_fiber_count;
-        m_useSharedStack = g_fiber_use_shared_stack->getValue() && run_in_scheduler;
+        bool want_shared_stack = g_fiber_use_shared_stack->getValue() && run_in_scheduler;
+        if (want_shared_stack)
+        {
+            Scheduler *scheduler = Scheduler::GetThis();
+            if (!scheduler || !scheduler->supportsSharedStackV1())
+            {
+                ++s_shared_unsupported_mode_count;
+                SYLAR_LOG_WARN(SYLAR_LOG_ROOT())
+                    << "fiber.use_shared_stack is enabled, but current scheduler mode is not validated for V1; "
+                    << "fallback to independent stack. fiber_id=" << m_id;
+                want_shared_stack = false;
+            }
+        }
+        m_useSharedStack = want_shared_stack;
         m_stacksize = stacksize ? stacksize : g_fiber_stack_size->getValue();
 
         if (m_useSharedStack)
         {
             m_stacksize = g_fiber_shared_stack_size->getValue();
+            SYLAR_ASSERT2(ThreadLocalSharedStack::SetStackSize(m_stacksize),
+                          "shared stack size must remain globally consistent");
             SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "Fiber::Fiber shared-stack V1 enabled id=" << m_id;
             return;
         }
@@ -216,6 +239,7 @@ namespace sylar
         {
             return;
         }
+        ++s_shared_prepare_count;
         prepareSharedStackBeforeResume();
     }
 
@@ -225,6 +249,7 @@ namespace sylar
         {
             return;
         }
+        ++s_shared_finalize_count;
         finalizeSharedStackAfterYield();
     }
 
@@ -235,6 +260,7 @@ namespace sylar
         if (m_boundThread == -1)
         {
             m_boundThread = tid;
+            ++s_shared_bind_count;
             return;
         }
         SYLAR_ASSERT2(m_boundThread == tid, "shared-stack fiber resumed on wrong thread");
@@ -248,6 +274,10 @@ namespace sylar
         if (!m_sharedStack)
         {
             m_sharedStack = ThreadLocalSharedStack::GetInstance()->acquire();
+        }
+        if (!m_sharedStack)
+        {
+            ++s_shared_acquire_fail_count;
         }
         SYLAR_ASSERT2(m_sharedStack, "shared stack unavailable before resume");
 
@@ -269,7 +299,7 @@ namespace sylar
 
         char marker;
         const char *stack_base = static_cast<const char *>(m_sharedStack);
-        const char *stack_top = stack_base + ThreadLocalSharedStack::STACK_SIZE;
+        const char *stack_top = stack_base + ThreadLocalSharedStack::GetStackSize();
         const char *current_sp = &marker;
 
         if (current_sp >= stack_top || current_sp < stack_base)
@@ -335,6 +365,7 @@ namespace sylar
             SaveBufferAllocator::Dealloc(m_savedStackBuf, m_savedStackLen);
         }
         m_savedStackBuf = buf;
+        ++s_shared_save_count;
     }
 
     void Fiber::restoreSharedStack()
@@ -381,6 +412,7 @@ namespace sylar
         m_savedStackBuf = nullptr;
         m_savedStackLen = 0;
         m_savedStackOffset = 0;
+        ++s_shared_restore_count;
     }
 
     void Fiber::releaseSharedStackToTls()
@@ -496,7 +528,7 @@ namespace sylar
         {
             char marker;
             const char *stack_base = static_cast<const char *>(m_sharedStack);
-            const char *stack_top = stack_base + g_fiber_shared_stack_size->getValue();
+            const char *stack_top = stack_base + ThreadLocalSharedStack::GetStackSize();
             const char *current_sp = &marker;
             SYLAR_ASSERT2(current_sp >= stack_base && current_sp < stack_top,
                           "shared-stack current sp out of range before yield");
@@ -504,13 +536,13 @@ namespace sylar
             size_t used = static_cast<size_t>(stack_top - current_sp);
             const size_t align = 4096;
             used = (used + align - 1) & ~(align - 1);
-            if (used > g_fiber_shared_stack_size->getValue())
+            if (used > ThreadLocalSharedStack::GetStackSize())
             {
-                used = g_fiber_shared_stack_size->getValue();
+                used = ThreadLocalSharedStack::GetStackSize();
             }
 
             m_savedStackLen = used;
-            m_savedStackOffset = g_fiber_shared_stack_size->getValue() - used;
+            m_savedStackOffset = ThreadLocalSharedStack::GetStackSize() - used;
             m_needSharedStackFinalize = true;
         }
 
@@ -670,6 +702,44 @@ namespace sylar
             return t_fiber->getId();
         }
         return 0;
+    }
+
+    Fiber::SharedStackStats Fiber::GetSharedStackStats()
+    {
+        SharedStackStats stats;
+        stats.bind_count = s_shared_bind_count.load();
+        stats.prepare_count = s_shared_prepare_count.load();
+        stats.finalize_count = s_shared_finalize_count.load();
+        stats.save_count = s_shared_save_count.load();
+        stats.restore_count = s_shared_restore_count.load();
+        stats.acquire_fail_count = s_shared_acquire_fail_count.load();
+        stats.unsupported_mode_fallback_count = s_shared_unsupported_mode_count.load();
+        return stats;
+    }
+
+    std::string Fiber::GetSharedStackStatsString()
+    {
+        SharedStackStats stats = GetSharedStackStats();
+        std::ostringstream oss;
+        oss << "bind=" << stats.bind_count
+            << ",prepare=" << stats.prepare_count
+            << ",finalize=" << stats.finalize_count
+            << ",save=" << stats.save_count
+            << ",restore=" << stats.restore_count
+            << ",acquire_fail=" << stats.acquire_fail_count
+            << ",unsupported_fallback=" << stats.unsupported_mode_fallback_count;
+        return oss.str();
+    }
+
+    void Fiber::ResetSharedStackStats()
+    {
+        s_shared_bind_count.store(0);
+        s_shared_prepare_count.store(0);
+        s_shared_finalize_count.store(0);
+        s_shared_save_count.store(0);
+        s_shared_restore_count.store(0);
+        s_shared_acquire_fail_count.store(0);
+        s_shared_unsupported_mode_count.store(0);
     }
 
 }
