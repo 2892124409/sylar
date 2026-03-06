@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <functional>
+#include <string>
 #include <ucontext.h>
 
 namespace sylar
@@ -21,6 +22,17 @@ namespace sylar
     {
     public:
         typedef std::shared_ptr<Fiber> ptr;
+
+        struct SharedStackStats
+        {
+            uint64_t bind_count;
+            uint64_t prepare_count;
+            uint64_t finalize_count;
+            uint64_t save_count;
+            uint64_t restore_count;
+            uint64_t acquire_fail_count;
+            uint64_t unsupported_mode_fallback_count;
+        };
 
         /**
          * @brief 协程状态
@@ -174,6 +186,21 @@ namespace sylar
          * @brief 获取当前协程的id
          */
         static uint64_t GetFiberId();
+
+        /**
+         * @brief 获取共享栈运行统计
+         */
+        static SharedStackStats GetSharedStackStats();
+
+        /**
+         * @brief 获取共享栈统计的可读字符串
+         */
+        static std::string GetSharedStackStatsString();
+
+        /**
+         * @brief 重置共享栈运行统计
+         */
+        static void ResetSharedStackStats();
 
     private:
         /**

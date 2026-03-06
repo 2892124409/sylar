@@ -14,8 +14,28 @@ namespace sylar
     class ThreadLocalSharedStack
     {
     public:
-        static const size_t STACK_SIZE = 128 * 1024;
         static const size_t STACK_COUNT = 1;
+
+        static bool SetStackSize(size_t stack_size)
+        {
+            if (stack_size == 0)
+            {
+                return false;
+            }
+            size_t &configured = ConfiguredStackSize();
+            if (configured != 0 && configured != stack_size)
+            {
+                return false;
+            }
+            configured = stack_size;
+            return true;
+        }
+
+        static size_t GetStackSize()
+        {
+            size_t configured = ConfiguredStackSize();
+            return configured ? configured : 128 * 1024;
+        }
 
         static ThreadLocalSharedStack *GetInstance()
         {
@@ -92,9 +112,15 @@ namespace sylar
             {
                 if (!m_stacks[i])
                 {
-                    m_stacks[i] = std::malloc(STACK_SIZE);
+                    m_stacks[i] = std::malloc(GetStackSize());
                 }
             }
+        }
+
+        static size_t &ConfiguredStackSize()
+        {
+            static size_t s_stack_size = 0;
+            return s_stack_size;
         }
 
     private:
