@@ -35,6 +35,16 @@ set(SYLAR_SOURCES
     sylar/net/socket_stream.cc
     sylar/net/tcp_server.cc
     sylar/net/udp_server.cc
+    sylar/http/http.cc
+    sylar/http/http_request.cc
+    sylar/http/http_response.cc
+    sylar/http/http_parser.cc
+    sylar/http/http_session.cc
+    sylar/http/servlet.cc
+    sylar/http/http_server.cc
+    sylar/http/session.cc
+    sylar/http/session_manager.cc
+    sylar/http/sse.cc
 )
 
 # 生成共享库 libsylar.so
@@ -103,6 +113,12 @@ target_link_libraries(test_udp_server sylar)
 
 add_executable(test_server_mode_bench tests/test_server_mode_bench.cc)
 target_link_libraries(test_server_mode_bench sylar)
+
+add_executable(test_http_parser tests/test_http_parser.cc)
+target_link_libraries(test_http_parser sylar)
+
+add_executable(test_http_server tests/test_http_server.cc)
+target_link_libraries(test_http_server sylar)
 
 add_executable(test_shared_stack_helpers tests/test_shared_stack_helpers.cc)
 target_link_libraries(test_shared_stack_helpers sylar)
