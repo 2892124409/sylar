@@ -141,6 +141,81 @@ HTTP 模块最底层的公共语义定义文件
 
 ---
 
+### 0.1 `http_request.h / http_request.cc`
+#### 类/文件作用
+`HttpRequest` 的作用是承载“已经被解析完成的一条 HTTP 请求”。
+
+它自己不负责：
+- 从 socket 读数据
+- 解析字节流
+
+它只负责保存解析后的请求语义，供路由和业务处理使用。
+
+#### 具体设计了什么
+当前版本主要包含这些字段：
+
+- `method`：请求方法（GET/POST 等）
+- `versionMajor/versionMinor`：HTTP 版本
+- `path/query/fragment`：请求目标拆分后的三个部分
+- `headers`：原始请求头
+- `params`：query string 解析出来的参数
+- `cookies`：Cookie 解析出来的键值
+- `body`：请求体
+- `keepalive`：是否保持连接
+
+并提供了：
+- header/param/cookie 的 set/get 方法
+- `getVersionString()`
+- `getPathWithQuery()`
+
+#### 为什么这么设计
+把请求对象单独建模有三个目的：
+
+1. **解耦协议解析和业务处理**
+   - `HttpParser` 负责“把字节解析成请求对象”
+   - `Servlet` 负责“根据请求对象处理业务”
+
+2. **统一上层接口**
+   - 无论底层 socket 如何收包，上层都只面对 `HttpRequest`
+
+3. **便于后续扩展**
+   - 后续要加表单、JSON、鉴权、trace id 等，都可以在 `HttpRequest` 上扩展
+
+#### 当前阶段需要注意的点
+1. `params` 目前只做了最基础的 `a=b&c=d` 拆分，没有 URL decode
+2. `headers` 的 key 当前按原样存储，大小写归一化策略后续可再优化
+3. `keepalive` 是解析后的语义结果，不是原始报文文本
+
+#### 学习这个类时最该抓住的点
+
+```text
+HttpRequest 是“解析结果对象”，不是“解析器对象”。
+```
+
+也就是说：
+- 它回答的是“请求长什么样”
+- 不是“请求怎么从 TCP 字节流里被拆出来”
+
+#### 学习问答记录
+**Q：什么是 Cookie？**
+
+**A：**
+Cookie 是服务器让浏览器保存的一小段键值数据。服务器在响应里通过 `Set-Cookie` 下发，浏览器后续请求同一站点时会自动通过 `Cookie` 请求头带回。
+
+在当前 HTTP 框架里，Cookie 主要用于会话识别：
+
+1. 服务器首次响应下发 `Set-Cookie: SID=...`；
+2. 浏览器保存 SID；
+3. 后续请求自动带 `Cookie: SID=...`；
+4. 服务端通过 `SessionManager` 按 SID 找到对应 Session。
+
+关键点：
+- Cookie 里通常只放“标识”（如 SID），不是完整会话数据；
+- 真正会话状态应保存在服务端 Session 中；
+- 常见安全属性包括 `HttpOnly`、`Secure`、`SameSite`。
+
+---
+
 ### 1. 本阶段目标
 #### 模块作用
 先把 HTTP 框架的最小闭环搭起来，让项目具备：
