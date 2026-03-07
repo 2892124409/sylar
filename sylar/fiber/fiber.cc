@@ -742,4 +742,10 @@ namespace sylar
         s_shared_unsupported_mode_count.store(0);
     }
 
+    void Fiber::clearCallback()
+    {
+        m_cb = nullptr;
+    }
+
+
 }

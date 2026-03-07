@@ -19,6 +19,8 @@
 namespace sylar
 {
 
+    bool GetDefaultSchedulerUseCaller();
+
     /**
      * @brief 协程调度器
      * @details 封装的是 N:M 的协程调度器
@@ -36,7 +38,7 @@ namespace sylar
          * @param[in] use_caller 是否使用当前调用线程
          * @param[in] name 调度器名称
          */
-        Scheduler(size_t threads = 1, bool use_caller = true, const std::string &name = "");
+        Scheduler(size_t threads = 1, bool use_caller = GetDefaultSchedulerUseCaller(), const std::string &name = "");
 
         /**
          * @brief 析构函数

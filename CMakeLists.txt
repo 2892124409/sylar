@@ -22,6 +22,7 @@ set(SYLAR_SOURCES
     sylar/concurrency/thread.cc
     sylar/memorypool/memory_pool.cpp
     sylar/fiber/fiber.cc
+    sylar/fiber/fiber_pool.cc
     sylar/fiber/scheduler.cc
     sylar/fiber/iomanager.cc
     sylar/fiber/timer.cc
@@ -62,6 +63,9 @@ target_link_libraries(test_fiber sylar)
 add_executable(test_scheduler tests/test_scheduler.cc)
 target_link_libraries(test_scheduler sylar)
 
+add_executable(test_fiber_pool tests/test_fiber_pool.cc)
+target_link_libraries(test_fiber_pool sylar)
+
 add_executable(test_iomanager tests/test_iomanager.cc)
 
 target_link_libraries(test_iomanager sylar)
@@ -96,6 +100,9 @@ target_link_libraries(test_tcp_server sylar)
 
 add_executable(test_udp_server tests/test_udp_server.cc)
 target_link_libraries(test_udp_server sylar)
+
+add_executable(test_server_mode_bench tests/test_server_mode_bench.cc)
+target_link_libraries(test_server_mode_bench sylar)
 
 add_executable(test_shared_stack_helpers tests/test_shared_stack_helpers.cc)
 target_link_libraries(test_shared_stack_helpers sylar)

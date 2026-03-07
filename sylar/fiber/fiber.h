@@ -202,7 +202,19 @@ namespace sylar
          */
         static void ResetSharedStackStats();
 
+        /**
+         * @brief 获取协程栈大小
+         */
+        size_t getStackSize() const { return m_stacksize; }
+
+        /**
+         * @brief 清空协程回调函数
+         * @note 用于协程池归还时清理闭包，避免持有资源
+         */
+        void clearCallback();
+
     private:
+        friend class FiberPool;
         /**
          * @brief 确保共享栈 Fiber 绑定到当前线程（Scheduler 后处理版骨架）
          */
