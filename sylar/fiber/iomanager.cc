@@ -1,4 +1,5 @@
 #include "sylar/fiber/iomanager.h"
+#include "sylar/base/config.h"
 #include "sylar/base/macro.h"
 #include "sylar/log/logger.h"
 
@@ -12,6 +13,14 @@ namespace sylar
 {
 
     static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+
+    static ConfigVar<bool>::ptr g_iomanager_use_caller =
+        Config::Lookup<bool>("iomanager.use_caller", true, "iomanager use caller at startup");
+
+    bool GetDefaultIOManagerUseCaller()
+    {
+        return g_iomanager_use_caller->getValue();
+    }
 
     /**
      * @brief 获取指定事件的上下文
@@ -217,7 +226,33 @@ namespace sylar
         {
             // 如果没传回调，默认绑定当前协程，实现“在当前位置等待 IO 唤醒”的同步编程感
             event_ctx.fiber = Fiber::GetThis();
-            SYLAR_ASSERT2(event_ctx.fiber->getState() == Fiber::EXEC, "state=" << event_ctx.fiber->getState());
+            if (!event_ctx.fiber || event_ctx.fiber->getState() != Fiber::EXEC)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "addEvent bind current fiber invalid"
+                                          << " fd=" << fd
+                                          << " event=" << event
+                                          << " fiber_id=" << (event_ctx.fiber ? event_ctx.fiber->getId() : 0)
+                                          << " state=" << (event_ctx.fiber ? event_ctx.fiber->getState() : -1)
+                                          << " scheduler=" << Scheduler::GetThis()
+                                          << " main_fiber=" << Scheduler::GetMainFiber();
+                fd_ctx->resetEventContext(event_ctx);
+                fd_ctx->events = (Event)(fd_ctx->events & ~event);
+                --m_pendingEventCount;
+
+                int rollback_op = fd_ctx->events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
+                struct epoll_event rollback_event;
+                rollback_event.events = EPOLLET | fd_ctx->events;
+                rollback_event.data.ptr = fd_ctx;
+                int rollback_rt = epoll_ctl(m_epfd, rollback_op, fd, &rollback_event);
+                if (rollback_rt)
+                {
+                    SYLAR_LOG_ERROR(g_logger) << "addEvent rollback epoll_ctl(" << m_epfd << ", "
+                                              << rollback_op << "," << fd << "," << rollback_event.events << ")"
+                                              << ":" << rollback_rt << " (" << errno << ") (" << strerror(errno) << ")";
+                }
+                errno = EINVAL;
+                return -1;
+            }
         }
         return 0;
     }

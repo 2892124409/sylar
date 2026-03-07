@@ -5,7 +5,10 @@
  * @date 2026-02-08
  */
 #include "sylar/fiber/scheduler.h"
+#include "sylar/fiber/fiber_pool.h"
 #include "sylar/fiber/hook.h"
+#include "sylar/base/config.h"
+#include "sylar/base/util.h"
 #include "sylar/log/logger.h"
 #include "sylar/base/macro.h"
 
@@ -14,10 +17,18 @@ namespace sylar
 
     static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
+    static ConfigVar<bool>::ptr g_scheduler_use_caller =
+        Config::Lookup<bool>("scheduler.use_caller", true, "scheduler use caller at startup");
+
     /// 当前线程的调度器指针（TLS）
     static thread_local Scheduler *t_scheduler = nullptr;
     /// 当前线程的调度协程（TLS），每个线程跑 run 循环的那个协程
     static thread_local Fiber *t_scheduler_fiber = nullptr;
+
+    bool GetDefaultSchedulerUseCaller()
+    {
+        return g_scheduler_use_caller->getValue();
+    }
 
     Scheduler::Scheduler(size_t threads, bool use_caller, const std::string &name)
         : m_name(name)
@@ -180,11 +191,22 @@ namespace sylar
     void Scheduler::idle()
     {
         SYLAR_LOG_INFO(g_logger) << "idle";
+        FiberPool *pool = FiberPool::GetThreadLocal();
+        uint64_t last_shrink_ms = 0;
         while (!stopping())
         {
+            uint64_t now = GetCurrentMS();
+            if (now - last_shrink_ms >= 1000)
+            {
+                pool->shrink();
+                last_shrink_ms = now;
+            }
+
             // 没活干时就在这里让出 CPU，回到 run 的下一轮循环
             sylar::Fiber::YieldToHold();
         }
+
+        pool->shrink();
     }
 
     void Scheduler::run()
@@ -265,7 +287,8 @@ namespace sylar
                     ft.fiber->onSchedulerAfterResume();
                 }
 
-                if (ft.fiber->getState() == Fiber::READY)
+                Fiber::State fiber_state = ft.fiber->getState();
+                if (fiber_state == Fiber::READY)
                 {
                     // 如果协程是主动让出的（Ready 状态），塞回队列下次接着跑
                     int target_thread = -1;
@@ -275,7 +298,8 @@ namespace sylar
                     }
                     schedule(ft.fiber, target_thread);
                 }
-                else if (ft.fiber->getState() != Fiber::TERM && ft.fiber->getState() != Fiber::EXCEPT)
+                else if (fiber_state != Fiber::TERM && fiber_state != Fiber::EXCEPT &&
+                         fiber_state != Fiber::HOLD && fiber_state != Fiber::EXEC)
                 {
                     // 否则设为挂起状态
                     ft.fiber->setState(Fiber::HOLD);
@@ -290,17 +314,21 @@ namespace sylar
                     // 增加状态检查：只有结束了的协程才能复用
                     if (cb_fiber->getState() == Fiber::TERM || cb_fiber->getState() == Fiber::EXCEPT)
                     {
-                        cb_fiber->reset(ft.cb);
+                        // 归还旧协程到池
+                        FiberPool::GetThreadLocal()->release(cb_fiber);
+                        // 从池获取新协程
+                        cb_fiber = FiberPool::GetThreadLocal()->acquire(ft.cb);
                     }
                     else
                     {
                         // 还没结束（说明可能在 HOLD），只能另起炉灶
-                        cb_fiber.reset(new Fiber(ft.cb));
+                        cb_fiber = FiberPool::GetThreadLocal()->acquire(ft.cb);
                     }
                 }
                 else
                 {
-                    cb_fiber.reset(new Fiber(ft.cb));
+                    // 首次从池获取
+                    cb_fiber = FiberPool::GetThreadLocal()->acquire(ft.cb);
                 }
                 ft.reset();
 
@@ -317,7 +345,8 @@ namespace sylar
                     cb_fiber->onSchedulerAfterResume();
                 }
 
-                if (cb_fiber->getState() == Fiber::READY)
+                Fiber::State cb_state = cb_fiber->getState();
+                if (cb_state == Fiber::READY)
                 {
                     int target_thread = -1;
                     if (cb_fiber->isSharedStackEnabled() && cb_fiber->getBoundThread() != -1)
@@ -327,14 +356,19 @@ namespace sylar
                     schedule(cb_fiber, target_thread);
                     cb_fiber.reset();
                 }
-                else if (cb_fiber->getState() == Fiber::EXCEPT || cb_fiber->getState() == Fiber::TERM)
+                else if (cb_state == Fiber::EXCEPT || cb_state == Fiber::TERM)
                 {
-                    // 函数跑完了，重置 cb_fiber 避免状态累积
+                    // 函数跑完了，归还到池
+                    FiberPool::GetThreadLocal()->release(cb_fiber);
+                    cb_fiber.reset();
+                }
+                else if (cb_state != Fiber::HOLD && cb_state != Fiber::EXEC)
+                {
+                    cb_fiber->setState(Fiber::HOLD);
                     cb_fiber.reset();
                 }
                 else
                 {
-                    cb_fiber->setState(Fiber::HOLD);
                     cb_fiber.reset();
                 }
             }
