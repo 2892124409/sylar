@@ -121,19 +121,40 @@ namespace sylar
              */
             std::string getPathWithQuery() const;
 
-        private:
-            HttpMethod m_method;
-            uint8_t m_versionMajor;
-            uint8_t m_versionMinor;
-            bool m_keepalive;
-            std::string m_path;
-            std::string m_query;
-            std::string m_fragment;
-            std::string m_body;
-            MapType m_headers;
-            MapType m_params;
-            MapType m_cookies;
-        };
+private:
+    /// HTTP 请求方法（GET/POST/PUT...）
+    HttpMethod m_method;
+
+    /// HTTP 主版本号，例如 HTTP/1.1 中的 1
+    uint8_t m_versionMajor;
+
+    /// HTTP 次版本号，例如 HTTP/1.1 中的 1
+    uint8_t m_versionMinor;
+
+    /// 连接是否保持（keep-alive 语义结果）
+    bool m_keepalive;
+
+    /// URL 路径部分（不含 query 和 fragment），例如 /api/chat
+    std::string m_path;
+
+    /// URL 查询串（? 后部分），例如 a=1&b=2
+    std::string m_query;
+
+    /// URL 片段（# 后部分），服务端一般很少使用
+    std::string m_fragment;
+
+    /// 请求体内容（POST/PUT/PATCH 常用）
+    std::string m_body;
+
+    /// 原始请求头键值对
+    MapType m_headers;
+
+    /// 从 query string 解析出的参数键值对
+    MapType m_params;
+
+    /// 从 Cookie 请求头解析出的 cookie 键值对
+    MapType m_cookies;
+};
 
     } // namespace http
 } // namespace sylar
