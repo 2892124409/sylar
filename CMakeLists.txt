@@ -120,6 +120,15 @@ target_link_libraries(test_http_parser sylar)
 add_executable(test_http_server tests/test_http_server.cc)
 target_link_libraries(test_http_server sylar)
 
+add_executable(test_session_manager tests/test_session_manager.cc)
+target_link_libraries(test_session_manager sylar)
+
+add_executable(test_sse_writer tests/test_sse_writer.cc)
+target_link_libraries(test_sse_writer sylar)
+
+add_executable(test_sse_server tests/test_sse_server.cc)
+target_link_libraries(test_sse_server sylar)
+
 add_executable(test_shared_stack_helpers tests/test_shared_stack_helpers.cc)
 target_link_libraries(test_shared_stack_helpers sylar)
 

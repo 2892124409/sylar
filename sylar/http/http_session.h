@@ -56,6 +56,9 @@ namespace sylar
             /// 返回最近一次解析错误原因
             const std::string &getParserError() const { return m_parser.getError(); }
 
+            /// 最近一次解析错误是否属于请求过大
+            bool isRequestTooLarge() const { return m_parser.isRequestTooLarge(); }
+
         private:
             /// HTTP 请求解析器实例，负责把字节流解析成 HttpRequest 对象
             HttpRequestParser m_parser;

@@ -1,4 +1,5 @@
 #include "sylar/http/http_server.h"
+#include "sylar/http/http_parser.h"
 #include "sylar/net/address.h"
 #include "sylar/net/socket.h"
 #include "sylar/net/socket_stream.h"
@@ -45,8 +46,28 @@ int main() {
         stream.close();
     });
 
-    iom.schedule([server]() {
+    iom.schedule([]() {
         sleep(2);
+        size_t old_header = sylar::http::HttpRequestParser::GetMaxHeaderSize();
+        sylar::http::HttpRequestParser::SetMaxHeaderSize(32);
+
+        sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
+        assert(sock->connect(sylar::Address::LookupAny("127.0.0.1:28080")));
+        sylar::SocketStream stream(sock);
+        std::string req = "GET /ping HTTP/1.1\r\nHost: localhost\r\nX-Long: 1234567890\r\n\r\n";
+        assert(stream.writeFixSize(req.c_str(), req.size()) == (int)req.size());
+        char buf[1024] = {0};
+        int rt = stream.read(buf, sizeof(buf));
+        assert(rt > 0);
+        std::string rsp(buf, rt);
+        assert(rsp.find("413 Payload Too Large") != std::string::npos);
+        stream.close();
+
+        sylar::http::HttpRequestParser::SetMaxHeaderSize(old_header);
+    });
+
+    iom.schedule([server]() {
+        sleep(3);
         server->stop();
     });
 

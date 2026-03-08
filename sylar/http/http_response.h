@@ -56,6 +56,10 @@ namespace sylar
             bool isKeepAlive() const { return m_keepalive; }
             void setKeepAlive(bool value) { m_keepalive = value; }
 
+            /// 是否为流式响应（响应头与响应体由业务代码自行写出）
+            bool isStream() const { return m_stream; }
+            void setStream(bool value) { m_stream = value; }
+
             /// 响应体
             const std::string &getBody() const { return m_body; }
             void setBody(const std::string &value) { m_body = value; }
@@ -90,6 +94,9 @@ namespace sylar
              */
             std::string toString() const;
 
+            /// 仅序列化响应头（不包含 Content-Length 和 body），常用于流式响应
+            std::string toHeaderString() const;
+
 private:
     /// HTTP 响应状态码（200/404/500...）
     HttpStatus m_status;
@@ -102,6 +109,9 @@ private:
 
     /// 是否保持连接（影响 Connection: keep-alive/close）
     bool m_keepalive;
+
+    /// 是否为流式响应；为 true 时通常由业务代码自行写 header/body
+    bool m_stream;
 
     /// 响应体正文内容
     std::string m_body;

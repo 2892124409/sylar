@@ -10,7 +10,7 @@ namespace sylar
     {
 
         SessionManager::SessionManager(uint64_t max_inactive_ms)
-            : m_maxInactiveMs(max_inactive_ms), m_nextId(1)
+            : m_maxInactiveMs(max_inactive_ms), m_nextId(1), m_sweepIntervalMs(0)
         {
         }
 
@@ -83,6 +83,56 @@ namespace sylar
                 }
             }
             return count;
+        }
+
+        bool SessionManager::startSweepTimer(sylar::TimerManager *manager, uint64_t sweep_interval_ms)
+        {
+            if (!manager || sweep_interval_ms == 0)
+            {
+                return false;
+            }
+
+            Mutex::Lock lock(m_mutex);
+            if (m_sweepTimer)
+            {
+                return false;
+            }
+
+            m_sweepIntervalMs = sweep_interval_ms;
+            std::weak_ptr<SessionManager> weak_self = shared_from_this();
+            m_sweepTimer = manager->addConditionTimer(
+                sweep_interval_ms,
+                [weak_self]()
+                {
+                    SessionManager::ptr self = weak_self.lock();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    self->sweepExpired();
+                },
+                weak_self,
+                true);
+            return m_sweepTimer != nullptr;
+        }
+
+        bool SessionManager::stopSweepTimer()
+        {
+            Mutex::Lock lock(m_mutex);
+            if (!m_sweepTimer)
+            {
+                return false;
+            }
+            bool rt = m_sweepTimer->cancel();
+            m_sweepTimer.reset();
+            return rt;
+        }
+
+        bool SessionManager::hasSweepTimer() const
+        {
+            SessionManager *self = const_cast<SessionManager *>(this);
+            Mutex::Lock lock(self->m_mutex);
+            return m_sweepTimer != nullptr;
         }
 
     } // namespace http

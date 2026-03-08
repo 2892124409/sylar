@@ -49,10 +49,42 @@ void test_pipelined_requests() {
     assert(!request->isKeepAlive());
 }
 
+void test_request_too_large() {
+    size_t old_header = sylar::http::HttpRequestParser::GetMaxHeaderSize();
+    size_t old_body = sylar::http::HttpRequestParser::GetMaxBodySize();
+
+    sylar::http::HttpRequestParser::SetMaxHeaderSize(32);
+    sylar::http::HttpRequestParser::SetMaxBodySize(8);
+
+    {
+        sylar::http::HttpRequestParser parser;
+        std::string raw = "GET /ping HTTP/1.1\r\nHost: localhost\r\nX-Long: 1234567890\r\n\r\n";
+        size_t consumed = 0;
+        sylar::http::HttpRequest::ptr request = parser.parse(raw, consumed);
+        assert(!request);
+        assert(parser.hasError());
+        assert(parser.isRequestTooLarge());
+    }
+
+    {
+        sylar::http::HttpRequestParser parser;
+        std::string raw = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n0123456789";
+        size_t consumed = 0;
+        sylar::http::HttpRequest::ptr request = parser.parse(raw, consumed);
+        assert(!request);
+        assert(parser.hasError());
+        assert(parser.isRequestTooLarge());
+    }
+
+    sylar::http::HttpRequestParser::SetMaxHeaderSize(old_header);
+    sylar::http::HttpRequestParser::SetMaxBodySize(old_body);
+}
+
 int main() {
     test_simple_request();
     test_half_body();
     test_pipelined_requests();
+    test_request_too_large();
     SYLAR_LOG_INFO(g_logger) << "test_http_parser passed";
     return 0;
 }

@@ -30,6 +30,13 @@ namespace sylar
         public:
             typedef std::shared_ptr<HttpRequestParser> ptr;
 
+            enum ErrorCode
+            {
+                ERROR_NONE = 0,
+                ERROR_INVALID_REQUEST,
+                ERROR_REQUEST_TOO_LARGE,
+            };
+
             /// 构造一个干净的解析器
             HttpRequestParser();
 
@@ -47,8 +54,22 @@ namespace sylar
             /// 当前解析器是否进入错误状态
             bool hasError() const { return m_error; }
 
+            /// 最近一次错误类型
+            ErrorCode getErrorCode() const { return m_errorCode; }
+
+            /// 当前错误是否属于请求过大
+            bool isRequestTooLarge() const { return m_errorCode == ERROR_REQUEST_TOO_LARGE; }
+
             /// 错误原因字符串，便于调试或返回 400
             const std::string &getError() const { return m_errorMessage; }
+
+            /// 设置请求头最大大小限制（字节）
+            static void SetMaxHeaderSize(size_t value);
+            static size_t GetMaxHeaderSize();
+
+            /// 设置请求体最大大小限制（字节）
+            static void SetMaxBodySize(size_t value);
+            static size_t GetMaxBodySize();
 
             /// 清空错误状态，为下一轮解析准备
             void reset();
@@ -56,6 +77,9 @@ namespace sylar
         private:
             /// 解析器是否处于错误状态（遇到非法请求格式时置为 true）
             bool m_error;
+
+            /// 最近一次错误类型，便于上层区分 400 / 413
+            ErrorCode m_errorCode;
 
             /// 最近一次解析错误的原因描述，便于上层返回 400 或打印日志
             std::string m_errorMessage;

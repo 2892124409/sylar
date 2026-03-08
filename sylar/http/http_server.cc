@@ -32,12 +32,18 @@ namespace sylar
                     if (session->hasParserError())
                     {
                         HttpResponse::ptr response(new HttpResponse());
-                        // 非法请求：400
+                        // 非法请求默认 400；若属于请求过大，则返回 413。
                         response->setStatus(HttpStatus::BAD_REQUEST);
+                        if (session->isRequestTooLarge())
+                        {
+                            response->setStatus(static_cast<HttpStatus>(413));
+                            response->setReason("Payload Too Large");
+                        }
                         // 出错后不再保持连接
                         response->setKeepAlive(false);
                         response->setHeader("Content-Type", "text/plain; charset=utf-8");
-                        response->setBody("400 Bad Request\n" + session->getParserError());
+                        response->setBody(std::string(session->isRequestTooLarge() ? "413 Payload Too Large\n" : "400 Bad Request\n")
+                                          + session->getParserError());
                         // 尝试把 400 发回客户端
                         session->sendResponse(response);
                     }
@@ -59,6 +65,17 @@ namespace sylar
 
                 // 路由分发：按 path 找到目标 Servlet，并执行业务 handle。
                 m_dispatch->handle(request, response, session);
+
+                // 流式响应（如 SSE）由 Servlet 自己写 header/body。
+                // 这里跳过默认 sendResponse，但仍遵循 keep-alive 决策。
+                if (response->isStream())
+                {
+                    if (!request->isKeepAlive() || !response->isKeepAlive())
+                    {
+                        break;
+                    }
+                    continue;
+                }
 
                 // 发送响应；发送失败通常意味着连接不可用，结束循环。
                 if (session->sendResponse(response) <= 0)

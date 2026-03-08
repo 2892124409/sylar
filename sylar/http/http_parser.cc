@@ -11,6 +11,8 @@ namespace sylar
     {
         namespace
         {
+            static size_t s_http_request_max_header_size = 8 * 1024;
+            static size_t s_http_request_max_body_size = 10 * 1024 * 1024;
 
             /**
              * @brief 去掉字符串首尾空白字符
@@ -123,12 +125,34 @@ namespace sylar
 
         HttpRequestParser::HttpRequestParser()
             : m_error(false)
+            , m_errorCode(ERROR_NONE)
         {
+        }
+
+        void HttpRequestParser::SetMaxHeaderSize(size_t value)
+        {
+            s_http_request_max_header_size = value;
+        }
+
+        size_t HttpRequestParser::GetMaxHeaderSize()
+        {
+            return s_http_request_max_header_size;
+        }
+
+        void HttpRequestParser::SetMaxBodySize(size_t value)
+        {
+            s_http_request_max_body_size = value;
+        }
+
+        size_t HttpRequestParser::GetMaxBodySize()
+        {
+            return s_http_request_max_body_size;
         }
 
         void HttpRequestParser::reset()
         {
             m_error = false;
+            m_errorCode = ERROR_NONE;
             m_errorMessage.clear();
         }
 
@@ -148,8 +172,22 @@ namespace sylar
             size_t header_end = buffer.find("\r\n\r\n");
             if (header_end == std::string::npos)
             {
+                if (buffer.size() > s_http_request_max_header_size)
+                {
+                    m_error = true;
+                    m_errorCode = ERROR_REQUEST_TOO_LARGE;
+                    m_errorMessage = "request header too large";
+                }
                 // 没找到 header 结束符，说明数据还不完整（典型半包场景）。
                 // 这里不是错误，只是“继续等数据”。
+                return HttpRequest::ptr();
+            }
+
+            if (header_end + 4 > s_http_request_max_header_size)
+            {
+                m_error = true;
+                m_errorCode = ERROR_REQUEST_TOO_LARGE;
+                m_errorMessage = "request header too large";
                 return HttpRequest::ptr();
             }
 
@@ -165,6 +203,7 @@ namespace sylar
             {
                 // 连请求行都读不到，视为格式错误。
                 m_error = true;
+                m_errorCode = ERROR_INVALID_REQUEST;
                 m_errorMessage = "empty request line";
                 return HttpRequest::ptr();
             }
@@ -185,6 +224,7 @@ namespace sylar
             {
                 // 请求行字段数量不对，视为非法请求行。
                 m_error = true;
+                m_errorCode = ERROR_INVALID_REQUEST;
                 m_errorMessage = "invalid request line";
                 return HttpRequest::ptr();
             }
@@ -195,6 +235,7 @@ namespace sylar
             {
                 // 当前框架不支持的方法，直接报错。
                 m_error = true;
+                m_errorCode = ERROR_INVALID_REQUEST;
                 m_errorMessage = "unsupported http method";
                 return HttpRequest::ptr();
             }
@@ -204,6 +245,7 @@ namespace sylar
             if (version.size() != 8 || version.substr(0, 5) != "HTTP/")
             {
                 m_error = true;
+                m_errorCode = ERROR_INVALID_REQUEST;
                 m_errorMessage = "invalid http version";
                 return HttpRequest::ptr();
             }
@@ -265,6 +307,7 @@ namespace sylar
                 {
                     // 头字段不合法，直接标记错误。
                     m_error = true;
+                    m_errorCode = ERROR_INVALID_REQUEST;
                     m_errorMessage = "invalid header line";
                     return HttpRequest::ptr();
                 }
@@ -286,10 +329,18 @@ namespace sylar
                 {
                     // 出现非数字内容，视为非法 content-length。
                     m_error = true;
+                    m_errorCode = ERROR_INVALID_REQUEST;
                     m_errorMessage = "invalid content-length";
                     return HttpRequest::ptr();
                 }
                 content_length = static_cast<size_t>(value);
+                if (content_length > s_http_request_max_body_size)
+                {
+                    m_error = true;
+                    m_errorCode = ERROR_REQUEST_TOO_LARGE;
+                    m_errorMessage = "request body too large";
+                    return HttpRequest::ptr();
+                }
             }
 
             // header_end 指向 "\r\n\r\n" 起始位置，所以 +4 才是 body 起始。

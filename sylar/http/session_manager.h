@@ -4,6 +4,7 @@
 #include "sylar/http/http_request.h"
 #include "sylar/http/http_response.h"
 #include "sylar/http/session.h"
+#include "sylar/fiber/timer.h"
 #include "sylar/concurrency/mutex/mutex.h"
 
 #include <memory>
@@ -28,7 +29,7 @@ namespace sylar
          * 你可以把它理解成一个“内存版 Session 仓库”。
          * 当前阶段还没有接数据库或 Redis，先用内存实现最小闭环。
          */
-        class SessionManager
+        class SessionManager : public std::enable_shared_from_this<SessionManager>
         {
         public:
             typedef std::shared_ptr<SessionManager> ptr;
@@ -60,6 +61,20 @@ namespace sylar
             /// 清理所有已过期 Session，并返回清理数量
             size_t sweepExpired();
 
+            /**
+             * @brief 启动周期性过期清理定时器
+             * @param manager 定时器管理器（通常传 IOManager）
+             * @param sweep_interval_ms 清理周期，默认 60 秒
+             * @return 是否成功启动；manager 为空或已启动时返回 false
+             */
+            bool startSweepTimer(sylar::TimerManager *manager, uint64_t sweep_interval_ms = 60 * 1000);
+
+            /// 停止周期性过期清理定时器
+            bool stopSweepTimer();
+
+            /// 当前是否已启动周期性过期清理定时器
+            bool hasSweepTimer() const;
+
         private:
             /// 生成唯一 SID，当前阶段采用时间戳 + 自增序号
             std::string generateSessionId();
@@ -73,6 +88,10 @@ namespace sylar
             uint64_t m_nextId;
             /// 内存会话表：SID -> Session 对象
             std::map<std::string, Session::ptr> m_sessions;
+            /// 周期性过期清理定时器句柄
+            sylar::Timer::ptr m_sweepTimer;
+            /// 周期性清理间隔（毫秒）
+            uint64_t m_sweepIntervalMs;
         };
 
     } // namespace http
