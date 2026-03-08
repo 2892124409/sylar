@@ -62,9 +62,13 @@ private:
     std::string generateSessionId();
 
 private:
+    /// 并发保护锁：保护会话表和自增 ID 的线程安全
     Mutex m_mutex;
+    /// 会话最大非活跃时长（毫秒），新建 Session 会继承该配置
     uint64_t m_maxInactiveMs;
+    /// 会话 ID 自增序号（与时间戳组合生成 SID）
     uint64_t m_nextId;
+    /// 内存会话表：SID -> Session 对象
     std::map<std::string, Session::ptr> m_sessions;
 };
 

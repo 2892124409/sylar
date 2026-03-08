@@ -60,10 +60,15 @@ public:
     bool isExpired(uint64_t now_ms) const;
 
 private:
+    /// Session 唯一标识（SID），用于客户端与服务端会话映射
     std::string m_id;
+    /// Session 创建时间（毫秒时间戳）
     uint64_t m_createTimeMs;
+    /// 最近一次访问时间（毫秒时间戳），用于非活跃超时判断
     uint64_t m_lastAccessTimeMs;
+    /// 最大非活跃时长（毫秒），超过则视为过期
     uint64_t m_maxInactiveMs;
+    /// 会话键值数据（当前阶段为 string -> string）
     std::map<std::string, std::string> m_data;
 };
 
