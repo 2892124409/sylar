@@ -320,6 +320,302 @@ HttpParser 负责“把字节流切成请求对象”，是 HTTP 协议层的边
 
 ---
 
+### 0.4 `http_session.h / http_session.cc`
+#### 类/文件作用
+`HttpSession` 的作用是把“TCP 字节流连接”提升为“HTTP 会话连接”。
+
+它位于：
+
+- 下层：`SocketStream`（只管字节读写）
+- 上层：`HttpServer/Servlet`（关心请求和响应语义）
+
+之间，起桥接作用。
+
+#### 具体设计了什么
+当前版本核心能力是两个方法：
+
+- `recvRequest()`：从连接中读取并解析出一条 `HttpRequest`
+- `sendResponse()`：把 `HttpResponse` 序列化后发回客户端
+
+核心成员：
+
+- `HttpRequestParser m_parser`
+- `std::string m_buffer`
+
+其中 `m_buffer` 是连接级缓冲区，负责跨多次 `read()` 累积数据。
+
+#### 为什么这么设计
+`HttpRequestParser` 本身只会“解析给定缓冲区”，不会自己读 socket。
+
+所以必须有一个会话层来负责：
+
+1. 持续从 socket 读数据；
+2. 追加到连接缓冲区；
+3. 调 parser 尝试解析；
+4. 成功后根据 consumed 删除已消费字节；
+5. 保留剩余字节给下一条请求。
+
+这就是 `HttpSession` 存在的根本原因。
+
+#### 当前阶段需要注意的点
+1. `HttpSession` 才是“半包/粘包闭环处理”的连接级入口
+2. `HttpParser` 负责协议规则，`HttpSession` 负责读循环和缓冲生命周期
+3. keep-alive 场景下，同一连接会连续调用多次 `recvRequest()`
+
+#### 学习这个类时最该抓住的点
+
+```text
+HttpSession = 连接级缓冲管理 + Parser 调度 + Response 发送。
+```
+
+它是 HTTP 协议层和网络层的关键桥梁。
+
+#### 学习问答记录
+
+**Q1：什么是"连接级缓冲区"（m_buffer）？**
+
+**A：**
+
+"连接级缓冲区"是指生命周期与 TCP 连接绑定的缓冲区。
+
+**为什么需要它？**
+
+因为 TCP 是字节流协议，每次 `read()` 可能读到：
+- 半个 HTTP 请求（半包）
+- 一个完整请求
+- 一个完整请求 + 下一个请求的一部分（粘包）
+- 多个完整请求（粘包）
+
+例如：
+```
+第一次 read(): "GET /api HTTP/1.1\r\nHost: loc"  ← 只读到一半
+第二次 read(): "alhost\r\n\r\n"                  ← 补全了请求头
+```
+
+或者：
+```
+第一次 read(): "GET /a HTTP/1.1\r\n\r\nGET /b HTTP/1.1\r\n\r\n"  ← 两个完整请求粘在一起
+```
+
+**什么是"连接级"？**
+
+"连接级"的意思是：这个缓冲区的生命周期跟 TCP 连接绑定。
+
+- 一个 `HttpSession` 对应一个 TCP 连接
+- 这个连接可能会收到多个 HTTP 请求（keep-alive）
+- `m_buffer` 会一直存在，跨越多次 `recvRequest()` 调用
+
+**工作流程：**
+
+```
+1. 第一次调用 recvRequest():
+   - read() 读到 "GET /a HTTP..."，追加到 m_buffer
+   - parser 解析出第一个请求
+   - 从 m_buffer 删除已消费的字节
+   - 剩余字节留在 m_buffer 里
+
+2. 第二次调用 recvRequest():
+   - m_buffer 里可能还有上次剩下的数据
+   - 继续 read() 追加新数据
+   - parser 继续解析...
+```
+
+**对比：如果没有连接级缓冲区会怎样？**
+
+如果每次 `recvRequest()` 都用临时缓冲区，那么：
+- 半包时，读到的不完整数据会丢失
+- 粘包时，第二个请求的数据会丢失
+
+所以必须有一个"活得跟连接一样长"的缓冲区来保存这些跨调用的数据。
+
+---
+
+**Q2：接收一个 HTTP 请求的完整过程是怎样的？涉及哪些缓冲区？**
+
+**A：**
+
+整个过程涉及**三层缓冲区**：
+
+```
+客户端发送
+    ↓
+[1] 操作系统内核 socket 接收缓冲区（TCP 层）
+    ↓
+[2] read() 临时栈缓冲区（char buffer[4096]）
+    ↓
+[3] HttpSession 连接级缓冲区（m_buffer）
+    ↓
+解析器读取
+```
+
+**详细流程：**
+
+**步骤 0：客户端发送数据**
+```c
+send(sockfd, "GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", ...);
+```
+
+**步骤 1：数据到达操作系统内核**
+
+服务器的网络协议栈接收到 TCP 数据包后，把数据放入**内核 socket 接收缓冲区**。
+
+此时：
+```
+内核 socket 缓冲区: "GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n"
+应用程序还不知道有数据到达
+```
+
+**步骤 2：HttpSession::recvRequest() 被调用**
+
+第一次循环：
+```cpp
+// 此时 m_buffer 是空的（新连接）
+m_buffer = ""
+
+// 尝试解析
+HttpRequest::ptr request = m_parser.parse(m_buffer, consumed);
+// 返回 nullptr（因为 m_buffer 是空的）
+
+// 需要读取数据
+char buffer[4096];  // ← 临时栈缓冲区
+int rt = read(buffer, sizeof(buffer));
+```
+
+**步骤 3：read() 系统调用（SocketStream 的作用）**
+
+这里的 `read()` 实际上是 `SocketStream::read()`，因为 `HttpSession` 继承自 `SocketStream`。
+
+**完整的调用链路：**
+```
+HttpSession::recvRequest()
+    ↓ 调用 read(buffer, 4096)
+SocketStream::read(buffer, 4096)
+    ↓ 调用 m_socket->recv()
+Socket::recv()
+    ↓ 调用系统调用 ::recv(fd, buffer, 4096, 0)
+内核 socket 缓冲区
+```
+
+**SocketStream 的价值：**
+- 封装了 socket 的基础读写操作（read/write/readFixSize/writeFixSize）
+- 提供了统一的 Stream 接口（后续可扩展 SSLSocketStream）
+- 管理 socket 生命周期（通过 m_owner 控制是否负责关闭）
+- 提供便利方法（writeFixSize 保证循环写直到全部发送完毕）
+
+`read(buffer, 4096)` 做了什么：
+1. 从内核 socket 缓冲区拷贝数据到应用程序的 buffer
+2. 最多拷贝 4096 字节
+3. 返回实际读取的字节数
+
+**关键点：read() 不保证读到完整的 HTTP 请求！**
+
+可能的情况：
+
+- **情况 A：读到完整请求**
+  ```
+  read() 返回: rt = 41
+  buffer 内容: "GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n"
+  ```
+
+- **情况 B：只读到一半（半包）**
+  ```
+  read() 返回: rt = 23
+  buffer 内容: "GET /api HTTP/1.1\r\nHo"
+  ```
+
+- **情况 C：读到多个请求（粘包）**
+  ```
+  read() 返回: rt = 42
+  buffer 内容: "GET /a HTTP/1.1\r\n\r\nGET /b HTTP/1.1\r\n\r\n"
+  ```
+
+**步骤 4：追加到连接级缓冲区**
+
+```cpp
+m_buffer.append(buffer, rt);
+```
+
+**为什么需要这一步？**
+
+因为 `buffer[4096]` 是栈上的临时变量，函数返回后就销毁了。
+
+必须把数据保存到**连接级缓冲区 m_buffer**，这样：
+- 半包时，下次 read() 的数据可以接上
+- 粘包时，第一个请求处理完后，剩余数据还在
+
+**步骤 5：回到循环开头，尝试解析**
+
+```cpp
+size_t consumed = 0;
+HttpRequest::ptr request = m_parser.parse(m_buffer, consumed);
+```
+
+解析器做什么：
+1. 在 `m_buffer` 中查找 `\r\n\r\n`（请求头结束标志）
+2. 解析请求行：`GET /api HTTP/1.1`
+3. 解析请求头：`Host: localhost`
+4. 检查 `Content-Length`（如果有 body）
+5. 判断是否完整
+
+如果完整：
+```cpp
+request != nullptr
+consumed = 41  // 消费了 41 字节
+```
+
+如果不完整（半包）：
+```cpp
+request == nullptr
+consumed = 0
+m_parser.hasError() == false  // 不是错误，只是数据不够
+```
+
+此时继续循环，再次 `read()` 读取更多数据。
+
+**步骤 6：删除已消费的字节**
+
+```cpp
+if (request)
+{
+    m_buffer.erase(0, consumed);  // 删除前 41 字节
+    return request;
+}
+```
+
+**为什么要删除？**
+
+假设是粘包场景：
+```
+m_buffer = "GET /a HTTP/1.1\r\n\r\nGET /b HTTP/1.1\r\n\r\n"
+                                 ↑
+                            consumed = 20
+```
+
+删除后：
+```
+m_buffer = "GET /b HTTP/1.1\r\n\r\n"  // 第二个请求留在缓冲区
+```
+
+下次调用 `recvRequest()` 时，会直接从 `m_buffer` 解析出第二个请求，不需要再 `read()`。
+
+**三个缓冲区的作用总结：**
+
+| 缓冲区 | 位置 | 生命周期 | 作用 |
+|--------|------|----------|------|
+| **内核 socket 缓冲区** | 操作系统内核 | 连接存在期间 | TCP 层接收网络数据 |
+| **临时栈缓冲区 buffer[4096]** | 函数栈 | 单次 read() 调用 | 从内核拷贝数据到应用程序 |
+| **连接级缓冲区 m_buffer** | HttpSession 对象 | 连接存在期间 | 跨多次 read() 累积数据，支持半包/粘包 |
+
+**关键理解：**
+
+1. **read() 是不可控的**：你不知道一次能读多少字节
+2. **m_buffer 是缓冲层**：把不可控的 read() 变成可控的完整请求
+3. **循环是必须的**：因为可能需要多次 read() 才能凑齐一个完整请求
+4. **erase 是必须的**：因为粘包时要把剩余数据留给下一个请求
+5. **SocketStream 是抽象层**：让 HttpSession 专注于 HTTP 协议逻辑，不用关心底层 socket 读写细节
+
+---
+
 ### 1. 本阶段目标
 #### 模块作用
 先把 HTTP 框架的最小闭环搭起来，让项目具备：
