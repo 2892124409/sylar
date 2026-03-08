@@ -53,7 +53,9 @@ protected:
     virtual void handleClient(Socket::ptr client) override;
 
 private:
+    /// 路由分发器：负责将请求路径分发到目标 Servlet
     ServletDispatch::ptr m_dispatch;
+    /// Session 管理器：负责基于 SID 的会话创建、查找和续期
     SessionManager::ptr m_sessionManager;
 };
 
