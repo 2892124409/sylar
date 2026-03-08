@@ -830,6 +830,66 @@ HttpServer::handleClient: log "HttpServer client closed"
 
 ---
 
+### 0.7 `session.h / session.cc / session_manager.h / session_manager.cc`
+#### 类/文件作用
+这一组文件负责 HTTP 框架里的服务端会话能力（Session）。
+
+- `Session`：单个会话对象，保存 SID、时间信息和会话键值数据
+- `SessionManager`：会话仓库与生命周期管理器（创建、查找、续期、过期清理）
+
+它与 `HttpSession` 的区别是：
+
+- `HttpSession` 是**连接级**（TCP 连接生命周期）
+- `Session` 是**用户会话级**（通过 Cookie SID 跨连接保持）
+
+#### 为什么这么设计
+1. **把连接和业务会话解耦**
+   - TCP 连接会断开重连
+   - 业务会话需要跨请求、跨连接延续
+
+2. **统一 SID 管理入口**
+   - `getOrCreate()` 统一处理 Cookie SID 的读取、校验、创建和回写
+
+3. **先做内存最小闭环**
+   - 当前先用 `map<string, Session::ptr>` 跑通机制
+   - 后续可平滑替换为 Redis/数据库存储
+
+#### 当前阶段需要注意的点
+1. `Session` 数据模型当前是 `string -> string`
+2. `getOrCreate()` 可能通过 `Set-Cookie` 下发新 SID
+3. `get()` 命中过期会话时会直接删除并返回空
+4. `sweepExpired()` 是批量清理入口，适合定时任务调用
+
+#### 学习这个类时最该抓住的点
+
+```text
+SessionManager 负责“SID 到服务端状态”的映射与生命周期，是 AI 对话上下文承载层的前置基础。
+```
+
+#### 学习问答记录
+**Q：这个 Session 是干什么的？和 HttpSession 的区别是什么？**
+
+**A：**
+
+`Session` 是服务端业务会话对象，用来保存“用户状态/业务状态”。
+
+例如当前可以存：
+- `user_id`
+- `conversation_id`
+- 鉴权标记或其他业务键值
+
+它的生命周期不是跟 TCP 连接走，而是跟“会话有效期”走。
+
+`HttpSession` 则是连接级对象，职责是 HTTP 收发与解析协作。
+
+区别可概括为：
+
+- `HttpSession`：连接级，负责“这条连接如何收发请求/响应”
+- `Session`：业务会话级，负责“这个用户/会话当前状态是什么”
+
+一句话：`HttpSession` 管连接，`Session` 管状态。
+
+---
 
 ### 1. 本阶段目标
 #### 模块作用
