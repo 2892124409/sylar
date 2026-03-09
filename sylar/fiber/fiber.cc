@@ -1,6 +1,6 @@
 #include "fiber.h"
 #include "scheduler.h"
-#include "sylar/base/config.h"
+#include "sylar/fiber/fiber_framework_config.h"
 #include "sylar/base/macro.h"
 #include "sylar/base/util.h"
 #include "sylar/fiber/save_buffer_allocator.h"
@@ -27,33 +27,6 @@ namespace sylar
     static thread_local Fiber *t_fiber = nullptr;
     // 线程局部变量：当前线程的主协程（调度协程）
     static thread_local Fiber::ptr t_thread_fiber = nullptr;
-
-    // 配置项：默认协程栈大小 (128KB)
-    static ConfigVar<uint32_t>::ptr g_fiber_stack_size =
-        Config::Lookup<uint32_t>("fiber.stack_size", 128 * 1024, "fiber stack size");
-
-    // 配置项：V1 线程绑定共享栈（当前仅骨架，默认关闭）
-    static ConfigVar<bool>::ptr g_fiber_use_shared_stack =
-        Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack");
-
-    // 配置项：V1 共享栈大小（当前仅用于骨架记录）
-    static ConfigVar<uint32_t>::ptr g_fiber_shared_stack_size =
-        Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size");
-
-    struct _FiberConfigIniter
-    {
-        _FiberConfigIniter()
-        {
-            g_fiber_shared_stack_size->addListener([](const uint32_t &old_value, const uint32_t &new_value)
-                                                   {
-                SYLAR_LOG_WARN(SYLAR_LOG_ROOT())
-                    << "fiber.shared_stack_size changed from " << old_value << " to " << new_value
-                    << ", this option is startup-oriented and only reliably applies to newly created fibers";
-            });
-        }
-    };
-
-    static _FiberConfigIniter s_fiber_config_initer;
 
     /**
      * @brief 简单的栈内存分配器（后续可优化为内存池）
@@ -98,7 +71,7 @@ namespace sylar
         : m_id(++s_fiber_id), m_cb(cb), m_runInScheduler(run_in_scheduler)
     {
         ++s_fiber_count;
-        bool want_shared_stack = g_fiber_use_shared_stack->getValue() && run_in_scheduler;
+        bool want_shared_stack = FiberFrameworkConfig::GetFiberUseSharedStack() && run_in_scheduler;
         if (want_shared_stack)
         {
             Scheduler *scheduler = Scheduler::GetThis();
@@ -112,11 +85,11 @@ namespace sylar
             }
         }
         m_useSharedStack = want_shared_stack;
-        m_stacksize = stacksize ? stacksize : g_fiber_stack_size->getValue();
+        m_stacksize = stacksize ? stacksize : FiberFrameworkConfig::GetFiberStackSize();
 
         if (m_useSharedStack)
         {
-            m_stacksize = g_fiber_shared_stack_size->getValue();
+            m_stacksize = FiberFrameworkConfig::GetFiberSharedStackSize();
             SYLAR_ASSERT2(ThreadLocalSharedStack::SetStackSize(m_stacksize),
                           "shared stack size must remain globally consistent");
             SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "Fiber::Fiber shared-stack V1 enabled id=" << m_id;
@@ -243,7 +216,7 @@ namespace sylar
 
         m_ctx.uc_link = nullptr;
         m_ctx.uc_stack.ss_sp = m_sharedStack;
-        m_ctx.uc_stack.ss_size = g_fiber_shared_stack_size->getValue();
+        m_ctx.uc_stack.ss_size = FiberFrameworkConfig::GetFiberSharedStackSize();
         makecontext(&m_ctx, &Fiber::MainFunc, 0);
         m_ctxInited = true;
     }

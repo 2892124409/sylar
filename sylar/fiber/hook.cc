@@ -6,21 +6,17 @@
 #include <string.h>     // For strerror
 
 #include "sylar/fiber/fiber.h"
+#include "sylar/fiber/fiber_framework_config.h"
 #include "sylar/fiber/iomanager.h"
 #include "sylar/log/logger.h"
 #include "sylar/base/macro.h"       // For SYLAR_LIKELY, SYLAR_UNLIKELY
 #include "sylar/fiber/fd_manager.h" // For FdManager, FdCtx
-#include "sylar/base/config.h"      // For ConfigVar
 
 // 定义一个静态的logger，用于hook模块的日志输出
 static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
 namespace sylar
 {
-
-    // 定义一个配置项，用于从配置文件中获取TCP连接超时时间，默认5000ms
-    static sylar::ConfigVar<int>::ptr g_tcp_connect_timeout =
-        sylar::Config::Lookup("tcp.connect.timeout", 5000, "tcp connect timeout");
 
     // 线程局部变量，用于控制当前线程是否启用hook功能
     static thread_local bool t_hook_enable = false;
@@ -100,27 +96,16 @@ namespace sylar
 #undef XX
     }
 
-    static uint64_t s_connect_timeout = -1;
-
     /**
      * @brief Hook初始化器
      * @details 这是一个静态全局对象，其构造函数会在main函数之前被调用
-     *          用于确保hook_init()被执行，并监听tcp.connect.timeout配置项的变化
+     *          用于确保hook_init()被执行
      */
     struct _HookIniter
     {
         _HookIniter()
         {
             hook_init(); // 调用hook初始化函数
-            // 获取tcp连接超时配置的初始值
-            s_connect_timeout = g_tcp_connect_timeout->getValue();
-
-            // 为tcp.connect.timeout配置项添加监听器，当配置值改变时，更新s_connect_timeout
-            g_tcp_connect_timeout->addListener([](const int &old_value, const int &new_value)
-                                               {
-                SYLAR_LOG_INFO(g_logger) << "tcp_connect_timeout changed from "
-                                         << old_value << " to " << new_value;
-                s_connect_timeout = new_value; });
         }
     };
 
@@ -290,8 +275,7 @@ extern "C"
                               {
                                   thread = fiber->getBoundThread();
                               }
-                              iom->schedule(fiber, thread);
-                          });
+                              iom->schedule(fiber, thread); });
             sylar::Fiber::YieldToHold();
         }
         else
@@ -319,8 +303,7 @@ extern "C"
                               {
                                   thread = fiber->getBoundThread();
                               }
-                              iom->schedule(fiber, thread);
-                          });
+                              iom->schedule(fiber, thread); });
             sylar::Fiber::YieldToHold();
         }
         else
@@ -350,8 +333,7 @@ extern "C"
                               {
                                   thread = fiber->getBoundThread();
                               }
-                              iom->schedule(fiber, thread);
-                          });
+                              iom->schedule(fiber, thread); });
             sylar::Fiber::YieldToHold();
         }
         else
@@ -473,7 +455,7 @@ extern "C"
 
     int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
     {
-        return connect_with_timeout(sockfd, addr, addrlen, sylar::s_connect_timeout);
+        return connect_with_timeout(sockfd, addr, addrlen, sylar::FiberFrameworkConfig::GetTcpConnectTimeoutMs());
     }
 
     int accept(int s, struct sockaddr *addr, socklen_t *addrlen)

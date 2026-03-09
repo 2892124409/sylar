@@ -22,6 +22,7 @@ set(SYLAR_SOURCES
     sylar/concurrency/thread.cc
     sylar/memorypool/memory_pool.cpp
     sylar/fiber/fiber.cc
+    sylar/fiber/fiber_framework_config.cc
     sylar/fiber/fiber_pool.cc
     sylar/fiber/scheduler.cc
     sylar/fiber/iomanager.cc

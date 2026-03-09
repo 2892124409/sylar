@@ -1,5 +1,5 @@
 #include "sylar/fiber/iomanager.h"
-#include "sylar/base/config.h"
+#include "sylar/fiber/fiber_framework_config.h"
 #include "sylar/base/macro.h"
 #include "sylar/log/logger.h"
 
@@ -14,12 +14,9 @@ namespace sylar
 
     static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
-    static ConfigVar<bool>::ptr g_iomanager_use_caller =
-        Config::Lookup<bool>("iomanager.use_caller", true, "iomanager use caller at startup");
-
     bool GetDefaultIOManagerUseCaller()
     {
-        return g_iomanager_use_caller->getValue();
+        return FiberFrameworkConfig::GetIOManagerUseCaller();
     }
 
     /**

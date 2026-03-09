@@ -6,8 +6,8 @@
  */
 #include "sylar/fiber/scheduler.h"
 #include "sylar/fiber/fiber_pool.h"
+#include "sylar/fiber/fiber_framework_config.h"
 #include "sylar/fiber/hook.h"
-#include "sylar/base/config.h"
 #include "sylar/base/util.h"
 #include "sylar/log/logger.h"
 #include "sylar/base/macro.h"
@@ -17,9 +17,6 @@ namespace sylar
 
     static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
-    static ConfigVar<bool>::ptr g_scheduler_use_caller =
-        Config::Lookup<bool>("scheduler.use_caller", true, "scheduler use caller at startup");
-
     /// 当前线程的调度器指针（TLS）
     static thread_local Scheduler *t_scheduler = nullptr;
     /// 当前线程的调度协程（TLS），每个线程跑 run 循环的那个协程
@@ -27,7 +24,7 @@ namespace sylar
 
     bool GetDefaultSchedulerUseCaller()
     {
-        return g_scheduler_use_caller->getValue();
+        return FiberFrameworkConfig::GetSchedulerUseCaller();
     }
 
     Scheduler::Scheduler(size_t threads, bool use_caller, const std::string &name)

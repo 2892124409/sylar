@@ -5,75 +5,18 @@
  * @date 2026-03-06
  */
 #include "fiber_pool.h"
-#include "sylar/base/config.h"
+#include "sylar/fiber/fiber_framework_config.h"
 #include "sylar/base/util.h"
 #include "sylar/fiber/scheduler.h"
 #include "sylar/log/logger.h"
 
-#include <atomic>
-
 namespace sylar
 {
 
-    static Logger::ptr g_logger = SYLAR_LOG_NAME("system");
-
-    // 配置项
-    static ConfigVar<bool>::ptr g_fiber_pool_enabled =
-        Config::Lookup<bool>("fiber.pool.enabled", true, "enable fiber pool");
-
-    static ConfigVar<uint32_t>::ptr g_fiber_pool_max_size =
-        Config::Lookup<uint32_t>("fiber.pool.max_size", 1000, "max pool size per thread");
-
-    static ConfigVar<uint32_t>::ptr g_fiber_pool_min_keep =
-        Config::Lookup<uint32_t>("fiber.pool.min_keep", 10, "min keep size when shrinking");
-
-    static ConfigVar<uint32_t>::ptr g_fiber_pool_idle_timeout =
-        Config::Lookup<uint32_t>("fiber.pool.idle_timeout", 60000, "idle timeout ms");
-
-    static ConfigVar<uint32_t>::ptr g_fiber_stack_size =
-        Config::Lookup<uint32_t>("fiber.stack_size", 128 * 1024, "fiber stack size");
-
-    static ConfigVar<bool>::ptr g_fiber_use_shared_stack =
-        Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack");
-
-    static std::atomic<uint32_t> s_fiber_pool_max_size{1000};
-    static std::atomic<uint32_t> s_fiber_pool_min_keep{10};
-    static std::atomic<uint32_t> s_fiber_pool_idle_timeout{60000};
-
-    struct _FiberPoolConfigIniter
-    {
-        _FiberPoolConfigIniter()
-        {
-            s_fiber_pool_max_size = g_fiber_pool_max_size->getValue();
-            s_fiber_pool_min_keep = g_fiber_pool_min_keep->getValue();
-            s_fiber_pool_idle_timeout = g_fiber_pool_idle_timeout->getValue();
-
-            g_fiber_pool_max_size->addListener([](const uint32_t &old_value, const uint32_t &new_value)
-                                               {
-                SYLAR_LOG_INFO(g_logger) << "fiber.pool.max_size changed from "
-                                         << old_value << " to " << new_value;
-                s_fiber_pool_max_size = new_value; });
-
-            g_fiber_pool_min_keep->addListener([](const uint32_t &old_value, const uint32_t &new_value)
-                                               {
-                SYLAR_LOG_INFO(g_logger) << "fiber.pool.min_keep changed from "
-                                         << old_value << " to " << new_value;
-                s_fiber_pool_min_keep = new_value; });
-
-            g_fiber_pool_idle_timeout->addListener([](const uint32_t &old_value, const uint32_t &new_value)
-                                                   {
-                SYLAR_LOG_INFO(g_logger) << "fiber.pool.idle_timeout changed from "
-                                         << old_value << " to " << new_value;
-                s_fiber_pool_idle_timeout = new_value; });
-        }
-    };
-
-    static _FiberPoolConfigIniter s_fiber_pool_config_initer;
-
     FiberPool::FiberPool()
-        : m_maxPoolSize(s_fiber_pool_max_size.load()),
-          m_idleTimeout(s_fiber_pool_idle_timeout.load()),
-          m_minKeepSize(s_fiber_pool_min_keep.load()),
+        : m_maxPoolSize(FiberFrameworkConfig::GetFiberPoolMaxSize()),
+          m_idleTimeout(FiberFrameworkConfig::GetFiberPoolIdleTimeoutMs()),
+          m_minKeepSize(FiberFrameworkConfig::GetFiberPoolMinKeep()),
           m_totalAlloc(0),
           m_poolHit(0),
           m_poolMiss(0),
@@ -98,10 +41,10 @@ namespace sylar
     size_t FiberPool::normalizeStackSize(size_t size)
     {
         static const size_t sizes[] = {
-            128 * 1024,  // 128KB
-            256 * 1024,  // 256KB
-            512 * 1024,  // 512KB
-            1024 * 1024  // 1MB
+            128 * 1024, // 128KB
+            256 * 1024, // 256KB
+            512 * 1024, // 512KB
+            1024 * 1024 // 1MB
         };
 
         for (size_t s : sizes)
@@ -116,7 +59,7 @@ namespace sylar
 
     bool FiberPool::shouldUseSharedStack() const
     {
-        if (!g_fiber_use_shared_stack->getValue())
+        if (!FiberFrameworkConfig::GetFiberUseSharedStack())
         {
             return false;
         }
@@ -141,7 +84,7 @@ namespace sylar
         bool use_shared_stack = shouldUseSharedStack();
 
         // 检查是否启用协程池
-        if (!g_fiber_pool_enabled->getValue())
+        if (!FiberFrameworkConfig::GetFiberPoolEnabled())
         {
             ++m_totalAlloc;
             ++m_poolMiss;
@@ -169,7 +112,7 @@ namespace sylar
         else
         {
             // 独立栈路径
-            size_t actual_size = stacksize ? stacksize : g_fiber_stack_size->getValue();
+            size_t actual_size = stacksize ? stacksize : FiberFrameworkConfig::GetFiberStackSize();
 
             // 超大栈不池化
             if (actual_size > 1024 * 1024)
@@ -202,7 +145,7 @@ namespace sylar
             return Fiber::ptr(new Fiber(cb, stacksize, true));
         }
 
-        size_t actual_size = stacksize ? stacksize : g_fiber_stack_size->getValue();
+        size_t actual_size = stacksize ? stacksize : FiberFrameworkConfig::GetFiberStackSize();
         size_t pooled_size = actual_size > 1024 * 1024 ? actual_size : normalizeStackSize(actual_size);
         return Fiber::ptr(new Fiber(cb, pooled_size, true));
     }
@@ -213,7 +156,7 @@ namespace sylar
             return;
 
         // 检查是否启用协程池
-        if (!g_fiber_pool_enabled->getValue())
+        if (!FiberFrameworkConfig::GetFiberPoolEnabled())
         {
             return;
         }
@@ -226,7 +169,7 @@ namespace sylar
         }
 
         // 检查池容量
-        size_t max_pool_size = s_fiber_pool_max_size.load();
+        size_t max_pool_size = FiberFrameworkConfig::GetFiberPoolMaxSize();
         size_t total_pooled = getTotalPooledCount();
         if (total_pooled >= max_pool_size)
         {
@@ -261,8 +204,8 @@ namespace sylar
     void FiberPool::shrink()
     {
         uint64_t now = GetCurrentMS();
-        uint64_t idle_timeout = s_fiber_pool_idle_timeout.load();
-        size_t min_keep_size = s_fiber_pool_min_keep.load();
+        uint64_t idle_timeout = FiberFrameworkConfig::GetFiberPoolIdleTimeoutMs();
+        size_t min_keep_size = FiberFrameworkConfig::GetFiberPoolMinKeep();
 
         // 清理独立栈池
         for (auto &pair : m_independentPools)
@@ -342,19 +285,19 @@ namespace sylar
     void FiberPool::setMaxPoolSize(size_t size)
     {
         m_maxPoolSize = size;
-        s_fiber_pool_max_size = static_cast<uint32_t>(size);
+        FiberFrameworkConfig::SetFiberPoolMaxSize(static_cast<uint32_t>(size));
     }
 
     void FiberPool::setIdleTimeout(uint64_t ms)
     {
         m_idleTimeout = ms;
-        s_fiber_pool_idle_timeout = static_cast<uint32_t>(ms);
+        FiberFrameworkConfig::SetFiberPoolIdleTimeoutMs(static_cast<uint32_t>(ms));
     }
 
     void FiberPool::setMinKeepSize(size_t size)
     {
         m_minKeepSize = size;
-        s_fiber_pool_min_keep = static_cast<uint32_t>(size);
+        FiberFrameworkConfig::SetFiberPoolMinKeep(static_cast<uint32_t>(size));
     }
 
 } // namespace sylar
