@@ -104,6 +104,8 @@ namespace sylar
         {
         public:
             typedef std::shared_ptr<ServletDispatch> ptr;
+            typedef std::function<bool(HttpRequest::ptr, HttpResponse::ptr, HttpSession::ptr)> PreInterceptor;
+            typedef std::function<void(HttpRequest::ptr, HttpResponse::ptr, HttpSession::ptr)> PostInterceptor;
 
             /// 构造默认分发器，并自动带上默认 404 Servlet
             ServletDispatch();
@@ -120,11 +122,26 @@ namespace sylar
             /// 注册通配匹配回调版 Servlet
             void addGlobServlet(const std::string &pattern, FunctionServlet::Callback cb);
 
+            /// 注册参数路由 Servlet，例如 /user/:id
+            void addParamServlet(const std::string &pattern, Servlet::ptr servlet);
+
+            /// 注册参数路由回调版 Servlet
+            void addParamServlet(const std::string &pattern, FunctionServlet::Callback cb);
+
+            /// 注册前置拦截器，返回 false 表示中断后续业务处理
+            void addPreInterceptor(PreInterceptor cb);
+
+            /// 注册后置拦截器，在业务处理后、响应发送前执行
+            void addPostInterceptor(PostInterceptor cb);
+
             /// 设置默认 Servlet，一般用来统一处理 404 或兜底错误
             void setDefault(Servlet::ptr servlet);
 
             /// 根据 URI 找到最终匹配的 Servlet
             Servlet::ptr getMatched(const std::string &uri) const;
+
+            /// 根据请求匹配最终 Servlet，并在命中参数路由时写入 route params
+            Servlet::ptr getMatched(HttpRequest::ptr request) const;
 
             /// 分发请求到匹配的 Servlet
             virtual int32_t handle(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session) override;
@@ -142,13 +159,29 @@ namespace sylar
                 Servlet::ptr servlet;
             };
 
+            struct ParamItem
+            {
+                /// 原始参数路由模式，例如 /user/:id
+                std::string pattern;
+                /// 预切分后的路由段，减少匹配时重复 split
+                std::vector<std::string> segments;
+                /// 与该参数路由绑定的处理器
+                Servlet::ptr servlet;
+            };
+
         private:
             /// 精确匹配路由表：uri -> servlet
             std::vector<std::pair<std::string, Servlet::ptr>> m_exact;
             /// 通配匹配路由表：pattern -> servlet
             std::vector<GlobItem> m_globs;
+            /// 参数路由表：pattern segments -> servlet
+            std::vector<ParamItem> m_params;
             /// 兜底 Servlet（未命中任何路由时使用）
             Servlet::ptr m_default;
+            /// 前置拦截器链
+            std::vector<PreInterceptor> m_preInterceptors;
+            /// 后置拦截器链
+            std::vector<PostInterceptor> m_postInterceptors;
         };
 
     } // namespace http

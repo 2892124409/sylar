@@ -79,6 +79,8 @@ namespace sylar
             const MapType &getHeaders() const { return m_headers; }
             /// 由 query string 解析出的参数集合
             const MapType &getParams() const { return m_params; }
+            /// 由路由匹配解析出的参数集合，例如 /user/:id -> id=42
+            const MapType &getRouteParams() const { return m_routeParams; }
             /// 由 Cookie 头解析出的 cookie 集合
             const MapType &getCookies() const { return m_cookies; }
 
@@ -108,6 +110,18 @@ namespace sylar
 
             /// 获取 cookie
             std::string getCookie(const std::string &key, const std::string &def = "") const;
+
+            /// 保存路由参数
+            void setRouteParam(const std::string &key, const std::string &value);
+
+            /// 获取路由参数
+            std::string getRouteParam(const std::string &key, const std::string &def = "") const;
+
+            /// 判断路由参数是否存在
+            bool hasRouteParam(const std::string &key) const;
+
+            /// 清空当前请求上的所有路由参数（每次路由匹配前重置）
+            void clearRouteParams();
 
             /**
              * @brief 返回 HTTP 版本字符串，例如 HTTP/1.1
@@ -151,6 +165,9 @@ private:
 
     /// 从 query string 解析出的参数键值对
     MapType m_params;
+
+    /// 从参数路由解析出的键值对，例如 :id -> 42
+    MapType m_routeParams;
 
     /// 从 Cookie 请求头解析出的 cookie 键值对
     MapType m_cookies;

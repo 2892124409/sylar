@@ -1,5 +1,8 @@
 #include "sylar/http/http_server.h"
 
+#include "sylar/http/http_error.h"
+#include "sylar/http/http_framework_config.h"
+#include "sylar/http/http_parser.h"
 #include "sylar/log/logger.h"
 
 namespace sylar
@@ -12,7 +15,19 @@ namespace sylar
         HttpServer::HttpServer(IOManager *io_worker, IOManager *accept_worker)
             : sylar::net::TcpServer(io_worker, accept_worker), m_dispatch(new ServletDispatch()), m_sessionManager(new SessionManager())
         {
+            HttpRequestParser::SetMaxHeaderSize(HttpFrameworkConfig::GetMaxHeaderSize());
+            HttpRequestParser::SetMaxBodySize(HttpFrameworkConfig::GetMaxBodySize());
+            if (io_worker)
+            {
+                m_sessionManager->startSweepTimer(static_cast<TimerManager *>(io_worker), HttpFrameworkConfig::GetSessionSweepIntervalMs());
+            }
             setName("sylar-http-server");
+        }
+
+        void HttpServer::stop()
+        {
+            m_sessionManager->stopSweepTimer();
+            sylar::net::TcpServer::stop();
         }
 
         void HttpServer::handleClient(Socket::ptr client)
@@ -32,19 +47,16 @@ namespace sylar
                     if (session->hasParserError())
                     {
                         HttpResponse::ptr response(new HttpResponse());
-                        // 非法请求默认 400；若属于请求过大，则返回 413。
-                        response->setStatus(HttpStatus::BAD_REQUEST);
                         if (session->isRequestTooLarge())
                         {
                             response->setStatus(static_cast<HttpStatus>(413));
                             response->setReason("Payload Too Large");
+                            ApplyErrorResponse(response, static_cast<HttpStatus>(413), "Payload Too Large", session->getParserError());
                         }
-                        // 出错后不再保持连接
-                        response->setKeepAlive(false);
-                        response->setHeader("Content-Type", "text/plain; charset=utf-8");
-                        response->setBody(std::string(session->isRequestTooLarge() ? "413 Payload Too Large\n" : "400 Bad Request\n")
-                                          + session->getParserError());
-                        // 尝试把 400 发回客户端
+                        else
+                        {
+                            ApplyErrorResponse(response, HttpStatus::BAD_REQUEST, "Bad Request", session->getParserError());
+                        }
                         session->sendResponse(response);
                     }
                     // 读取失败、对端关闭或解析失败都结束当前连接处理。
@@ -63,8 +75,18 @@ namespace sylar
                 // 当前函数暂未直接使用该变量，保留会话创建/续期副作用。
                 (void)http_session;
 
-                // 路由分发：按 path 找到目标 Servlet，并执行业务 handle。
-                m_dispatch->handle(request, response, session);
+                try
+                {
+                    m_dispatch->handle(request, response, session);
+                }
+                catch (const std::exception &ex)
+                {
+                    ApplyErrorResponse(response, HttpStatus::INTERNAL_SERVER_ERROR, "Internal Server Error", ex.what());
+                }
+                catch (...)
+                {
+                    ApplyErrorResponse(response, HttpStatus::INTERNAL_SERVER_ERROR, "Internal Server Error", "unknown exception");
+                }
 
                 // 流式响应（如 SSE）由 Servlet 自己写 header/body。
                 // 这里跳过默认 sendResponse，但仍遵循 keep-alive 决策。

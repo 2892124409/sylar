@@ -48,6 +48,27 @@ namespace sylar
             return it == m_cookies.end() ? def : it->second;
         }
 
+        void HttpRequest::setRouteParam(const std::string &key, const std::string &value)
+        {
+            m_routeParams[key] = value;
+        }
+
+        std::string HttpRequest::getRouteParam(const std::string &key, const std::string &def) const
+        {
+            MapType::const_iterator it = m_routeParams.find(key);
+            return it == m_routeParams.end() ? def : it->second;
+        }
+
+        bool HttpRequest::hasRouteParam(const std::string &key) const
+        {
+            return m_routeParams.find(key) != m_routeParams.end();
+        }
+
+        void HttpRequest::clearRouteParams()
+        {
+            m_routeParams.clear();
+        }
+
         std::string HttpRequest::getVersionString() const
         {
             return "HTTP/" + std::to_string(m_versionMajor) + "." + std::to_string(m_versionMinor);

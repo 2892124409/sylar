@@ -1,5 +1,7 @@
 #include "sylar/http/http_parser.h"
 
+#include "sylar/http/http_framework_config.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -11,9 +13,6 @@ namespace sylar
     {
         namespace
         {
-            static size_t s_http_request_max_header_size = 8 * 1024;
-            static size_t s_http_request_max_body_size = 10 * 1024 * 1024;
-
             /**
              * @brief 去掉字符串首尾空白字符
              * @details
@@ -131,22 +130,22 @@ namespace sylar
 
         void HttpRequestParser::SetMaxHeaderSize(size_t value)
         {
-            s_http_request_max_header_size = value;
+            HttpFrameworkConfig::SetMaxHeaderSize(value);
         }
 
         size_t HttpRequestParser::GetMaxHeaderSize()
         {
-            return s_http_request_max_header_size;
+            return HttpFrameworkConfig::GetMaxHeaderSize();
         }
 
         void HttpRequestParser::SetMaxBodySize(size_t value)
         {
-            s_http_request_max_body_size = value;
+            HttpFrameworkConfig::SetMaxBodySize(value);
         }
 
         size_t HttpRequestParser::GetMaxBodySize()
         {
-            return s_http_request_max_body_size;
+            return HttpFrameworkConfig::GetMaxBodySize();
         }
 
         void HttpRequestParser::reset()
@@ -172,7 +171,7 @@ namespace sylar
             size_t header_end = buffer.find("\r\n\r\n");
             if (header_end == std::string::npos)
             {
-                if (buffer.size() > s_http_request_max_header_size)
+                if (buffer.size() > HttpFrameworkConfig::GetMaxHeaderSize())
                 {
                     m_error = true;
                     m_errorCode = ERROR_REQUEST_TOO_LARGE;
@@ -183,7 +182,7 @@ namespace sylar
                 return HttpRequest::ptr();
             }
 
-            if (header_end + 4 > s_http_request_max_header_size)
+            if (header_end + 4 > HttpFrameworkConfig::GetMaxHeaderSize())
             {
                 m_error = true;
                 m_errorCode = ERROR_REQUEST_TOO_LARGE;
@@ -334,7 +333,7 @@ namespace sylar
                     return HttpRequest::ptr();
                 }
                 content_length = static_cast<size_t>(value);
-                if (content_length > s_http_request_max_body_size)
+                if (content_length > HttpFrameworkConfig::GetMaxBodySize())
                 {
                     m_error = true;
                     m_errorCode = ERROR_REQUEST_TOO_LARGE;

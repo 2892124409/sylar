@@ -42,6 +42,9 @@ namespace sylar
             /// 返回 Session 管理器，便于后续业务或框架扩展使用
             SessionManager::ptr getSessionManager() const { return m_sessionManager; }
 
+            /// 停止 HTTP 服务并关闭 SessionManager 的后台清理定时器
+            virtual void stop() override;
+
         protected:
             /**
              * @brief 处理一个客户端连接

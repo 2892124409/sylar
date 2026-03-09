@@ -1624,3 +1624,145 @@ AI 对话场景中使用 SSE 的经典做法：
 到这里，通用 HTTP 框架的第二阶段主目标已经完成。
 
 ---
+
+## 第三阶段
+
+### 1. 本阶段目标
+#### 模块作用
+第三阶段的目标，是把当前项目从“可用的 HTTP 框架”继续推进到“更像框架”的状态。
+
+这一阶段不进入 AI 业务层，而是继续补通用 HTTP 基础设施：
+
+- 参数路由
+- 请求处理拦截器（Interceptor）
+- 统一错误响应模型
+- 关键参数配置化
+- 测试体系升级
+
+---
+
+### 2. 本阶段完成项
+#### 设计要点
+
+**1. 参数路由**
+- `ServletDispatch` 新增参数路由注册：`addParamServlet()`
+- 路由匹配顺序升级为：**精确 -> 参数 -> 通配 -> 默认**
+- `HttpRequest` 新增 `route params` 容器与访问接口：
+  - `setRouteParam()`
+  - `getRouteParam()`
+  - `hasRouteParam()`
+  - `clearRouteParams()`
+
+当前取舍：
+- 先只支持整段参数（如 `/user/:id`）
+- 不做正则匹配和多段捕获
+
+**2. 请求处理拦截器（Interceptor）**
+- 为避免和底层网络层 `hook` 命名冲突，本阶段统一使用 `Interceptor` 命名
+- `ServletDispatch` 新增：
+  - `addPreInterceptor()`
+  - `addPostInterceptor()`
+- pre interceptor 返回 `false` 时可中断后续业务处理
+- post interceptor 在业务处理后、响应发送前执行
+
+当前取舍：
+- 先做轻量拦截器，不直接上完整中间件链
+- 先解决通用日志 / 统一 header / 简单拦截场景
+
+**3. 统一错误响应模型**
+- 新增 `ApplyErrorResponse()` 统一构造错误响应
+- 支持：
+  - `400 Bad Request`
+  - `404 Not Found`
+  - `413 Payload Too Large`
+  - `500 Internal Server Error`
+- 默认错误格式升级为 JSON：
+
+```json
+{"code":400,"message":"Bad Request","details":"..."}
+```
+
+当前取舍：
+- 优先统一框架错误出口
+- 先做最小 JSON 错误体，不扩展业务码体系
+
+**4. 配置化**
+- 新增 `HttpFrameworkConfig` 统一管理：
+  - 请求头大小限制
+  - 请求体大小限制
+  - Session 清理周期
+  - SSE 心跳建议值
+  - 错误响应格式
+- `HttpRequestParser` 的大小限制配置改为通过框架配置获取
+- `HttpServer` 启动时自动按配置接入 Session 清理定时器
+
+当前取舍：
+- 先做代码级静态配置入口
+- 暂不接外部配置文件系统
+
+**5. HttpServer 行为升级**
+- `HttpServer::handleClient()` 使用统一错误响应输出 400/413/500
+- 增加异常捕获，避免业务处理异常直接炸掉服务线程
+- `HttpServer::stop()` 接管 `SessionManager` 定时器关闭，避免后台清理任务阻止服务退出
+
+---
+
+### 3. 测试与验证
+#### 当前验证结果
+第三阶段新增/增强测试：
+
+- `test_http_dispatch`
+  - 参数路由命中
+  - 精确路由优先级
+  - pre/post interceptor 执行
+- `test_http_framework_config`
+  - 配置项读写
+  - JSON / text 错误响应格式切换
+- `test_http_server`
+  - 参数路由集成验证
+  - 拦截器集成验证
+  - 404 / 413 JSON 错误响应验证
+
+回归通过：
+
+- `./bin/test_http_dispatch`
+- `./bin/test_http_framework_config`
+- `./bin/test_http_parser`
+- `./bin/test_http_server`
+- `./bin/test_session_manager`
+- `./bin/test_sse_writer`
+- `./bin/test_sse_server`
+
+---
+
+### 4. 当前实现与后续优化
+#### 设计取舍
+
+**当前实现：**
+- 参数路由是最小版本
+- Interceptor 是轻量前后置处理机制
+- 错误响应已统一但仍较简洁
+- 配置入口已集中，但仍是代码级静态配置
+
+**后续可优化：**
+- 参数路由支持正则 / 多段捕获 / 路由分组
+- Interceptor 演进为完整中间件链
+- 错误响应增加业务码、trace id、可观测字段
+- 配置系统接入外部配置文件或热更新机制
+
+---
+
+### 5. 阶段总结
+#### 一句话总结
+第三阶段让这个项目从“能跑通 HTTP 请求”进一步升级成了“更适合承载真实业务”的通用 HTTP 框架：
+
+- 路由表达能力更强
+- 请求处理可统一拦截
+- 错误输出更一致
+- 关键行为可配置
+- 测试体系更完整
+
+#### 当前结论
+到这里，通用 HTTP 框架的第三阶段主目标已经完成。
+
+---
