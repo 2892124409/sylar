@@ -91,40 +91,41 @@ namespace sylar
              * @brief 序列化成完整 HTTP 响应报文
              * @details
              * 包含：状态行 + headers + 空行 + body。
+             * 给普通 HTTP 响应用（完整报文）
              */
             std::string toString() const;
 
-            /// 仅序列化响应头（不包含 Content-Length 和 body），常用于流式响应
+            /// 仅序列化响应头（不包含 Content-Length 和 body，后续body由业务持续写），常用于流式响应
             std::string toHeaderString() const;
 
-private:
-    /// HTTP 响应状态码（200/404/500...）
-    HttpStatus m_status;
+        private:
+            /// HTTP 响应状态码（200/404/500...）
+            HttpStatus m_status;
 
-    /// HTTP 主版本号，例如 HTTP/1.1 中的 1
-    uint8_t m_versionMajor;
+            /// HTTP 主版本号，例如 HTTP/1.1 中的 1
+            uint8_t m_versionMajor;
 
-    /// HTTP 次版本号，例如 HTTP/1.1 中的 1
-    uint8_t m_versionMinor;
+            /// HTTP 次版本号，例如 HTTP/1.1 中的 1
+            uint8_t m_versionMinor;
 
-    /// 是否保持连接（影响 Connection: keep-alive/close）
-    bool m_keepalive;
+            /// 是否保持连接（影响 Connection: keep-alive/close）
+            bool m_keepalive;
 
-    /// 是否为流式响应；为 true 时通常由业务代码自行写 header/body
-    bool m_stream;
+            /// 是否为流式响应；为 true 时通常由业务代码自行写 header/body
+            bool m_stream;
 
-    /// 响应体正文内容
-    std::string m_body;
+            /// 响应体正文内容
+            std::string m_body;
 
-    /// 自定义 reason phrase；为空时使用状态码默认文本
-    std::string m_reason;
+            /// 自定义 reason phrase；为空时使用状态码默认文本
+            std::string m_reason;
 
-    /// 普通响应头键值对（不包含 Set-Cookie）
-    MapType m_headers;
+            /// 普通响应头键值对（不包含 Set-Cookie）
+            MapType m_headers;
 
-    /// Set-Cookie 头列表（一个响应可能包含多个 Set-Cookie）
-    std::vector<std::string> m_setCookies;
-};
+            /// Set-Cookie 头列表（一个响应可能包含多个 Set-Cookie）
+            std::vector<std::string> m_setCookies;
+        };
 
     } // namespace http
 } // namespace sylar

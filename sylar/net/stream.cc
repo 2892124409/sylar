@@ -47,7 +47,6 @@ namespace sylar
         int64_t left = length;
         while (left > 0)
         {
-            // 这里使用的是还未实现的纯虚函数，会在子类中实现
             int64_t len = write((const char *)buffer + offset, left);
             if (len <= 0)
             {

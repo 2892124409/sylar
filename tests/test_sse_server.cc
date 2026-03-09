@@ -12,13 +12,15 @@
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
-int main() {
+int main()
+{
     sylar::set_hook_enable(true);
     sylar::IOManager iom(2, true, "sse_test");
     sylar::http::HttpServer::ptr server(new sylar::http::HttpServer(&iom, &iom));
     server->getServletDispatch()->addServlet("/events", [](sylar::http::HttpRequest::ptr,
                                                            sylar::http::HttpResponse::ptr rsp,
-                                                           sylar::http::HttpSession::ptr session) {
+                                                           sylar::http::HttpSession::ptr session)
+                                             {
         rsp->setStatus(sylar::http::HttpStatus::OK);
         rsp->setKeepAlive(false);
         rsp->setStream(true);
@@ -37,8 +39,7 @@ int main() {
         if (writer.sendEvent("hello\nworld", "message", "evt-1", 1000) <= 0) {
             return -1;
         }
-        return 0;
-    });
+        return 0; });
 
     std::vector<sylar::Address::ptr> addrs;
     std::vector<sylar::Address::ptr> fails;
@@ -46,7 +47,8 @@ int main() {
     assert(server->bind(addrs, fails));
     assert(server->start());
 
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sleep(1);
         sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
         assert(sock->connect(sylar::Address::LookupAny("127.0.0.1:28081")));
@@ -71,13 +73,12 @@ int main() {
         assert(rsp.find("retry: 1000\n") != std::string::npos);
         assert(rsp.find("data: hello\n") != std::string::npos);
         assert(rsp.find("data: world\n\n") != std::string::npos);
-        stream.close();
-    });
+        stream.close(); });
 
-    iom.schedule([server]() {
+    iom.schedule([server]()
+                 {
         sleep(2);
-        server->stop();
-    });
+        server->stop(); });
 
     SYLAR_LOG_INFO(g_logger) << "test_sse_server passed";
     return 0;
