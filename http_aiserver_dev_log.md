@@ -1700,6 +1700,70 @@ AI 对话场景中使用 SSE 的经典做法：
 - 先做代码级静态配置入口
 - 暂不接外部配置文件系统
 
+#### 学习问答记录（配置系统）
+
+**Q1：为什么设置了回调不等于“完整热加载”？**
+
+**A：**
+
+回调只是热加载链路的最后一环。完整流程应包含：
+
+1. 文件监控：监控配置文件变化（如 `inotify` / `stat`）
+2. 触发重载：检测到变化后重新读取配置文件
+3. 解析更新：`Config::LoadFromYaml` 更新 `ConfigVar`
+4. 变更通知：`setValue()` 触发监听器回调
+5. 业务响应：回调执行实际更新逻辑
+
+当前项目状态：
+
+- 已实现 3/4/5（配置更新、监听通知、业务响应）
+- 尚未实现 1/2（文件监控与自动触发重载）
+
+结论：当前具备“配置值变化后的热响应能力”，但不是完整的“文件级自动热加载系统”。
+
+**Q2：通过 `ConfigVar` 实现配置项有哪些形式？**
+
+**A：**
+
+1. 启动参数型（构造时读取一次）
+   - 示例：`scheduler.use_caller`、`iomanager.use_caller`
+   - 特征：更适合启动时确定，运行中通常不变
+
+2. 运行时动态读取型（每次使用前读取）
+   - 示例：`fiber.pool.enabled`
+   - 特征：配置变化后，后续调用立即体现
+
+3. 新对象生效型（对后续创建对象生效）
+   - 示例：`fiber.stack_size`、`fiber.use_shared_stack`、`fiber.shared_stack_size`
+   - 特征：已创建对象不受影响，新创建对象使用新值
+
+4. 监听器驱动缓存同步型（推荐热更新模式）
+   - 示例：`tcp.connect.timeout`
+   - 特征：配置变化通过 `addListener()` 立即同步到运行时缓存
+
+**Q3：`tcp.connect.timeout` 的热重载完整流程是什么？**
+
+**A：**
+
+1. 在 `hook.cc` 注册配置项：
+   - `Config::Lookup("tcp.connect.timeout", 5000, ...)`
+
+2. `_HookIniter` 初始化时读取初值：
+   - `s_connect_timeout = g_tcp_connect_timeout->getValue()`
+
+3. 注册监听器：
+   - `g_tcp_connect_timeout->addListener(...)`
+   - 配置变化时将 `new_value` 写入 `s_connect_timeout`
+
+4. 业务路径使用缓存值：
+   - `connect` hook 最终调用 `connect_with_timeout(..., s_connect_timeout)`
+
+5. 生效结果：
+   - 配置变化后，监听器立刻更新缓存
+   - 后续新的 `connect` 立即使用新超时
+
+一句话：`tcp.connect.timeout` 能热生效，是 `ConfigVar + addListener + 运行时缓存变量` 联动的结果。
+
 **5. HttpServer 行为升级**
 - `HttpServer::handleClient()` 使用统一错误响应输出 400/413/500
 - 增加异常捕获，避免业务处理异常直接炸掉服务线程

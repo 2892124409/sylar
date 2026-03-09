@@ -79,17 +79,17 @@ namespace sylar
         /**
          * @brief 设置最大池大小
          */
-        void setMaxPoolSize(size_t size) { m_maxPoolSize = size; }
+        void setMaxPoolSize(size_t size);
 
         /**
          * @brief 设置空闲超时时间（毫秒）
          */
-        void setIdleTimeout(uint64_t ms) { m_idleTimeout = ms; }
+        void setIdleTimeout(uint64_t ms);
 
         /**
          * @brief 设置最小保留数量
          */
-        void setMinKeepSize(size_t size) { m_minKeepSize = size; }
+        void setMinKeepSize(size_t size);
 
     private:
         FiberPool();

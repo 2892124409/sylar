@@ -40,6 +40,21 @@ namespace sylar
     static ConfigVar<uint32_t>::ptr g_fiber_shared_stack_size =
         Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size");
 
+    struct _FiberConfigIniter
+    {
+        _FiberConfigIniter()
+        {
+            g_fiber_shared_stack_size->addListener([](const uint32_t &old_value, const uint32_t &new_value)
+                                                   {
+                SYLAR_LOG_WARN(SYLAR_LOG_ROOT())
+                    << "fiber.shared_stack_size changed from " << old_value << " to " << new_value
+                    << ", this option is startup-oriented and only reliably applies to newly created fibers";
+            });
+        }
+    };
+
+    static _FiberConfigIniter s_fiber_config_initer;
+
     /**
      * @brief 简单的栈内存分配器（后续可优化为内存池）
      */
