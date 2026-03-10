@@ -9,9 +9,9 @@ namespace sylar
     namespace http
     {
 
-        SessionManager::SessionManager(uint64_t max_inactive_ms)
+        SessionManager::SessionManager(uint64_t max_inactive_ms, SessionStorage::ptr storage)
             // 会话最大非活跃时长（毫秒）
-            : m_maxInactiveMs(max_inactive_ms), m_nextId(1), m_sweepIntervalMs(0)
+            : m_maxInactiveMs(max_inactive_ms), m_nextId(1), m_storage(storage), m_sweepIntervalMs(0)
         {
             // m_nextId 从 1 开始，避免出现 "...-0" 这种不直观的 SID
             // m_sweepIntervalMs 初始为 0，表示还未启动周期清理
@@ -39,35 +39,38 @@ namespace sylar
             // - create_ms: 当前时间，同时也作为首次访问时间
             // - m_maxInactiveMs: 继承管理器的非活跃超时配置
             Session::ptr session(new Session(id, GetCurrentMS(), m_maxInactiveMs));
-            // 放入内存会话表
-            m_sessions[id] = session;
+            // 通过存储后端保存新会话
+            m_storage->save(session);
             // 返回新建会话
             return session;
         }
 
         Session::ptr SessionManager::get(const std::string &id)
         {
-            // get() 需要读写 m_sessions（命中过期会删除），因此也要加锁
-            Mutex::Lock lock(m_mutex);
-            // 在会话表中查找 SID
-            std::map<std::string, Session::ptr>::iterator it = m_sessions.find(id);
-            if (it == m_sessions.end())
+            // Session ID 为空直接返回空
+            if (id.empty())
             {
-                // 不存在则返回空指针
+                return Session::ptr();
+            }
+            // 从存储后端加载 Session
+            Session::ptr session = m_storage->load(id);
+            if (!session)
+            {
                 return Session::ptr();
             }
             // 如果命中但已过期：
-            // - 立即从会话表删除
+            // - 立即从存储删除
             // - 返回空，表示该 SID 已失效
-            if (it->second->isExpired(GetCurrentMS()))
+            if (session->isExpired(GetCurrentMS()))
             {
-                m_sessions.erase(it);
+                m_storage->remove(id);
                 return Session::ptr();
             }
             // 命中且有效：刷新最后访问时间（滑动过期）
-            it->second->touch(GetCurrentMS());
+            session->touch(GetCurrentMS());
+            m_storage->save(session);
             // 返回有效会话对象
-            return it->second;
+            return session;
         }
 
         Session::ptr SessionManager::getOrCreate(HttpRequest::ptr request, HttpResponse::ptr response)
@@ -91,38 +94,14 @@ namespace sylar
 
         bool SessionManager::remove(const std::string &id)
         {
-            // 删除会话会写 m_sessions，需加锁
-            Mutex::Lock lock(m_mutex);
-            // erase 返回删除数量，>0 表示删除成功
-            return m_sessions.erase(id) > 0;
+            // 转交给存储后端删除
+            return m_storage->remove(id);
         }
 
         size_t SessionManager::sweepExpired()
         {
-            // 批量清理会改动 m_sessions，需加锁
-            Mutex::Lock lock(m_mutex);
-            // 统计本轮清理数量
-            size_t count = 0;
-            // 统一取一次当前时间，避免循环内多次系统调用
-            uint64_t now = GetCurrentMS();
-            // 遍历会话表并删除过期项
-            for (std::map<std::string, Session::ptr>::iterator it = m_sessions.begin(); it != m_sessions.end();)
-            {
-                if (it->second->isExpired(now))
-                {
-                    // erase(it) 返回下一个有效迭代器，适合边遍历边删除
-                    it = m_sessions.erase(it);
-                    // 清理计数 +1
-                    ++count;
-                }
-                else
-                {
-                    // 未过期则继续下一个
-                    ++it;
-                }
-            }
-            // 返回本轮清理总数
-            return count;
+            // 存储后端按当前时间批量清理过期会话
+            return m_storage->sweepExpired(GetCurrentMS());
         }
 
         bool SessionManager::startSweepTimer(sylar::TimerManager *manager, uint64_t sweep_interval_ms)

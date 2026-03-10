@@ -4,6 +4,7 @@
 #include "sylar/http/http_request.h"
 #include "sylar/http/http_response.h"
 #include "sylar/http/http_session.h"
+#include "sylar/http/middleware.h"
 
 #include <functional>
 #include <memory>
@@ -113,20 +114,41 @@ namespace sylar
             /// 注册精确匹配 Servlet
             void addServlet(const std::string &uri, Servlet::ptr servlet);
 
+            /// 注册带方法约束的精确匹配 Servlet
+            void addServlet(HttpMethod method, const std::string &uri, Servlet::ptr servlet);
+
             /// 注册精确匹配回调版 Servlet
             void addServlet(const std::string &uri, FunctionServlet::Callback cb);
+
+            /// 注册带方法约束的精确匹配回调版 Servlet
+            void addServlet(HttpMethod method, const std::string &uri, FunctionServlet::Callback cb);
 
             /// 注册通配匹配 Servlet，例如 /api/*
             void addGlobServlet(const std::string &pattern, Servlet::ptr servlet);
 
+            /// 注册带方法约束的通配匹配 Servlet
+            void addGlobServlet(HttpMethod method, const std::string &pattern, Servlet::ptr servlet);
+
             /// 注册通配匹配回调版 Servlet
             void addGlobServlet(const std::string &pattern, FunctionServlet::Callback cb);
+
+            /// 注册带方法约束的通配匹配回调版 Servlet
+            void addGlobServlet(HttpMethod method, const std::string &pattern, FunctionServlet::Callback cb);
 
             /// 注册参数路由 Servlet，例如 /user/:id
             void addParamServlet(const std::string &pattern, Servlet::ptr servlet);
 
+            /// 注册带方法约束的参数路由 Servlet
+            void addParamServlet(HttpMethod method, const std::string &pattern, Servlet::ptr servlet);
+
             /// 注册参数路由回调版 Servlet
             void addParamServlet(const std::string &pattern, FunctionServlet::Callback cb);
+
+            /// 注册带方法约束的参数路由回调版 Servlet
+            void addParamServlet(HttpMethod method, const std::string &pattern, FunctionServlet::Callback cb);
+
+            /// 注册中间件
+            void addMiddleware(Middleware::ptr middleware);
 
             /// 注册前置拦截器，返回 false 表示中断后续业务处理
             void addPreInterceptor(PreInterceptor cb);
@@ -153,6 +175,8 @@ namespace sylar
              */
             struct GlobItem
             {
+                /// HTTP 方法约束；INVALID_METHOD 表示不限制方法
+                HttpMethod method;
                 /// 通配路由模式（例如 /api/*）
                 std::string pattern;
                 /// 与该通配模式绑定的处理器
@@ -161,6 +185,8 @@ namespace sylar
 
             struct ParamItem
             {
+                /// HTTP 方法约束；INVALID_METHOD 表示不限制方法
+                HttpMethod method;
                 /// 原始参数路由模式，例如 /user/:id
                 std::string pattern;
                 /// 预切分后的路由段，减少匹配时重复 split
@@ -169,9 +195,19 @@ namespace sylar
                 Servlet::ptr servlet;
             };
 
+            struct ExactItem
+            {
+                /// HTTP 方法约束；INVALID_METHOD 表示不限制方法
+                HttpMethod method;
+                /// 精确匹配路径
+                std::string uri;
+                /// 与该精确路径绑定的处理器
+                Servlet::ptr servlet;
+            };
+
         private:
-            /// 精确匹配路由表：uri -> servlet
-            std::vector<std::pair<std::string, Servlet::ptr>> m_exact;
+            /// 精确匹配路由表：method + uri -> servlet
+            std::vector<ExactItem> m_exact;
             /// 通配匹配路由表：pattern -> servlet
             std::vector<GlobItem> m_globs;
             /// 参数路由表：pattern segments -> servlet
@@ -182,6 +218,8 @@ namespace sylar
             std::vector<PreInterceptor> m_preInterceptors;
             /// 后置拦截器链
             std::vector<PostInterceptor> m_postInterceptors;
+            /// 中间件链（第四阶段在拦截器之上进一步抽象）
+            MiddlewareChain m_middlewareChain;
         };
 
     } // namespace http

@@ -2042,3 +2042,166 @@ HTTP 层（`HttpFrameworkConfig`）对应关系：
 当前项目目标仍偏向“通用 HTTP 框架”，因此建议优先走路线 1。
 
 ---
+
+## 第四阶段：模块独立化与工程化升级
+
+### 0. 第四阶段改动类速览
+#### 0.1 `session_storage.h / session_storage.cc`
+- 新增 `SessionStorage` 抽象接口
+- 新增默认实现 `MemorySessionStorage`
+
+#### 0.2 `session_manager.h / session_manager.cc`
+- `SessionManager` 改为依赖 `SessionStorage`
+- 不再直接持有底层 `map<SID, Session>`
+
+#### 0.3 `middleware.h / middleware.cc`
+- 新增 `Middleware` 抽象
+- 新增 `MiddlewareChain`
+- 新增 `CallbackMiddleware` 便于快速桥接已有逻辑
+
+#### 0.4 `servlet.h / servlet.cc`
+- 路由升级为 method-aware
+- 新增 `addMiddleware()`
+- 分发流程升级为：middleware before -> interceptor pre -> servlet -> interceptor post -> middleware after
+
+#### 0.5 测试改动
+- 增强：`test_http_dispatch`
+  - method-aware 路由
+  - middleware before/after
+- 增强：`test_session_manager`
+  - `SessionStorage` 注入验证
+
+### 1. 本阶段目标
+#### 模块作用
+第四阶段的目标，是把第三阶段已经具备的能力进一步模块独立化：
+
+- Session 生命周期管理和存储后端解耦
+- 拦截器能力抽象成中间件链
+- 路由从 path-aware 升级到 method-aware
+
+这一阶段依然停留在“通用 HTTP 框架层”，不进入 AI 业务协议。
+
+---
+
+### 2. 本阶段完成项
+#### 设计要点
+
+#### 1. SessionStorage 抽象
+- 新增 `SessionStorage` 接口：
+  - `save()`
+  - `load()`
+  - `remove()`
+  - `sweepExpired()`
+- 新增默认实现 `MemorySessionStorage`
+- `SessionManager` 改为依赖存储接口，而不是直接持有 `map`
+
+当前取舍：
+- 先只做内存存储实现
+- 先把“生命周期管理”和“存储后端”解耦，为后续 Redis/DB 预留接口
+
+#### 2. MiddlewareChain 落地
+- 新增 `Middleware` 抽象：
+  - `before(request, response, session)`
+  - `after(request, response, session)`
+- 新增 `MiddlewareChain`
+- 新增 `CallbackMiddleware` 作为轻量桥接实现
+
+当前取舍：
+- 先做顺序执行模型，不引入复杂递归 `next` 调度
+- 保留第三阶段 interceptor 兼容路径，平滑演进到 middleware
+
+#### 3. method-aware 路由升级
+- `ServletDispatch` 的精确 / 参数 / 通配路由都增加了 `HttpMethod` 维度
+- 旧接口仍可用：旧接口内部注册为“不限制方法”
+- 新接口支持：
+  - `addServlet(HttpMethod, path, ...)`
+  - `addParamServlet(HttpMethod, path, ...)`
+  - `addGlobServlet(HttpMethod, path, ...)`
+
+当前取舍：
+- 先让 method-aware 与原有 path-only 路由兼容共存
+- 先不做正则路由、多段捕获、路由分组
+
+#### 4. 分发主链路升级
+- `ServletDispatch::handle(...)` 当前执行顺序为：
+
+1. `MiddlewareChain::processBefore(...)`
+2. 第三阶段已有的 pre interceptor
+3. 路由匹配 + `servlet->handle(...)`
+4. post interceptor
+5. `MiddlewareChain::processAfter(...)`
+
+当前取舍：
+- 保持第三阶段已有 interceptor 行为不变
+- 在其外围增加 middleware，使第四阶段升级平滑可控
+
+---
+
+### 3. 测试与验证
+#### 当前验证结果
+第四阶段新增/增强验证：
+
+- `test_http_dispatch`
+  - 参数路由优先级
+  - method-aware 路由区分 GET / POST
+  - middleware before/after
+  - interceptor 与 middleware 共存
+
+- `test_session_manager`
+  - `SessionStorage` 注入验证
+
+回归通过：
+
+- `./bin/test_http_dispatch`
+- `./bin/test_http_framework_config`
+- `./bin/test_http_parser`
+- `./bin/test_http_server`
+- `./bin/test_session_manager`
+- `./bin/test_sse_writer`
+- `./bin/test_sse_server`
+- `./bin/test_hook`
+- `./bin/test_fiber_pool`
+
+---
+
+### 4. 当前实现与后续优化
+#### 设计取舍
+
+**当前实现：**
+- SessionStorage 已抽象，但仅提供内存实现
+- MiddlewareChain 已落地，但仍是轻量顺序执行模型
+- method-aware 路由已完成，但仍保持最小匹配语义
+- 旧 Interceptor 机制仍保留，便于平滑迁移
+
+**后续可优化：**
+- 增加 Redis / DB SessionStorage 实现
+- 让 middleware 成为唯一统一前后置处理入口，逐步淡化 interceptor
+- method-aware 路由进一步增强到正则、多段捕获、路由分组
+- 继续引入 `HttpContext` 或 SSL 以贴近更完整框架形态
+
+---
+
+### 5. 阶段总结
+#### 一句话总结
+第四阶段的核心不是再补单点能力，而是把已有能力拆成更稳定的模块边界：
+
+- Session 有了存储抽象
+- 拦截器开始演进到中间件链
+- 路由从“只看 path”升级到“method + path”
+
+#### 当前结论
+到这里，通用 HTTP 框架已经从“教学型最小闭环”进一步走向“工程型小框架”。
+
+### 6. 下一阶段
+#### 第五阶段会怎么做
+第五阶段建议继续深挖框架层，优先级建议如下：
+
+1. `HttpContext`（请求解析状态机独立化）
+2. 正则/多段捕获/路由分组
+3. MiddlewareChain 继续演进
+4. SessionStorage 增加外部存储实现
+5. SSL/HTTPS 支持
+
+如果届时你决定转入 AI 层，那么也已经具备了足够稳定的 HTTP 基础设施。
+
+---

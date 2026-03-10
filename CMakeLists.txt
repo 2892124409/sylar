@@ -46,7 +46,9 @@ set(SYLAR_SOURCES
     sylar/http/servlet.cc
     sylar/http/http_server.cc
     sylar/http/session.cc
+    sylar/http/session_storage.cc
     sylar/http/session_manager.cc
+    sylar/http/middleware.cc
     sylar/http/sse.cc
 )
 

@@ -4,6 +4,7 @@
 #include "sylar/http/http_request.h"
 #include "sylar/http/http_response.h"
 #include "sylar/http/session.h"
+#include "sylar/http/session_storage.h"
 #include "sylar/fiber/timer.h"
 #include "sylar/concurrency/mutex/mutex.h"
 
@@ -37,7 +38,8 @@ namespace sylar
             /**
              * @param max_inactive_ms Session 最大非活跃时间，默认 30 分钟
              */
-            SessionManager(uint64_t max_inactive_ms = 30 * 60 * 1000);
+            SessionManager(uint64_t max_inactive_ms = 30 * 60 * 1000,
+                           SessionStorage::ptr storage = SessionStorage::ptr(new MemorySessionStorage()));
 
             /// 创建一个全新的 Session
             Session::ptr create();
@@ -86,8 +88,8 @@ namespace sylar
             uint64_t m_maxInactiveMs;
             /// 会话 ID 自增序号（与时间戳组合生成 SID）
             uint64_t m_nextId;
-            /// 内存会话表：SID -> Session 对象
-            std::map<std::string, Session::ptr> m_sessions;
+            /// 会话存储后端（当前默认是内存存储，可平滑替换为 Redis/DB）
+            SessionStorage::ptr m_storage;
             /// 周期性过期清理定时器句柄
             sylar::Timer::ptr m_sweepTimer;
             /// 周期性清理间隔（毫秒）

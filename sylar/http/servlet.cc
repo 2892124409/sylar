@@ -54,6 +54,12 @@ namespace sylar
                 return pattern == uri;
             }
 
+            // 判断路由项的方法约束是否与当前请求方法匹配。
+            static bool MatchMethod(HttpMethod route_method, HttpMethod request_method)
+            {
+                return route_method == HttpMethod::INVALID_METHOD || route_method == request_method;
+            }
+
             // 将路径按 '/' 拆分为段（忽略空段）。
             static std::vector<std::string> SplitPathSegments(const std::string &path)
             {
@@ -176,20 +182,30 @@ namespace sylar
         // 注册精确路由：uri -> servlet。
         void ServletDispatch::addServlet(const std::string &uri, Servlet::ptr servlet)
         {
+            addServlet(HttpMethod::INVALID_METHOD, uri, servlet);
+        }
+
+        // 注册带方法约束的精确路由：method + uri -> servlet。
+        void ServletDispatch::addServlet(HttpMethod method, const std::string &uri, Servlet::ptr servlet)
+        {
             // 先查是否已有同名 URI。
             for (size_t i = 0; i < m_exact.size(); ++i)
             {
-                // 命中同 URI 时执行覆盖更新。
-                if (m_exact[i].first == uri)
+                // 命中同 method + uri 时执行覆盖更新。
+                if (m_exact[i].method == method && m_exact[i].uri == uri)
                 {
                     // 替换目标 servlet。
-                    m_exact[i].second = servlet;
+                    m_exact[i].servlet = servlet;
                     // 更新后直接返回。
                     return;
                 }
             }
             // 未命中则追加新路由项。
-            m_exact.push_back(std::make_pair(uri, servlet));
+            ExactItem item;
+            item.method = method;
+            item.uri = uri;
+            item.servlet = servlet;
+            m_exact.push_back(item);
         }
 
         // 精确路由回调版：把回调包装成 FunctionServlet 后复用主逻辑。
@@ -199,14 +215,25 @@ namespace sylar
             addServlet(uri, Servlet::ptr(new FunctionServlet(cb)));
         }
 
+        void ServletDispatch::addServlet(HttpMethod method, const std::string &uri, FunctionServlet::Callback cb)
+        {
+            addServlet(method, uri, Servlet::ptr(new FunctionServlet(cb)));
+        }
+
         // 注册通配路由：pattern -> servlet。
         void ServletDispatch::addGlobServlet(const std::string &pattern, Servlet::ptr servlet)
+        {
+            addGlobServlet(HttpMethod::INVALID_METHOD, pattern, servlet);
+        }
+
+        // 注册带方法约束的通配路由。
+        void ServletDispatch::addGlobServlet(HttpMethod method, const std::string &pattern, Servlet::ptr servlet)
         {
             // 先查是否已有同 pattern。
             for (size_t i = 0; i < m_globs.size(); ++i)
             {
                 // 命中同 pattern 时执行覆盖更新。
-                if (m_globs[i].pattern == pattern)
+                if (m_globs[i].method == method && m_globs[i].pattern == pattern)
                 {
                     // 替换目标 servlet。
                     m_globs[i].servlet = servlet;
@@ -216,6 +243,8 @@ namespace sylar
             }
             // 构造新的通配路由项。
             GlobItem item;
+            // 设置方法约束。
+            item.method = method;
             // 设置 pattern。
             item.pattern = pattern;
             // 绑定 servlet。
@@ -231,8 +260,19 @@ namespace sylar
             addGlobServlet(pattern, Servlet::ptr(new FunctionServlet(cb)));
         }
 
+        void ServletDispatch::addGlobServlet(HttpMethod method, const std::string &pattern, FunctionServlet::Callback cb)
+        {
+            addGlobServlet(method, pattern, Servlet::ptr(new FunctionServlet(cb)));
+        }
+
         // 注册参数路由：pattern(如 /user/:id) -> servlet。
         void ServletDispatch::addParamServlet(const std::string &pattern, Servlet::ptr servlet)
+        {
+            addParamServlet(HttpMethod::INVALID_METHOD, pattern, servlet);
+        }
+
+        // 注册带方法约束的参数路由：pattern(如 /user/:id) -> servlet。
+        void ServletDispatch::addParamServlet(HttpMethod method, const std::string &pattern, Servlet::ptr servlet)
         {
             // 先把 pattern 预切分，减少匹配时重复开销。
             std::vector<std::string> segments = SplitPathSegments(pattern);
@@ -240,7 +280,7 @@ namespace sylar
             for (size_t i = 0; i < m_params.size(); ++i)
             {
                 // 命中同 pattern 时覆盖更新。
-                if (m_params[i].pattern == pattern)
+                if (m_params[i].method == method && m_params[i].pattern == pattern)
                 {
                     // 更新预切分段。
                     m_params[i].segments = segments;
@@ -252,6 +292,8 @@ namespace sylar
             }
             // 构造新参数路由项。
             ParamItem item;
+            // 设置方法约束。
+            item.method = method;
             // 设置 pattern 原文。
             item.pattern = pattern;
             // 保存预切分段。
@@ -267,6 +309,16 @@ namespace sylar
         {
             // 创建 FunctionServlet 并注册。
             addParamServlet(pattern, Servlet::ptr(new FunctionServlet(cb)));
+        }
+
+        void ServletDispatch::addParamServlet(HttpMethod method, const std::string &pattern, FunctionServlet::Callback cb)
+        {
+            addParamServlet(method, pattern, Servlet::ptr(new FunctionServlet(cb)));
+        }
+
+        void ServletDispatch::addMiddleware(Middleware::ptr middleware)
+        {
+            m_middlewareChain.addMiddleware(middleware);
         }
 
         // 注册前置拦截器。
@@ -297,9 +349,9 @@ namespace sylar
             for (size_t i = 0; i < m_exact.size(); ++i)
             {
                 // 命中精确路由直接返回。
-                if (m_exact[i].first == uri)
+                if (m_exact[i].uri == uri)
                 {
-                    return m_exact[i].second;
+                    return m_exact[i].servlet;
                 }
             }
             // 2) 参数路由匹配（这里用临时 request，只判断是否命中，不保留参数）。
@@ -329,22 +381,24 @@ namespace sylar
         {
             // 读取请求路径。
             const std::string &uri = request->getPath();
+            // 读取请求方法。
+            HttpMethod method = request->getMethod();
             // 每次匹配前清空旧参数。
             request->clearRouteParams();
             // 1) 精确匹配优先。
             for (size_t i = 0; i < m_exact.size(); ++i)
             {
                 // 命中精确路由直接返回。
-                if (m_exact[i].first == uri)
+                if (MatchMethod(m_exact[i].method, method) && m_exact[i].uri == uri)
                 {
-                    return m_exact[i].second;
+                    return m_exact[i].servlet;
                 }
             }
             // 2) 参数路由匹配。
             for (size_t i = 0; i < m_params.size(); ++i)
             {
                 // 命中后会把参数写入 request->routeParams。
-                if (MatchParamRoute(m_params[i].segments, uri, request))
+                if (MatchMethod(m_params[i].method, method) && MatchParamRoute(m_params[i].segments, uri, request))
                 {
                     return m_params[i].servlet;
                 }
@@ -353,7 +407,7 @@ namespace sylar
             for (size_t i = 0; i < m_globs.size(); ++i)
             {
                 // 命中通配时清空 route params（通配不产生参数）。
-                if (MatchGlob(m_globs[i].pattern, uri))
+                if (MatchMethod(m_globs[i].method, method) && MatchGlob(m_globs[i].pattern, uri))
                 {
                     request->clearRouteParams();
                     return m_globs[i].servlet;
@@ -368,6 +422,12 @@ namespace sylar
         // 分发入口：执行 pre 拦截器 -> 路由处理 -> post 拦截器。
         int32_t ServletDispatch::handle(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session)
         {
+            // 第四阶段新增：先执行 middleware before 链。
+            if (!m_middlewareChain.processBefore(request, response, session))
+            {
+                m_middlewareChain.processAfter(request, response, session);
+                return 0;
+            }
             // 先执行前置拦截器链。
             for (size_t i = 0; i < m_preInterceptors.size(); ++i)
             {
@@ -380,6 +440,7 @@ namespace sylar
                         // 执行后置拦截器。
                         m_postInterceptors[j](request, response, session);
                     }
+                    m_middlewareChain.processAfter(request, response, session);
                     // 返回 0，表示分发流程正常结束（虽未进入业务 handler）。
                     return 0;
                 }
@@ -395,6 +456,8 @@ namespace sylar
                 // 执行后置拦截器。
                 m_postInterceptors[i](request, response, session);
             }
+            // 最后执行 middleware after 链。
+            m_middlewareChain.processAfter(request, response, session);
             // 返回业务 handler 的返回码。
             return rt;
         }

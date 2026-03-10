@@ -92,12 +92,28 @@ void test_concurrent_access() {
     assert(created == 400);
 }
 
+void test_session_storage_injection() {
+    sylar::http::SessionStorage::ptr storage(new sylar::http::MemorySessionStorage());
+    sylar::http::SessionManager::ptr manager(new sylar::http::SessionManager(1000, storage));
+    sylar::http::Session::ptr session = manager->create();
+    assert(session);
+    session->set("role", "admin");
+    storage->save(session);
+
+    sylar::http::Session::ptr loaded = storage->load(session->getId());
+    assert(loaded);
+    assert(loaded->get("role") == "admin");
+    assert(storage->remove(session->getId()));
+    assert(!storage->load(session->getId()));
+}
+
 int main() {
     test_create_and_get();
     test_get_or_create_reuse();
     test_expire_and_sweep();
     test_timer_sweep();
     test_concurrent_access();
+    test_session_storage_injection();
     SYLAR_LOG_INFO(g_logger) << "test_session_manager passed";
     return 0;
 }
