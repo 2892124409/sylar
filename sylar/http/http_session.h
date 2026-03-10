@@ -1,7 +1,7 @@
 #ifndef __SYLAR_HTTP_HTTP_SESSION_H__
 #define __SYLAR_HTTP_HTTP_SESSION_H__
 
-#include "sylar/http/http_parser.h"
+#include "sylar/http/http_context.h"
 #include "sylar/http/http_response.h"
 #include "sylar/net/socket_stream.h"
 
@@ -20,10 +20,9 @@ namespace sylar
          * - 如何从字节流里读出一条完整 HTTP 请求
          * - 如何把 `HttpResponse` 写回客户端
          *
-         * 它内部维护一个连接级缓冲区 `m_buffer`，用于支持：
-         * - 半包
-         * - 粘包
-         * - keep-alive 下同一连接多个请求
+         * 在第五阶段以后，连接级解析状态被下沉到 `HttpContext`：
+         * - `HttpContext` 管理 parser + buffer
+         * - `HttpSession` 负责连接封装与对外 HTTP 收发接口
          */
         class HttpSession : public sylar::SocketStream
         {
@@ -40,8 +39,8 @@ namespace sylar
             /**
              * @brief 接收并解析一条 HTTP 请求
              * @details
-             * 内部会循环读 socket，把数据追加到 `m_buffer`，
-             * 然后交给 `HttpRequestParser` 尝试解析。
+             * 具体解析细节委托给 `HttpContext`，
+             * 当前类只保留 HTTP 连接封装职责。
              */
             HttpRequest::ptr recvRequest();
 
@@ -51,20 +50,17 @@ namespace sylar
             int sendResponse(HttpResponse::ptr response);
 
             /// 解析器是否出错
-            bool hasParserError() const { return m_parser.hasError(); }
+            bool hasParserError() const { return m_context.hasError(); }
 
             /// 返回最近一次解析错误原因
-            const std::string &getParserError() const { return m_parser.getError(); }
+            const std::string &getParserError() const { return m_context.getError(); }
 
             /// 最近一次解析错误是否属于请求过大
-            bool isRequestTooLarge() const { return m_parser.isRequestTooLarge(); }
+            bool isRequestTooLarge() const { return m_context.isRequestTooLarge(); }
 
         private:
-            /// HTTP 请求解析器实例，负责把字节流解析成 HttpRequest 对象
-            HttpRequestParser m_parser;
-            
-            /// 连接级接收缓冲区，用于跨多次 read() 累积数据，支持半包/粘包处理
-            std::string m_buffer;
+            /// HTTP 请求解析上下文：负责连接级 parser/buffer 状态。
+            HttpContext m_context;
         };
 
     } // namespace http

@@ -12,43 +12,8 @@ namespace sylar
 
         HttpRequest::ptr HttpSession::recvRequest()
         {
-            // 循环读取并解析，直到成功解析出一个完整请求或遇到错误
-            while (true)
-            {
-                // 步骤1：尝试从当前缓冲区解析请求
-                // consumed 用于记录本次解析消费了多少字节
-                size_t consumed = 0;
-                HttpRequest::ptr request = m_parser.parse(m_buffer, consumed);
-                
-                // 步骤2：解析成功，返回请求对象
-                if (request)
-                {
-                    // 从缓冲区删除已消费的字节
-                    // 剩余字节可能是下一个请求的开头（粘包场景）
-                    m_buffer.erase(0, consumed);
-                    return request;
-                }
-                
-                // 步骤3：解析出错（格式错误），返回空指针
-                if (m_parser.hasError())
-                {
-                    return HttpRequest::ptr();
-                }
-
-                // 步骤4：数据不完整（半包），继续从 socket 读取更多数据
-                char buffer[4096];
-                int rt = read(buffer, sizeof(buffer));
-                
-                // 读取失败或连接关闭，返回空指针
-                if (rt <= 0)
-                {
-                    return HttpRequest::ptr();
-                }
-                
-                // 将新读取的数据追加到连接级缓冲区
-                // 然后回到循环开头重新尝试解析
-                m_buffer.append(buffer, rt);
-            }
+            // 第五阶段改为委托 HttpContext 管理连接级解析状态。
+            return m_context.recvRequest(*this);
         }
 
         int HttpSession::sendResponse(HttpResponse::ptr response)
