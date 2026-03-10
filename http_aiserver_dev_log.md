@@ -2087,53 +2087,204 @@ HTTP 层（`HttpFrameworkConfig`）对应关系：
 #### 设计要点
 
 #### 1. SessionStorage 抽象
-- 新增 `SessionStorage` 接口：
-  - `save()`
-  - `load()`
-  - `remove()`
-  - `sweepExpired()`
-- 新增默认实现 `MemorySessionStorage`
-- `SessionManager` 改为依赖存储接口，而不是直接持有 `map`
+这一项是第四阶段最关键的“边界拆分”改动：
+
+- 第三阶段以前，`SessionManager` 同时承担两类职责：
+  1) **生命周期策略**（创建、touch、过期判断）
+  2) **存储细节**（底层 `map<SID, Session>` 的读写）
+- 第四阶段把第 2 类职责抽离为 `SessionStorage`，让 `SessionManager` 只保留策略层逻辑。
+
+##### 接口设计
+新增 `SessionStorage` 抽象接口（`session_storage.h`）：
+
+- `save(Session::ptr session)`
+  - 语义：保存或覆盖同 SID 的会话对象
+  - 使用场景：`create()` 新建、`get()` 命中后 touch 回写
+
+- `load(const std::string& session_id)`
+  - 语义：按 SID 读取会话
+  - 约定：未命中返回空指针
+
+- `remove(const std::string& session_id)`
+  - 语义：删除会话
+  - 返回：是否删除成功
+
+- `sweepExpired(uint64_t now_ms)`
+  - 语义：按“当前时间”批量清理过期会话
+  - 返回：本轮清理数量
+
+这一组接口保持“最小闭环”原则：只暴露当前框架真实需要的最小能力，不提前引入复杂查询/索引接口。
+
+##### 默认实现
+新增 `MemorySessionStorage`（`session_storage.cc`）：
+
+- 数据结构：`std::map<std::string, Session::ptr>`
+- 并发保护：`Mutex` 锁住 `save/load/remove/sweepExpired`
+- 过期清理：遍历 map，调用 `Session::isExpired(now_ms)` 删除过期项
+
+这保证了：
+- 单进程下功能完整可用
+- 接口已稳定，可在不动上层调用链的前提下替换底层存储
+
+##### SessionManager 接入方式
+`SessionManager` 构造函数新增可注入参数：
+
+- `SessionManager(max_inactive_ms, SessionStorage::ptr storage = MemorySessionStorage())`
+
+调用链变化：
+
+- `create()`：生成 SID -> 创建 Session -> `m_storage->save(session)`
+- `get(id)`：`m_storage->load(id)` -> 过期则 `remove(id)` -> 未过期则 touch 后 `save(session)`
+- `remove(id)`：委托 `m_storage->remove(id)`
+- `sweepExpired()`：委托 `m_storage->sweepExpired(GetCurrentMS())`
+
+可以看到：策略仍在 `SessionManager`，存储实现下沉到 `SessionStorage`。
+
+##### 为后续 Redis/DB 预留的扩展点
+如果下一步接 Redis/DB，主要工作是新增实现类（如 `RedisSessionStorage`），并在构造 `SessionManager` 时注入：
+
+- 业务流程（`getOrCreate`、cookie 下发、touch 语义）可复用
+- 主要新增点在存储侧：序列化格式、TTL/过期策略、连接失败处理、监控日志
 
 当前取舍：
-- 先只做内存存储实现
-- 先把“生命周期管理”和“存储后端”解耦，为后续 Redis/DB 预留接口
+- 先只落地内存实现，确保接口语义先稳定
+- 先完成“生命周期策略”和“存储后端”解耦，再逐步上外部存储
 
 #### 2. MiddlewareChain 落地
-- 新增 `Middleware` 抽象：
-  - `before(request, response, session)`
-  - `after(request, response, session)`
-- 新增 `MiddlewareChain`
-- 新增 `CallbackMiddleware` 作为轻量桥接实现
+这一项的目标，是把“前后置处理”从分散回调提升为可组合、可扩展的统一模块。
+
+##### 抽象设计
+新增 `Middleware` 基类（`middleware.h`）：
+
+- `before(request, response, session) -> bool`
+  - 在业务处理前执行
+  - 返回 `false` 表示短路主流程（不再进入 servlet）
+
+- `after(request, response, session) -> void`
+  - 在主流程结束后执行
+  - 用于收尾逻辑（日志、打点、补充响应头等）
+
+相比第三阶段的 interceptor，这一层把“前后处理”合并到同一组件里，语义更聚合。
+
+##### 链式执行模型
+新增 `MiddlewareChain`：
+
+- `addMiddleware()`：按注册顺序追加
+- `processBefore()`：按顺序执行每个 middleware 的 `before`
+  - 任一返回 `false` 即短路
+- `processAfter()`：按顺序执行每个 middleware 的 `after`
+
+当前实现是“线性顺序模型”，避免一开始就引入递归式 `next()` 调度带来的复杂性。
+
+##### 快速桥接能力
+新增 `CallbackMiddleware`：
+
+- 用 `std::function` 快速注入 `before/after`
+- 适合测试、PoC 和渐进改造
+- 不需要先写完整继承类，就可以快速验证中间件语义
+
+##### 与第三阶段 interceptor 的关系
+第四阶段没有直接移除 interceptor，而是做“兼容叠加”：
+
+- middleware 放在分发主链路最外层
+- interceptor 保持原有行为
+- 这样可以在不破坏旧逻辑的前提下，引入新的统一扩展入口
 
 当前取舍：
 - 先做顺序执行模型，不引入复杂递归 `next` 调度
-- 保留第三阶段 interceptor 兼容路径，平滑演进到 middleware
+- 先保留 interceptor，降低升级风险和迁移成本
+- 先验证“可组合前后置能力”是否稳定，再推进统一入口
 
 #### 3. method-aware 路由升级
-- `ServletDispatch` 的精确 / 参数 / 通配路由都增加了 `HttpMethod` 维度
-- 旧接口仍可用：旧接口内部注册为“不限制方法”
-- 新接口支持：
-  - `addServlet(HttpMethod, path, ...)`
-  - `addParamServlet(HttpMethod, path, ...)`
-  - `addGlobServlet(HttpMethod, path, ...)`
+这一项的核心，是把路由匹配从“只看路径”升级为“方法 + 路径联合匹配”。
+
+##### 为什么要升级
+第三阶段如果同时存在：
+
+- `GET /items`
+- `POST /items`
+
+仅靠 path 无法准确区分读写语义。method-aware 升级后，路由语义和 REST 风格保持一致。
+
+##### 数据结构升级
+`ServletDispatch` 内部路由项新增 `HttpMethod` 字段：
+
+- `ExactItem`：`method + uri + servlet`
+- `ParamItem`：`method + pattern + segments + servlet`
+- `GlobItem`：`method + pattern + servlet`
+
+并新增方法匹配函数 `MatchMethod(route_method, request_method)`：
+
+- `route_method == INVALID_METHOD` 视为“不限制方法”（兼容旧接口）
+- 否则必须与请求方法严格一致
+
+##### API 兼容策略
+新增 method-aware 注册接口：
+
+- `addServlet(HttpMethod, path, ...)`
+- `addParamServlet(HttpMethod, path, ...)`
+- `addGlobServlet(HttpMethod, path, ...)`
+
+旧接口继续保留：
+
+- 旧接口内部统一注册为 `INVALID_METHOD`
+- 这让旧代码无需改动即可继续运行
+
+##### 匹配优先级保持不变
+即使升级到 method-aware，匹配顺序仍保持第三阶段语义：
+
+1. 精确匹配
+2. 参数路由
+3. 通配路由
+4. 默认路由
+
+变化点只在每一层内部多了一次方法过滤，不改变原有优先级认知。
 
 当前取舍：
-- 先让 method-aware 与原有 path-only 路由兼容共存
-- 先不做正则路由、多段捕获、路由分组
+- 先让 method-aware 与 path-only 兼容共存，避免破坏已有路由注册
+- 先不引入正则路由、多段捕获、路由分组等高复杂特性
+- 先把“方法维度”这条主线稳定下来，再做语法增强
 
 #### 4. 分发主链路升级
-- `ServletDispatch::handle(...)` 当前执行顺序为：
+这一项是第四阶段“能力编排”层面的升级：不是新增单点能力，而是重排主执行链路。
+
+##### 新执行顺序
+`ServletDispatch::handle(...)` 当前顺序：
 
 1. `MiddlewareChain::processBefore(...)`
-2. 第三阶段已有的 pre interceptor
+2. pre interceptor
 3. 路由匹配 + `servlet->handle(...)`
 4. post interceptor
 5. `MiddlewareChain::processAfter(...)`
 
+这条顺序的意图是：
+
+- middleware 作为最外层横切入口
+- interceptor 继续承接第三阶段既有逻辑
+- servlet 仍是核心业务处理点
+
+##### 短路与收尾语义
+主链路重点保证“即使短路也尽量收尾”：
+
+- 若 middleware before 返回 `false`，会直接跳过业务处理，但仍执行 middleware after
+- 若 pre interceptor 返回 `false`，会跳过业务 handler，但仍执行 post interceptor 和 middleware after
+
+这样做的好处：
+
+- 响应头补充、访问日志、埋点统计等后置逻辑更稳定
+- 不容易因中途拦截导致收尾逻辑漏执行
+
+##### 兼容与演进策略
+第四阶段的策略不是“推翻重来”，而是“外围加壳、内部兼容”：
+
+- 先把 middleware 放到最外层
+- 保留 interceptor 语义不变
+- 让已有代码几乎零迁移成本
+
 当前取舍：
-- 保持第三阶段已有 interceptor 行为不变
-- 在其外围增加 middleware，使第四阶段升级平滑可控
+- 保持第三阶段 interceptor 行为不变，优先保证兼容稳定
+- 通过 middleware 外围增强，为后续统一前后置入口做过渡
+- 先验证链路编排正确性，再考虑逐步淡化 interceptor
 
 ---
 
