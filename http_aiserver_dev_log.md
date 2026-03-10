@@ -1352,7 +1352,33 @@ SSE 当前只实现输出能力，不实现消息广播中心。
 
 ---
 
-## 第二阶段
+## 第二阶段：生命周期与流式能力增强
+
+### 0. 第二阶段改动类速览
+#### 0.1 `session_manager.h / session_manager.cc`
+- 新增周期清理接口：`startSweepTimer()` / `stopSweepTimer()` / `hasSweepTimer()`
+- 接入 `TimerManager::addConditionTimer(...)`，形成后台自动过期清理能力
+
+#### 0.2 `http_response.h / http_response.cc`
+- 新增流式响应语义：`setStream()` / `isStream()`
+- 新增 `toHeaderString()`，支持“仅发送响应头”的流式写出模型
+
+#### 0.3 `http_server.h / http_server.cc`
+- `handleClient()` 新增流式分支（`response->isStream()`）
+- 解析错误按类型区分返回 `400` 或 `413`
+
+#### 0.4 `http_parser.h / http_parser.cc` + `http_session.h`
+- 请求头/请求体大小限制接入（默认 8KB / 10MB）
+- 新增错误类型区分：普通格式错误 vs 请求过大
+- `HttpSession` 暴露 `isRequestTooLarge()` 供 `HttpServer` 决策
+
+#### 0.5 `sse.h / sse.cc`
+- 完成 SSE 工具类链路验证（注释帧 + 事件帧）
+- 与 `HttpServer` 流式分支配合，形成可用 SSE demo
+
+#### 0.6 测试改动
+- 新增：`test_session_manager`、`test_sse_writer`、`test_sse_server`
+- 增强：`test_http_parser`、`test_http_server`
 
 ### 1. 本阶段目标
 #### 模块作用
@@ -1378,7 +1404,7 @@ SSE 当前只实现输出能力，不实现消息广播中心。
 ### 2. 本阶段完成项
 #### 设计要点
 
-**1. Session 生命周期增强**
+#### 1. Session 生命周期增强
 - 为 `SessionManager` 增加了周期性过期清理定时器：
   - `startSweepTimer()`
   - `stopSweepTimer()`
@@ -1467,7 +1493,7 @@ SessionManager 正常销毁
 - 先做内存态生命周期闭环，不引入 Redis/DB
 - 先保证线程安全和可验证性，后续再做容量治理与淘汰策略
 
-**2. SSE 通用接入落地**
+#### 2. SSE 通用接入落地
 - 给 `HttpResponse` 增加流式响应语义：
   - `setStream(true)`
   - `toHeaderString()`
@@ -1550,7 +1576,7 @@ AI 对话场景中使用 SSE 的经典做法：
 - 先不引入 chunked response，保持最小改动可跑通
 - 先用单连接示例验证协议链路，再考虑抽象化封装
 
-**3. HttpServer 健壮性增强**
+#### 3. HttpServer 健壮性增强
 - 给 `HttpRequestParser` 增加请求头大小限制（默认 8KB）
 - 给 `HttpRequestParser` 增加请求体大小限制（默认 10MB）
 - 增加错误分类，支持把“请求过大”返回为 `413 Payload Too Large`
@@ -1564,7 +1590,7 @@ AI 对话场景中使用 SSE 的经典做法：
 - 限制项目前是解析器静态全局参数，优先保证行为一致和测试稳定
 - 后续可改为服务实例级配置或配置文件驱动
 
-**4. 路由层扩展点梳理**
+#### 4. 路由层扩展点梳理
 - 明确当前路由层继续保持“精确 -> 通配 -> 默认”的简单模型
 - 梳理了后续可扩展方向：更高效路由结构、路径参数、钩子、中间件链
 
@@ -1623,9 +1649,51 @@ AI 对话场景中使用 SSE 的经典做法：
 #### 当前结论
 到这里，通用 HTTP 框架的第二阶段主目标已经完成。
 
+### 6. 下一阶段
+#### 第三阶段会怎么做
+第三阶段将继续停留在“通用 HTTP 框架层”，不进入 AI 应用协议，实现重点是：
+
+1. 参数路由（提升路由表达能力）
+2. 请求处理拦截器（统一前后置处理）
+3. 统一错误响应模型（400/404/413/500 收口）
+4. 关键参数配置化（统一配置入口）
+5. 测试体系升级（新增测试 + 回归）
+
 ---
 
-## 第三阶段
+## 第三阶段：框架化能力收敛
+
+### 0. 第三阶段改动类速览
+#### 0.1 `http_request.h / http_request.cc`
+- 新增 route params 容器与接口：
+  - `setRouteParam()` / `getRouteParam()` / `hasRouteParam()` / `clearRouteParams()`
+
+#### 0.2 `servlet.h / servlet.cc`
+- 新增参数路由：`addParamServlet()`
+- 新增请求拦截器：`addPreInterceptor()` / `addPostInterceptor()`
+- 路由顺序升级为：精确 -> 参数 -> 通配 -> 默认
+
+#### 0.3 `http_error.h / http_error.cc`
+- 新增统一错误响应入口：`ApplyErrorResponse()`
+- 收口 400/404/413/500 的输出格式（支持 JSON / text）
+
+#### 0.4 `http_framework_config.h / http_framework_config.cc`
+- HTTP 配置项统一收敛到配置门面
+- 已切换到 `ConfigVar` 体系，并标注每项重载/生效形式
+
+#### 0.5 `http_server.h / http_server.cc`
+- 统一错误响应接入
+- 增加异常捕获保护
+- `stop()` 接管 Session 清理定时器关闭，避免后台任务拖住退出
+
+#### 0.6 `fiber_framework_config.h / fiber_framework_config.cc`（配置体系统一补充）
+- 网络层配置项统一收敛为配置门面
+- 与 HTTP 层配置风格保持一致，便于统一维护
+
+#### 0.7 测试改动
+- 新增：`test_http_dispatch`、`test_http_framework_config`
+- 增强：`test_http_server`
+- 回归覆盖：`test_http_parser`、`test_session_manager`、`test_sse_writer`、`test_sse_server`
 
 ### 1. 本阶段目标
 #### 模块作用
@@ -1644,7 +1712,7 @@ AI 对话场景中使用 SSE 的经典做法：
 ### 2. 本阶段完成项
 #### 设计要点
 
-**1. 参数路由**
+#### 1. 参数路由
 - `ServletDispatch` 新增参数路由注册：`addParamServlet()`
 - 路由匹配顺序升级为：**精确 -> 参数 -> 通配 -> 默认**
 - `HttpRequest` 新增 `route params` 容器与访问接口：
@@ -1657,7 +1725,49 @@ AI 对话场景中使用 SSE 的经典做法：
 - 先只支持整段参数（如 `/user/:id`）
 - 不做正则匹配和多段捕获
 
-**2. 请求处理拦截器（Interceptor）**
+##### 学习问答记录（路由匹配类型）
+
+**Q：什么是精确匹配、参数路由匹配、通配匹配，以及它们之间有什么区别？**
+
+**A：**
+
+1. 精确匹配（Exact Match）
+   - 路径必须完全相等才命中
+   - 例：注册 `/user/me`，只匹配 `/user/me`，不匹配 `/user/42`
+   - 适合固定接口地址
+
+2. 参数路由匹配（Param Route Match）
+   - 路由里用 `:name` 表示变量段
+   - 例：注册 `/user/:id`，可匹配 `/user/42`，并提取 `id=42`
+   - 适合"结构固定、某些段是动态值"的接口
+
+3. 通配匹配（Glob Match）
+   - 用 `*` 做宽泛匹配（当前版本是简化实现，主要是 `*` 或前缀 `prefix*`）
+   - 例：`/user/*` 可以兜住一批 `/user/...` 路径
+   - 适合兜底、通用处理、静态前缀类接口
+
+区别（核心）：
+
+1. 匹配严格程度
+   - 精确匹配最严格
+   - 参数路由次之（允许变量段）
+   - 通配匹配最宽泛
+
+2. 是否产生结构化参数
+   - 精确：不产生参数
+   - 参数路由：会产生 `route params`（如 `id=42`）
+   - 通配：当前实现不产出参数
+
+3. 典型用途
+   - 精确：固定业务端点（`/ping`、`/health`）
+   - 参数路由：资源型接口（`/user/:id`）
+   - 通配：兜底/分组前缀处理（`/api/*`）
+
+4. 当前框架优先级（非常重要）
+   - **精确 > 参数 > 通配 > 默认**
+   - 同一个请求如果同时可命中多种规则，按这个顺序选择
+
+#### 2. 请求处理拦截器（Interceptor）
 - 为避免和底层网络层 `hook` 命名冲突，本阶段统一使用 `Interceptor` 命名
 - `ServletDispatch` 新增：
   - `addPreInterceptor()`
@@ -1665,11 +1775,51 @@ AI 对话场景中使用 SSE 的经典做法：
 - pre interceptor 返回 `false` 时可中断后续业务处理
 - post interceptor 在业务处理后、响应发送前执行
 
+拦截器定义：
+- 拦截器就是在“真正业务 `servlet->handle()` 前后”插入统一处理逻辑的机制。
+
+当前实现形态：
+- `PreInterceptor`：前置拦截器，返回 `bool`
+- `PostInterceptor`：后置拦截器，返回 `void`
+
+执行顺序（核心）：
+
+在 `ServletDispatch::handle(...)` 里执行流程为：
+
+1. 依次执行所有 pre
+   - 若某个 pre 返回 `false`：
+     - 业务 handler 不再执行
+     - 仍然执行所有 post
+     - 直接返回
+2. 若所有 pre 都通过：
+   - 执行路由匹配 + 目标 `servlet->handle(...)`
+3. 执行所有 post
+4. 返回业务 handler 的返回值
+
+因此当前机制属于“可拦截 + 可统一收尾”模型。
+
+这个设计能解决什么：
+
+1. 减少重复代码
+   - 不用在每个 servlet 里重复写日志/header/鉴权逻辑
+
+2. 统一拒绝策略
+   - pre 可在业务前统一拦截（如鉴权失败、参数非法）
+
+3. 统一收尾能力
+   - 即使 pre 拦截了请求，post 仍会执行，便于统一打点/收尾
+
+实现细节（容易忽略）：
+
+- 当 pre 返回 `false` 时，框架不会自动构造错误响应
+- 因此 pre 自己需要把 `response` 填好（状态码/响应体/必要 header）
+- 这一点在 `test_http_dispatch` 与 `test_http_server` 的 `/blocked` 路径有验证
+
 当前取舍：
 - 先做轻量拦截器，不直接上完整中间件链
 - 先解决通用日志 / 统一 header / 简单拦截场景
 
-**3. 统一错误响应模型**
+#### 3. 统一错误响应模型
 - 新增 `ApplyErrorResponse()` 统一构造错误响应
 - 支持：
   - `400 Bad Request`
@@ -1686,7 +1836,7 @@ AI 对话场景中使用 SSE 的经典做法：
 - 优先统一框架错误出口
 - 先做最小 JSON 错误体，不扩展业务码体系
 
-**4. 配置化**
+#### 4. 配置化
 - 新增 `HttpFrameworkConfig` 统一管理：
   - 请求头大小限制
   - 请求体大小限制
@@ -1700,7 +1850,7 @@ AI 对话场景中使用 SSE 的经典做法：
 - 先做代码级静态配置入口
 - 暂不接外部配置文件系统
 
-#### 学习问答记录（配置系统）
+##### 学习问答记录（配置系统）
 
 **Q1：为什么设置了回调不等于“完整热加载”？**
 
@@ -1764,7 +1914,53 @@ AI 对话场景中使用 SSE 的经典做法：
 
 一句话：`tcp.connect.timeout` 能热生效，是 `ConfigVar + addListener + 运行时缓存变量` 联动的结果。
 
-**5. HttpServer 行为升级**
+**Q4：网络层和 HTTP 层配置项分别属于哪种生效形式？哪些能真热生效？**
+
+**A：**
+
+先记三种常见生效形式：
+
+1. 启动参数型：通常在对象构造或服务启动时读取，运行中改值不自动作用到已运行对象
+2. 运行时动态读取型：每次业务路径都会读取，改值后后续调用立即生效
+3. 新对象生效型：改值后仅影响后续新创建对象，已存在对象不变
+
+网络层（`FiberFrameworkConfig`）对应关系：
+
+1. 启动参数型
+   - `scheduler.use_caller`
+   - `iomanager.use_caller`
+   - `fiber.shared_stack_size`（建议启动前确定）
+
+2. 运行时动态读取型（真热生效）
+   - `tcp.connect.timeout`
+   - `fiber.pool.enabled`
+   - `fiber.pool.max_size`
+   - `fiber.pool.min_keep`
+   - `fiber.pool.idle_timeout`
+
+3. 新对象生效型
+   - `fiber.stack_size`
+   - `fiber.use_shared_stack`
+
+HTTP 层（`HttpFrameworkConfig`）对应关系：
+
+1. 运行时动态读取型（真热生效）
+   - `http.max_header_size`
+   - `http.max_body_size`
+   - `http.error_response_format`
+
+2. 启动参数型
+   - `http.session_sweep_interval_ms`（当前在 `HttpServer` 启动时读取）
+
+3. 新对象生效型
+   - `http.sse_heartbeat_interval_ms`（供后续新启动的 SSE 发送逻辑读取）
+
+一句话速记：
+
+- **真热生效**：路径上“每次都读配置”的项
+- **非真热生效**：只在“启动/构造时读一次”的项
+
+#### 5. HttpServer 行为升级
 - `HttpServer::handleClient()` 使用统一错误响应输出 400/413/500
 - 增加异常捕获，避免业务处理异常直接炸掉服务线程
 - `HttpServer::stop()` 接管 `SessionManager` 定时器关闭，避免后台清理任务阻止服务退出
@@ -1828,5 +2024,21 @@ AI 对话场景中使用 SSE 的经典做法：
 
 #### 当前结论
 到这里，通用 HTTP 框架的第三阶段主目标已经完成。
+
+### 6. 下一阶段
+#### 第四阶段会怎么做
+第四阶段建议按两条路线二选一推进：
+
+1. 继续深挖通用框架
+   - 文件级自动热加载（补齐配置热加载 1/2 步）
+   - 路由进一步增强（正则/多段捕获/分组）
+   - Interceptor 演进为中间件链
+   - 可观测性（trace id、统一日志字段、指标埋点）
+
+2. 进入 AI 应用层
+   - 基于当前框架实现 `/chat` 与 `/chat/stream`
+   - 对话上下文管理、会话策略与流式输出约定
+
+当前项目目标仍偏向“通用 HTTP 框架”，因此建议优先走路线 1。
 
 ---

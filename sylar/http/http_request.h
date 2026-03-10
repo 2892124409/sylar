@@ -135,43 +135,43 @@ namespace sylar
              */
             std::string getPathWithQuery() const;
 
-private:
-    /// HTTP 请求方法（GET/POST/PUT...）
-    HttpMethod m_method;
+        private:
+            /// HTTP 请求方法（GET/POST/PUT...）
+            HttpMethod m_method;
 
-    /// HTTP 主版本号，例如 HTTP/1.1 中的 1
-    uint8_t m_versionMajor;
+            /// HTTP 主版本号，例如 HTTP/1.1 中的 1
+            uint8_t m_versionMajor;
 
-    /// HTTP 次版本号，例如 HTTP/1.1 中的 1
-    uint8_t m_versionMinor;
+            /// HTTP 次版本号，例如 HTTP/1.1 中的 1
+            uint8_t m_versionMinor;
 
-    /// 连接是否保持（keep-alive 语义结果）
-    bool m_keepalive;
+            /// 连接是否保持（keep-alive 语义结果）
+            bool m_keepalive;
 
-    /// URL 路径部分（不含 query 和 fragment），例如 /api/chat
-    std::string m_path;
+            /// URL 路径部分（不含 query 和 fragment），例如 /api/chat
+            std::string m_path;
 
-    /// URL 查询串（? 后部分），例如 a=1&b=2
-    std::string m_query;
+            /// URL 查询串（? 后部分），例如 a=1&b=2
+            std::string m_query;
 
-    /// URL 片段（# 后部分），服务端一般很少使用
-    std::string m_fragment;
+            /// URL 片段（# 后部分），服务端一般很少使用
+            std::string m_fragment;
 
-    /// 请求体内容（POST/PUT/PATCH 常用）
-    std::string m_body;
+            /// 请求体内容（POST/PUT/PATCH 常用）
+            std::string m_body;
 
-    /// 原始请求头键值对
-    MapType m_headers;
+            /// 原始请求头键值对
+            MapType m_headers;
 
-    /// 从 query string 解析出的参数键值对
-    MapType m_params;
+            /// 从 query string 解析出的参数键值对
+            MapType m_params;
 
-    /// 从参数路由解析出的键值对，例如 :id -> 42
-    MapType m_routeParams;
+            /// 从参数路由解析出的键值对，例如 :id -> 42
+            MapType m_routeParams;
 
-    /// 从 Cookie 请求头解析出的 cookie 键值对
-    MapType m_cookies;
-};
+            /// 从 Cookie 请求头解析出的 cookie 键值对
+            MapType m_cookies;
+        };
 
     } // namespace http
 } // namespace sylar
