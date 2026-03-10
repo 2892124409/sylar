@@ -8,177 +8,6 @@
 
 ---
 
-## 第五阶段：HttpContext 独立化与解析上下文收拢
-
-### 0. 第五阶段改动类速览
-#### 0.1 `http_context.h / http_context.cc`
-- 新增 `HttpContext`
-- 收拢连接级 `buffer + parser`
-- 对外提供 `recvRequest()` 与解析错误查询接口
-
-#### 0.2 `http_session.h / http_session.cc`
-- `HttpSession` 不再直接持有 `HttpRequestParser` 与 `m_buffer`
-- 改为持有 `HttpContext`
-- `recvRequest()` 与解析错误查询统一委托 `HttpContext`
-
-#### 0.3 `CMakeLists.txt`
-- 新增 `http_context.cc` 编译项
-- 新增 `test_http_context`
-
-#### 0.4 测试改动
-- 新增：`test_http_context`
-  - 半包解析
-  - 粘包/多请求连续解析
-  - 非法请求错误传播
-  - 413 错误传播
-
-### 1. 本阶段目标
-#### 模块作用
-第五阶段的目标，是把当前 HTTP 请求解析链路中的“连接级上下文状态”独立出来。
-
-第四阶段结束时，解析职责分散在三处：
-
-- `HttpRequestParser`：负责纯解析逻辑
-- `HttpSession`：负责持有 `m_parser + m_buffer` 并循环读 socket
-- `HttpServer`：负责把解析错误映射成 400 / 413
-
-这种实现已经可用，但“连接级解析状态”还没有自己的模块边界。
-
-所以第五阶段引入 `HttpContext`，让职责分工变为：
-
-- `HttpRequestParser`：buffer -> request 的纯解析器
-- `HttpContext`：连接级 parser/buffer 状态管理
-- `HttpSession`：HTTP 连接封装
-- `HttpServer`：请求处理主循环
-
-这一阶段依然聚焦通用 HTTP 框架，不进入 AI 层。
-
----
-
-### 2. 本阶段完成项
-#### 设计要点
-
-#### 1. HttpContext 新增
-这一项是第五阶段的核心：新增 `HttpContext` 作为“请求解析上下文”。
-
-##### 职责定位
-`HttpContext` 负责：
-
-- 管理连接级接收缓冲区 `m_buffer`
-- 管理请求解析器 `m_parser`
-- 循环读取底层流并持续尝试解析完整请求
-- 对外暴露解析错误状态查询接口
-
-##### 对外接口
-当前提供：
-
-- `recvRequest(SocketStream& stream)`
-- `hasError()`
-- `getError()`
-- `isRequestTooLarge()`
-- `reset()`
-
-##### 当前取舍
-- 先采用“薄封装”方案，不重写 `HttpRequestParser` 内部逻辑
-- 先把连接级上下文边界独立出来，再考虑后续状态机细化
-
-#### 2. HttpSession 职责收敛
-第五阶段对 `HttpSession` 的调整，不是增强功能，而是做职责瘦身。
-
-##### 调整前
-`HttpSession` 同时管理：
-
-- 底层 `SocketStream`
-- `HttpRequestParser`
-- 连接级缓冲区 `m_buffer`
-- `recvRequest()` 里的读循环与解析循环
-
-##### 调整后
-`HttpSession` 只保留：
-
-- HTTP 连接封装
-- `sendResponse()`
-- 对 `HttpContext` 的轻量委托接口
-
-现在 `recvRequest()` 直接转调 `m_context.recvRequest(*this)`。
-
-##### 当前取舍
-- 先不改变 `HttpSession` 对外 API，避免影响 `HttpServer`
-- 先通过内部委托完成架构重构，降低回归风险
-
-#### 3. 解析错误语义保持兼容
-虽然引入了 `HttpContext`，但上层 `HttpServer` 的使用方式基本不变：
-
-- 仍通过 `session->recvRequest()` 获取请求
-- 仍通过 `session->hasParserError()` / `getParserError()` / `isRequestTooLarge()` 判断错误
-- 仍把非法请求映射为 400，请求过大映射为 413
-
-这说明第五阶段是“边界独立化”，不是“上层语义推翻重做”。
-
-##### 当前取舍
-- 保持 `HttpServer` 主链路稳定
-- 避免把 `HttpContext` 重构与 server 行为调整混在一个阶段
-
----
-
-### 3. 测试与验证
-#### 当前验证结果
-第五阶段新增 `test_http_context`，覆盖：
-
-- 半包请求：拆成两段读取后仍能成功解析
-- 粘包/多请求：一次读入两条请求，第一条解析后第二条仍能继续解析
-- 非法请求：错误方法能正确透传解析错误
-- 请求过大：header/body 超限时能透传 413 类型错误
-
-回归通过：
-
-- `./bin/test_http_context`
-- `./bin/test_http_parser`
-- `./bin/test_http_server`
-- `./bin/test_http_dispatch`
-- `./bin/test_session_manager`
-- `./bin/test_sse_writer`
-- `./bin/test_sse_server`
-
----
-
-### 4. 当前实现与后续优化
-#### 设计取舍
-
-**当前实现：**
-- `HttpContext` 已独立，但内部仍直接复用 `HttpRequestParser`
-- `HttpSession` 已从“自己维护 parser/buffer”收敛成“连接封装 + 委托入口”
-- `HttpServer` 主流程保持稳定，外部行为未发生破坏性变化
-
-**后续可优化：**
-- 把 `HttpContext` 继续演进为更完整的增量状态机
-- 为 chunked / streaming body 预留更细粒度状态
-- 让解析上下文承接更多请求级中间状态，而不是只保存 buffer
-
----
-
-### 5. 阶段总结
-#### 一句话总结
-第五阶段的核心不是“解析能力变强了多少”，而是把“请求解析状态”从 `HttpSession` 里拆出来，形成独立模块边界。
-
-#### 当前结论
-到这里，HTTP 框架在结构上又向参考仓库靠近了一步：
-
-- 有了独立的 `HttpContext`
-- `HttpSession` 更轻
-- 后续继续做解析状态机或 HTTPS/SSL 时，改动会更集中
-
-### 6. 下一阶段
-#### 第六阶段会怎么做
-第六阶段建议继续在“工程化能力”上推进，优先级建议如下：
-
-1. 路由继续增强（分组 / 更强匹配）
-2. MiddlewareChain 继续演进，逐步统一前后置入口
-3. 模块目录边界继续整理
-4. 为 SSL/HTTPS 支持做结构准备
-
----
-
 ## 第一阶段：HTTP 核心框架骨架
 
 ### 0. `http.h / http.cc`
@@ -2525,5 +2354,225 @@ HTTP 层（`HttpFrameworkConfig`）对应关系：
 5. SSL/HTTPS 支持
 
 如果届时你决定转入 AI 层，那么也已经具备了足够稳定的 HTTP 基础设施。
+
+---
+
+## 第五阶段：HttpContext 独立化与解析上下文收拢
+
+### 0. 第五阶段改动类速览
+#### 0.1 `http_context.h / http_context.cc`
+- 新增 `HttpContext`
+- 收拢连接级 `buffer + parser`
+- 对外提供 `recvRequest()` 与解析错误查询接口
+
+#### 0.2 `http_session.h / http_session.cc`
+- `HttpSession` 不再直接持有 `HttpRequestParser` 与 `m_buffer`
+- 改为持有 `HttpContext`
+- `recvRequest()` 与解析错误查询统一委托 `HttpContext`
+
+#### 0.3 `CMakeLists.txt`
+- 新增 `http_context.cc` 编译项
+- 新增 `test_http_context`
+
+#### 0.4 测试改动
+- 新增：`test_http_context`
+  - 半包解析
+  - 粘包/多请求连续解析
+  - 非法请求错误传播
+  - 413 错误传播
+
+### 1. 本阶段目标
+#### 模块作用
+第五阶段的目标，是把当前 HTTP 请求解析链路中的“连接级上下文状态”独立出来。
+
+第四阶段结束时，解析职责分散在三处：
+
+- `HttpRequestParser`：负责纯解析逻辑
+- `HttpSession`：负责持有 `m_parser + m_buffer` 并循环读 socket
+- `HttpServer`：负责把解析错误映射成 400 / 413
+
+这种实现已经可用，但“连接级解析状态”还没有自己的模块边界。
+
+所以第五阶段引入 `HttpContext`，让职责分工变为：
+
+- `HttpRequestParser`：buffer -> request 的纯解析器
+- `HttpContext`：连接级 parser/buffer 状态管理
+- `HttpSession`：HTTP 连接封装
+- `HttpServer`：请求处理主循环
+
+这一阶段依然聚焦通用 HTTP 框架，不进入 AI 层。
+
+---
+
+### 2. 本阶段完成项
+#### 设计要点
+
+#### 1. HttpContext 新增
+这一项是第五阶段最关键的结构改造：把“连接级解析状态”从 `HttpSession` 中拆出来，形成独立 `HttpContext` 模块。
+
+##### 为什么要新增 HttpContext
+在第四阶段以前，`HttpSession` 既要做连接封装，又要维护：
+
+- `m_buffer`（跨多次 `read()` 的连接级缓冲区）
+- `m_parser`（请求解析器与其错误状态）
+- `recvRequest()` 的读循环 + 解析循环
+
+这会带来两个问题：
+
+1. 类职责过重：`HttpSession` 同时处理网络收发与解析上下文管理
+2. 扩展成本高：后续若做增量状态机、chunked、streaming body，改动会扩散到 session/server
+
+所以第五阶段先做边界独立化，把解析上下文单独抽成 `HttpContext`。
+
+##### HttpContext 的职责边界
+`HttpContext` 现在只做一件事：管理“一个连接上的请求解析上下文”。
+
+具体包括：
+
+- 持有连接级缓冲区 `m_buffer`
+- 持有请求解析器 `m_parser`
+- 从 `SocketStream` 持续读数据，直到解析出一条完整请求或失败
+- 保留未消费字节（粘包/keep-alive 连续请求场景）
+- 统一暴露解析错误信息给上层查询
+
+这意味着：
+
+- `HttpRequestParser` 继续是“纯解析器”
+- `HttpContext` 成为“解析状态容器 + 解析驱动器”
+
+##### 核心执行链路（recvRequest）
+`HttpContext::recvRequest(SocketStream& stream)` 的流程如下：
+
+1. 先拿当前 `m_buffer` 调 `m_parser.parse(buffer, consumed)`
+2. 若解析成功：
+   - `erase(0, consumed)` 删除已消费字节
+   - 返回本次 `HttpRequest`
+3. 若解析失败且 parser 进入 error：返回空指针
+4. 若数据不完整：继续 `stream.read(...)`，把新字节 `append` 到 `m_buffer`
+5. 回到步骤 1，直到成功或失败退出
+
+这条逻辑与旧 `HttpSession::recvRequest()` 行为保持一致，只是职责迁移到了独立模块。
+
+##### 对外接口与语义
+当前 `HttpContext` 对外接口：
+
+- `recvRequest(SocketStream& stream)`：解析一条完整请求
+- `hasError()`：当前 parser 是否报错
+- `getError()`：最近一次错误描述
+- `isRequestTooLarge()`：是否属于请求过大（用于 413）
+- `reset()`：清空 parser 错误状态并清空上下文缓冲区
+
+其中 `reset()` 目前主要用于显式复位/测试预留，正常请求主链路并不依赖频繁手动调用。
+
+##### 与 keep-alive 的关系（容易误解）
+`HttpContext` 里没有显式写“是否继续 keep-alive”的分支，这是职责划分决定的：
+
+- `HttpContext` 只负责“能不能解析出下一条请求”
+- `HttpServer` 负责“拿到请求后是否继续下一轮处理”
+
+keep-alive 能成立的关键并不是一个 if，而是：
+
+- `m_buffer` 会保留剩余未消费字节
+- 同一连接会反复调用 `recvRequest()`
+
+##### 当前取舍
+- 先采用“薄封装”方案，不重写 `HttpRequestParser` 内部算法
+- 先确保外部行为不变（400/413、keep-alive、SSE 均不回归）
+- 先把边界立住，再在后续阶段把 `HttpContext` 演进成更完整增量状态机
+
+#### 2. HttpSession 职责收敛
+第五阶段对 `HttpSession` 的调整，不是增强功能，而是做职责瘦身。
+
+##### 调整前
+`HttpSession` 同时管理：
+
+- 底层 `SocketStream`
+- `HttpRequestParser`
+- 连接级缓冲区 `m_buffer`
+- `recvRequest()` 里的读循环与解析循环
+
+##### 调整后
+`HttpSession` 只保留：
+
+- HTTP 连接封装
+- `sendResponse()`
+- 对 `HttpContext` 的轻量委托接口
+
+现在 `recvRequest()` 直接转调 `m_context.recvRequest(*this)`。
+
+##### 当前取舍
+- 先不改变 `HttpSession` 对外 API，避免影响 `HttpServer`
+- 先通过内部委托完成架构重构，降低回归风险
+
+#### 3. 解析错误语义保持兼容
+虽然引入了 `HttpContext`，但上层 `HttpServer` 的使用方式基本不变：
+
+- 仍通过 `session->recvRequest()` 获取请求
+- 仍通过 `session->hasParserError()` / `getParserError()` / `isRequestTooLarge()` 判断错误
+- 仍把非法请求映射为 400，请求过大映射为 413
+
+这说明第五阶段是“边界独立化”，不是“上层语义推翻重做”。
+
+##### 当前取舍
+- 保持 `HttpServer` 主链路稳定
+- 避免把 `HttpContext` 重构与 server 行为调整混在一个阶段
+
+---
+
+### 3. 测试与验证
+#### 当前验证结果
+第五阶段新增 `test_http_context`，覆盖：
+
+- 半包请求：拆成两段读取后仍能成功解析
+- 粘包/多请求：一次读入两条请求，第一条解析后第二条仍能继续解析
+- 非法请求：错误方法能正确透传解析错误
+- 请求过大：header/body 超限时能透传 413 类型错误
+
+回归通过：
+
+- `./bin/test_http_context`
+- `./bin/test_http_parser`
+- `./bin/test_http_server`
+- `./bin/test_http_dispatch`
+- `./bin/test_session_manager`
+- `./bin/test_sse_writer`
+- `./bin/test_sse_server`
+
+---
+
+### 4. 当前实现与后续优化
+#### 设计取舍
+
+**当前实现：**
+- `HttpContext` 已独立，但内部仍直接复用 `HttpRequestParser`
+- `HttpSession` 已从“自己维护 parser/buffer”收敛成“连接封装 + 委托入口”
+- `HttpServer` 主流程保持稳定，外部行为未发生破坏性变化
+
+**后续可优化：**
+- 把 `HttpContext` 继续演进为更完整的增量状态机
+- 为 chunked / streaming body 预留更细粒度状态
+- 让解析上下文承接更多请求级中间状态，而不是只保存 buffer
+
+---
+
+### 5. 阶段总结
+#### 一句话总结
+第五阶段的核心不是“解析能力变强了多少”，而是把“请求解析状态”从 `HttpSession` 里拆出来，形成独立模块边界。
+
+#### 当前结论
+到这里，HTTP 框架在结构上又向参考仓库靠近了一步：
+
+- 有了独立的 `HttpContext`
+- `HttpSession` 更轻
+- 后续继续做解析状态机或 HTTPS/SSL 时，改动会更集中
+
+### 6. 下一阶段
+#### 第六阶段会怎么做
+第六阶段建议继续在“工程化能力”上推进，优先级建议如下：
+
+1. 路由继续增强（分组 / 更强匹配）
+2. MiddlewareChain 继续演进，逐步统一前后置入口
+3. 模块目录边界继续整理
+4. 为 SSL/HTTPS 支持做结构准备
 
 ---
