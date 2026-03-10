@@ -44,6 +44,7 @@ set(SYLAR_SOURCES
     sylar/http/http_context.cc
     sylar/http/http_parser.cc
     sylar/http/http_session.cc
+    sylar/http/router.cc
     sylar/http/servlet.cc
     sylar/http/http_server.cc
     sylar/http/session.cc
@@ -125,6 +126,9 @@ target_link_libraries(test_http_parser sylar)
 
 add_executable(test_http_context tests/test_http_context.cc)
 target_link_libraries(test_http_context sylar)
+
+add_executable(test_http_router tests/test_http_router.cc)
+target_link_libraries(test_http_router sylar)
 
 add_executable(test_http_server tests/test_http_server.cc)
 target_link_libraries(test_http_server sylar)

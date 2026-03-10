@@ -3,6 +3,7 @@
 #include "sylar/log/logger.h"
 
 #include <cassert>
+#include <stdexcept>
 
 // 测试日志器：沿用 system logger，便于与其他测试输出统一。
 static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
@@ -249,6 +250,8 @@ void test_middlewares()
     int before_count = 0;
     // 统计 after 执行次数。
     int after_count = 0;
+    // 记录执行顺序。
+    std::string order;
 
     // 注册一个回调式中间件。
     dispatch->addMiddleware(sylar::http::Middleware::ptr(new sylar::http::CallbackMiddleware(
@@ -257,16 +260,10 @@ void test_middlewares()
         {
             // 记录 before 次数。
             ++before_count;
+            // 记录第一个中间件 before。
+            order += "A+";
             // 写入 before 标记头。
             rsp->setHeader("X-MW-Before", "1");
-            // 命中 /mw-blocked 时进行短路。
-            if (req->getPath() == "/mw-blocked")
-            {
-                // 构造统一 400 错误响应。
-                sylar::http::ApplyErrorResponse(rsp, sylar::http::HttpStatus::BAD_REQUEST, "Blocked", "blocked by middleware");
-                // 返回 false：阻止进入后续业务。
-                return false;
-            }
             // 其他请求放行。
             return true;
         },
@@ -275,8 +272,39 @@ void test_middlewares()
         {
             // 记录 after 次数。
             ++after_count;
+            // 记录第一个中间件 after。
+            order += "A-";
             // 写入 after 标记头。
             rsp->setHeader("X-MW-After", "1");
+        })));
+
+    // 注册第二个中间件，用于验证短路与 after 逆序。
+    dispatch->addMiddleware(sylar::http::Middleware::ptr(new sylar::http::CallbackMiddleware(
+        [&](sylar::http::HttpRequest::ptr req, sylar::http::HttpResponse::ptr rsp, sylar::http::HttpSession::ptr)
+        {
+            order += "B+";
+            if (req->getPath() == "/mw-blocked")
+            {
+                sylar::http::ApplyErrorResponse(rsp, sylar::http::HttpStatus::BAD_REQUEST, "Blocked", "blocked by middleware");
+                return false;
+            }
+            return true;
+        },
+        [&](sylar::http::HttpRequest::ptr, sylar::http::HttpResponse::ptr, sylar::http::HttpSession::ptr)
+        {
+            order += "B-";
+        })));
+
+    // 注册第三个中间件，短路时不应该进入也不应该执行 after。
+    dispatch->addMiddleware(sylar::http::Middleware::ptr(new sylar::http::CallbackMiddleware(
+        [&](sylar::http::HttpRequest::ptr, sylar::http::HttpResponse::ptr, sylar::http::HttpSession::ptr)
+        {
+            order += "C+";
+            return true;
+        },
+        [&](sylar::http::HttpRequest::ptr, sylar::http::HttpResponse::ptr, sylar::http::HttpSession::ptr)
+        {
+            order += "C-";
         })));
 
     // 注册业务路由 /mw-ok。
@@ -297,6 +325,8 @@ void test_middlewares()
         sylar::http::HttpResponse::ptr rsp(new sylar::http::HttpResponse());
         // 设置请求路径。
         req->setPath("/mw-ok");
+        // 清空顺序记录。
+        order.clear();
         // 分发处理。
         dispatch->handle(req, rsp, sylar::http::HttpSession::ptr());
         // 断言业务结果正确。
@@ -305,6 +335,8 @@ void test_middlewares()
         assert(rsp->getHeader("X-MW-Before") == "1");
         // 断言 after 已执行。
         assert(rsp->getHeader("X-MW-After") == "1");
+        // 断言 before 正序、after 逆序。
+        assert(order == "A+B+C+C-B-A-");
     }
 
     // 子场景B：被 middleware before 短路的路径 /mw-blocked。
@@ -315,18 +347,74 @@ void test_middlewares()
         sylar::http::HttpResponse::ptr rsp(new sylar::http::HttpResponse());
         // 设置请求路径。
         req->setPath("/mw-blocked");
+        // 清空顺序记录。
+        order.clear();
         // 分发处理。
         dispatch->handle(req, rsp, sylar::http::HttpSession::ptr());
         // 断言已被短路为 BAD_REQUEST。
         assert(rsp->getStatus() == sylar::http::HttpStatus::BAD_REQUEST);
         // 断言短路后 after 仍执行。
         assert(rsp->getHeader("X-MW-After") == "1");
+        // 断言只有已成功进入的中间件执行 after，且逆序退出。
+        assert(order == "A+B+A-");
     }
 
     // 断言 before 总共执行两次。
     assert(before_count == 2);
     // 断言 after 也执行两次（包括短路请求）。
     assert(after_count == 2);
+}
+
+void test_exception_cleanup()
+{
+    sylar::http::ServletDispatch::ptr dispatch(new sylar::http::ServletDispatch());
+    bool post_called = false;
+    std::string order;
+
+    dispatch->addMiddleware(sylar::http::Middleware::ptr(new sylar::http::CallbackMiddleware(
+        [&](sylar::http::HttpRequest::ptr, sylar::http::HttpResponse::ptr, sylar::http::HttpSession::ptr)
+        {
+            order += "M+";
+            return true;
+        },
+        [&](sylar::http::HttpRequest::ptr, sylar::http::HttpResponse::ptr, sylar::http::HttpSession::ptr)
+        {
+            order += "M-";
+        })));
+
+    dispatch->addPostInterceptor([&](sylar::http::HttpRequest::ptr,
+                                     sylar::http::HttpResponse::ptr rsp,
+                                     sylar::http::HttpSession::ptr)
+                                 {
+                                     post_called = true;
+                                     rsp->setHeader("X-Post", "1");
+                                 });
+
+    dispatch->addServlet("/throw", [](sylar::http::HttpRequest::ptr,
+                                       sylar::http::HttpResponse::ptr,
+                                       sylar::http::HttpSession::ptr) -> int32_t
+                         {
+                             throw std::runtime_error("dispatch exception");
+                         });
+
+    sylar::http::HttpRequest::ptr req(new sylar::http::HttpRequest());
+    sylar::http::HttpResponse::ptr rsp(new sylar::http::HttpResponse());
+    req->setPath("/throw");
+
+    bool caught = false;
+    try
+    {
+        dispatch->handle(req, rsp, sylar::http::HttpSession::ptr());
+    }
+    catch (const std::exception &)
+    {
+        caught = true;
+    }
+
+    assert(caught);
+    assert(post_called);
+    assert(rsp->getHeader("X-Post") == "1");
+    assert(order == "M+M-");
 }
 
 // 测试主函数：依次执行各子用例。
@@ -340,6 +428,8 @@ int main()
     test_interceptors();
     // 运行 middleware 链测试。
     test_middlewares();
+    // 运行异常收尾测试。
+    test_exception_cleanup();
     // 打印通过日志。
     SYLAR_LOG_INFO(g_logger) << "test_http_dispatch passed";
     // 返回 0 表示程序正常结束。

@@ -104,12 +104,17 @@ namespace sylar
         class MiddlewareChain
         {
         public:
+            struct ExecutionState
+            {
+                std::vector<Middleware::ptr> entered;
+            };
+
             // 注册一个中间件到链尾。
             void addMiddleware(Middleware::ptr middleware);
             // 顺序执行 before 链：任一返回 false 则整体返回 false。
-            bool processBefore(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session) const;
-            // 顺序执行 after 链：用于统一收尾。
-            void processAfter(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session) const;
+            bool processBefore(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session, ExecutionState &state) const;
+            // 按实际进入链路的中间件逆序执行 after。
+            void processAfter(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session, const ExecutionState &state) const;
 
         private:
             // 中间件容器：按注册顺序保存。

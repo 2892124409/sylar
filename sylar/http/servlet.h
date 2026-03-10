@@ -5,6 +5,7 @@
 #include "sylar/http/http_response.h"
 #include "sylar/http/http_session.h"
 #include "sylar/http/middleware.h"
+#include "sylar/http/router.h"
 
 #include <functional>
 #include <memory>
@@ -165,55 +166,17 @@ namespace sylar
             /// 根据请求匹配最终 Servlet，并在命中参数路由时写入 route params
             Servlet::ptr getMatched(HttpRequest::ptr request) const;
 
+            /// 返回完整路由匹配结果（供分发流程使用）
+            Router::RouteMatch getRouteMatch(HttpRequest::ptr request) const;
+
             /// 分发请求到匹配的 Servlet
             virtual int32_t handle(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session) override;
 
         private:
-            /**
-             * @brief 通配路由项
-             * @details 保存 pattern 与对应的 Servlet。
-             */
-            struct GlobItem
-            {
-                /// HTTP 方法约束；INVALID_METHOD 表示不限制方法
-                HttpMethod method;
-                /// 通配路由模式（例如 /api/*）
-                std::string pattern;
-                /// 与该通配模式绑定的处理器
-                Servlet::ptr servlet;
-            };
-
-            struct ParamItem
-            {
-                /// HTTP 方法约束；INVALID_METHOD 表示不限制方法
-                HttpMethod method;
-                /// 原始参数路由模式，例如 /user/:id
-                std::string pattern;
-                /// 预切分后的路由段，减少匹配时重复 split
-                std::vector<std::string> segments;
-                /// 与该参数路由绑定的处理器
-                Servlet::ptr servlet;
-            };
-
-            struct ExactItem
-            {
-                /// HTTP 方法约束；INVALID_METHOD 表示不限制方法
-                HttpMethod method;
-                /// 精确匹配路径
-                std::string uri;
-                /// 与该精确路径绑定的处理器
-                Servlet::ptr servlet;
-            };
-
-        private:
-            /// 精确匹配路由表：method + uri -> servlet
-            std::vector<ExactItem> m_exact;
-            /// 通配匹配路由表：pattern -> servlet
-            std::vector<GlobItem> m_globs;
-            /// 参数路由表：pattern segments -> servlet
-            std::vector<ParamItem> m_params;
             /// 兜底 Servlet（未命中任何路由时使用）
             Servlet::ptr m_default;
+            /// Router：统一管理路由注册与匹配。
+            Router m_router;
             /// 前置拦截器链
             std::vector<PreInterceptor> m_preInterceptors;
             /// 后置拦截器链

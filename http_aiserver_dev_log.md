@@ -8,6 +8,241 @@
 
 ---
 
+## 第六阶段：Router 独立化与 Middleware 执行模型收口
+
+### 0. 第六阶段改动类速览
+#### 0.1 `router.h / router.cc`
+- 新增 `Router`
+- 从 `ServletDispatch` 中拆出 exact / param / glob 路由注册与匹配逻辑
+- 新增 `RouteMatch` 结构化匹配结果
+
+#### 0.2 `servlet.h / servlet.cc`
+- `ServletDispatch` 不再直接持有三套路由表
+- 改为持有 `Router`
+- 分发逻辑聚焦为：middleware -> interceptor -> route match -> servlet handle
+
+#### 0.3 `middleware.h / middleware.cc`
+- 新增 `ExecutionState`
+- `before()` 进入过的中间件才会执行 `after()`
+- `after()` 改为逆序执行，更符合“入栈/出栈”语义
+
+#### 0.4 测试改动
+- 新增 `test_http_router`
+- 扩展 `test_http_dispatch`
+  - middleware 逆序收尾
+  - 短路时只收尾已进入中间件
+  - handler 抛异常时 post/after 仍执行
+
+### 1. 本阶段目标
+#### 模块作用
+第六阶段的核心，不是继续加新 HTTP 功能点，而是把“路由层”和“执行链层”继续工程化拆开。
+
+第五阶段结束后，`ServletDispatch` 仍然承担过多职责：
+
+- 路由注册
+- 路由匹配
+- 默认 404
+- middleware 编排
+- interceptor 编排
+- servlet 调用
+
+这意味着：
+
+- 路由能力和执行链耦合在一起
+- middleware 虽已落地，但执行语义还不够像真正的进入/退出栈
+- 后续若继续做组路由、更强路由或统一前后置入口，改动会继续堆在 `ServletDispatch`
+
+所以第六阶段的目标是：
+
+- 拆出独立 `Router`
+- 让 `ServletDispatch` 收敛为“编排层”
+- 把 middleware 的执行语义修正为更稳定的工程模型
+
+---
+
+### 2. 本阶段完成项
+#### 设计要点
+
+#### 1. Router 新增
+这一项是第六阶段的主线：把路由注册与匹配能力从 `ServletDispatch` 中抽到独立 `Router`。
+
+##### 解决的问题
+在抽离之前，`ServletDispatch` 内部直接维护：
+
+- `m_exact`
+- `m_params`
+- `m_globs`
+
+所有注册与匹配细节都写在 `servlet.cc` 中，导致类边界偏重。
+
+##### Router 的职责
+`Router` 现在统一负责：
+
+- exact 路由注册与匹配
+- param 路由注册与匹配
+- glob 路由注册与匹配
+- method-aware 匹配
+- 默认路由保存与返回
+
+##### RouteMatch 的意义
+第六阶段没有只返回一个 `Servlet::ptr`，而是引入了 `RouteMatch`：
+
+- `servlet`
+- `route_params`
+- `type`（exact / param / glob / default）
+
+这样做的好处是：
+
+- 路由匹配结果不再只是“命中了谁”
+- 还带有“命中时附带的结构化信息”
+- 为后续组路由、组级 middleware、命中类型统计预留了空间
+
+##### 当前取舍
+- 先保持优先级不变：`exact > param > glob > default`
+- 先不做正则路由 / 路由分组
+- 先把 Router 边界独立好，再扩展更强路由语法
+
+#### 2. ServletDispatch 收敛为编排层
+第六阶段后，`ServletDispatch` 的定位更明确了：
+
+- 它仍然是对外暴露的分发入口
+- 但它自己不再直接管理三套路由表
+- 注册行为统一委托给 `Router`
+- 匹配行为统一委托给 `Router`
+
+##### 当前主链路
+`ServletDispatch::handle(...)` 现在更像一个调度器，顺序为：
+
+1. middleware before
+2. pre interceptor
+3. `Router::match()`
+4. `servlet->handle(...)`
+5. post interceptor
+6. middleware after
+
+##### 兼容性策略
+- 旧的 `addServlet/addParamServlet/addGlobServlet` API 继续保留
+- `getMatched(const std::string&)` 继续保留兼容
+- 外部使用 `ServletDispatch` 的方式几乎不需要改
+
+这保证了：
+
+- 内部边界变了
+- 外部注册习惯不变
+
+#### 3. Middleware 执行模型修正
+这一项是第六阶段里很重要的语义修复。
+
+##### 旧问题
+第四阶段的 `MiddlewareChain::processAfter()` 会直接对“所有已注册 middleware”执行 `after()`。
+
+这会带来两个问题：
+
+- 某个 middleware 的 `before()` 还没执行到，就可能在短路后被执行 `after()`
+- `after()` 是正序执行，不符合更自然的“进入/退出栈”模型
+
+##### 第六阶段改法
+新增 `ExecutionState`，在 `processBefore()` 中记录“哪些 middleware 成功进入过”。
+
+然后 `processAfter()`：
+
+- 只对 `state.entered` 中的 middleware 执行 `after()`
+- 按逆序执行
+
+这样语义就更稳定：
+
+- 成功进入的才负责退出
+- 后进先出更符合嵌套收尾逻辑
+
+##### 当前取舍
+- 先不做 `next()` 洋葱模型
+- 先把现有 before/after 语义修正确保稳定
+
+#### 4. 异常路径的收尾补齐
+第六阶段还补了一个容易忽略但很重要的点：
+
+- 当 `servlet->handle(...)` 抛异常时
+- `ServletDispatch` 内部会先执行 post interceptor 与 middleware after
+- 然后再把异常继续抛给 `HttpServer`
+
+这样 `HttpServer` 依然负责统一把异常转成 500，
+而 `ServletDispatch` 负责保证“分发层的收尾逻辑不因异常丢失”。
+
+这让执行链更接近工程里常见的 finally 语义。
+
+---
+
+### 3. 测试与验证
+#### 当前验证结果
+第六阶段新增与增强测试覆盖：
+
+- `test_http_router`
+  - 验证 exact/param/glob 优先级
+  - 验证 method-aware 路由区分
+
+- `test_http_dispatch`
+  - 验证 middleware after 逆序执行
+  - 验证短路后只收尾已进入中间件
+  - 验证 handler 抛异常时 post/after 仍执行
+  - 验证 interceptor 兼容路径未回归
+
+回归通过：
+
+- `./bin/test_http_router`
+- `./bin/test_http_dispatch`
+- `./bin/test_http_server`
+- `./bin/test_http_context`
+- `./bin/test_http_parser`
+- `./bin/test_session_manager`
+- `./bin/test_sse_writer`
+- `./bin/test_sse_server`
+
+---
+
+### 4. 当前实现与后续优化
+#### 设计取舍
+
+**当前实现：**
+- `Router` 已独立，但仍由 `ServletDispatch` 对外承载 API
+- interceptor 仍保留，作为兼容层继续存在
+- middleware 执行模型已更合理，但仍是轻量 before/after 模型
+
+**后续可优化：**
+- 继续做 route group / group middleware
+- 进一步淡化 interceptor，让 middleware 成为唯一主入口
+- 若需要更强表达能力，再引入正则或分组 DSL
+
+---
+
+### 5. 阶段总结
+#### 一句话总结
+第六阶段的核心，是把 `ServletDispatch` 从“路由与执行链全都自己管”收敛为“编排层”，同时让 middleware 的执行语义更符合真正的进入/退出模型。
+
+#### 当前结论
+到这里，HTTP 框架已经进一步向参考仓库的 HTTP 层结构靠拢：
+
+- 有了独立 `Router`
+- `ServletDispatch` 更聚焦编排职责
+- middleware 行为更稳定、可预期
+
+### 6. 下一阶段
+#### 第七阶段会怎么做
+第七阶段建议完成 HTTP 框架层的最后一轮工程化收尾，优先级建议如下：
+
+1. SSL/HTTPS 支持
+2. 模块目录边界继续整理
+3. route group / group middleware 视需要补充
+4. 对照参考仓库做 HTTP 层级别的最终查缺补漏
+
+到第七阶段完成时，目标就是达到“HTTP 框架层基本对齐参考仓库”：
+
+- 模块边界对齐
+- 核心能力对齐
+- 工程结构接近
+- 但不追求逐文件逐接口复制
+
+---
+
 ## 第一阶段：HTTP 核心框架骨架
 
 ### 0. `http.h / http.cc`
