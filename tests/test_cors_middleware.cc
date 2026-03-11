@@ -1,6 +1,6 @@
-#include "sylar/http/middleware/cors/cors_middleware.h"
-#include "sylar/http/servlet.h"
-#include "sylar/log/logger.h"
+#include "http/middleware/cors/cors_middleware.h"
+#include "http/router/servlet.h"
+#include "log/logger.h"
 
 #include <cassert>
 #include <string>

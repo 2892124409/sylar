@@ -7,57 +7,59 @@ set(CMAKE_CXX_STANDARD 11)
 # 编译选项
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O0 -g -Wall -rdynamic -fPIC")
 
-# 包含项目根目录
+# 包含项目根目录与源码根目录
 include_directories(.)
+include_directories(src)
+include_directories(src/base)
 
 # 所有的核心模块源文件
 set(SYLAR_SOURCES
-    sylar/log/log_level.cc
-    sylar/log/log_formatter.cc
-    sylar/log/log_appender.cc
-    sylar/log/logger.cc
-    sylar/base/util.cc
-    sylar/base/config.cc
-    sylar/concurrency/mutex/semaphore.cc
-    sylar/concurrency/thread.cc
-    sylar/memorypool/memory_pool.cpp
-    sylar/fiber/fiber.cc
-    sylar/fiber/fiber_framework_config.cc
-    sylar/fiber/fiber_pool.cc
-    sylar/fiber/scheduler.cc
-    sylar/fiber/iomanager.cc
-    sylar/fiber/timer.cc
-    sylar/fiber/fd_manager.cc
-    sylar/fiber/hook.cc
-    sylar/net/address.cc
-    sylar/net/socket.cc
-    sylar/net/bytearray.cc
-    sylar/net/stream.cc
-    sylar/net/socket_stream.cc
-    sylar/net/tcp_server.cc
-    sylar/net/udp_server.cc
-    sylar/http/http.cc
-    sylar/http/http_request.cc
-    sylar/http/http_response.cc
-    sylar/http/http_framework_config.cc
-    sylar/http/http_error.cc
-    sylar/http/ssl/ssl_config.cc
-    sylar/http/ssl/ssl_context.cc
-    sylar/http/ssl/ssl_socket.cc
-    sylar/http/ssl/ssl_socket_stream.cc
-    sylar/http/http_context.cc
-    sylar/http/http_parser.cc
-    sylar/http/http_session.cc
-    sylar/http/router.cc
-    sylar/http/servlet.cc
-    sylar/http/http_server.cc
-    sylar/http/session.cc
-    sylar/http/session_storage.cc
-    sylar/http/session_manager.cc
-    sylar/http/middleware.cc
-    sylar/http/middleware/cors/cors_config.cc
-    sylar/http/middleware/cors/cors_middleware.cc
-    sylar/http/sse.cc
+    src/base/log/log_level.cc
+    src/base/log/log_formatter.cc
+    src/base/log/log_appender.cc
+    src/base/log/logger.cc
+    src/sylar/base/util.cc
+    src/base/config/config.cc
+    src/sylar/concurrency/mutex/semaphore.cc
+    src/sylar/concurrency/thread.cc
+    src/base/memorypool/memory_pool.cpp
+    src/sylar/fiber/fiber.cc
+    src/sylar/fiber/fiber_framework_config.cc
+    src/sylar/fiber/fiber_pool.cc
+    src/sylar/fiber/scheduler.cc
+    src/sylar/fiber/iomanager.cc
+    src/sylar/fiber/timer.cc
+    src/sylar/fiber/fd_manager.cc
+    src/sylar/fiber/hook.cc
+    src/sylar/net/address.cc
+    src/sylar/net/socket.cc
+    src/sylar/net/bytearray.cc
+    src/sylar/net/stream.cc
+    src/sylar/net/socket_stream.cc
+    src/sylar/net/tcp_server.cc
+    src/sylar/net/udp_server.cc
+    src/http/core/http.cc
+    src/http/core/http_request.cc
+    src/http/core/http_response.cc
+    src/http/core/http_framework_config.cc
+    src/http/core/http_error.cc
+    src/http/ssl/ssl_config.cc
+    src/http/ssl/ssl_context.cc
+    src/http/ssl/ssl_socket.cc
+    src/http/ssl/ssl_socket_stream.cc
+    src/http/core/http_context.cc
+    src/http/core/http_parser.cc
+    src/http/server/http_session.cc
+    src/http/router/router.cc
+    src/http/router/servlet.cc
+    src/http/server/http_server.cc
+    src/http/session/session.cc
+    src/http/session/session_storage.cc
+    src/http/session/session_manager.cc
+    src/http/middleware/middleware.cc
+    src/http/middleware/cors/cors_config.cc
+    src/http/middleware/cors/cors_middleware.cc
+    src/http/stream/sse.cc
 )
 
 # 生成共享库 libsylar.so

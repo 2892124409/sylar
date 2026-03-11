@@ -3,9 +3,9 @@
  * @brief V1 线程绑定共享栈最小实验测试（Scheduler 单线程路径）
  */
 
-#include "sylar/base/config.h"
+#include "config/config.h"
 #include "sylar/fiber/scheduler.h"
-#include "sylar/log/logger.h"
+#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>

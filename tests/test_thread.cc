@@ -6,7 +6,7 @@
  */
 #include "sylar/concurrency/thread.h"
 #include "sylar/concurrency/mutex/mutex.h"
-#include "sylar/log/logger.h"
+#include "log/logger.h"
 #include <vector>
 
 int count = 0;

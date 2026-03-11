@@ -6,8 +6,8 @@
  */
 #include "sylar/fiber/fiber_pool.h"
 #include "sylar/fiber/scheduler.h"
-#include "sylar/base/config.h"
-#include "sylar/log/logger.h"
+#include "config/config.h"
+#include "log/logger.h"
 #include <unistd.h>
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();

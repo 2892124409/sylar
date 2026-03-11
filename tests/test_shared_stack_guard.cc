@@ -3,10 +3,10 @@
  * @brief 未验证模式下共享栈自动回退测试
  */
 
-#include "sylar/base/config.h"
+#include "config/config.h"
 #include "sylar/fiber/fiber.h"
 #include "sylar/fiber/scheduler.h"
-#include "sylar/log/logger.h"
+#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>

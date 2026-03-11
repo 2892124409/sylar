@@ -3,9 +3,9 @@
  * @brief V1 共享栈深栈与多次切换压力小测试
  */
 
-#include "sylar/base/config.h"
+#include "config/config.h"
 #include "sylar/fiber/scheduler.h"
-#include "sylar/log/logger.h"
+#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>

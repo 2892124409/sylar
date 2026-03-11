@@ -1,6 +1,6 @@
-#include "sylar/http/session_manager.h"
+#include "http/session/session_manager.h"
 #include "sylar/fiber/iomanager.h"
-#include "sylar/log/logger.h"
+#include "log/logger.h"
 
 #include <assert.h>
 #include <atomic>

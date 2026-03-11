@@ -1,5 +1,5 @@
-#include "sylar/base/config.h"
-#include "sylar/log/logger.h"
+#include "config/config.h"
+#include "log/logger.h"
 #include <iostream>
 #include <yaml-cpp/yaml.h>
 

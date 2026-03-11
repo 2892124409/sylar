@@ -1,6 +1,6 @@
-#include "sylar/http/servlet.h"
-#include "sylar/http/http_error.h"
-#include "sylar/log/logger.h"
+#include "http/router/servlet.h"
+#include "http/core/http_error.h"
+#include "log/logger.h"
 
 #include <cassert>
 #include <stdexcept>

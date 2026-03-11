@@ -1,5 +1,5 @@
 #include <iostream>
-#include "../sylar/log/logger.h"
+#include "log/logger.h"
 #include "../sylar/base/util.h"
 
 int main(int argc, char **argv)

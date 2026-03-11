@@ -6,7 +6,7 @@
  */
 
 #include "sylar/base/endian.h"
-#include "sylar/log/logger.h"
+#include "log/logger.h"
 #include <iostream>
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();

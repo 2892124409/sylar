@@ -5,7 +5,7 @@
 
 #include "sylar/fiber/save_buffer_allocator.h"
 #include "sylar/fiber/thread_local_stack.h"
-#include "sylar/memorypool/memory_pool.h"
+#include "memorypool/memory_pool.h"
 
 #include <cassert>
 #include <cstring>

@@ -3,11 +3,11 @@
  * @brief V1 在 use_caller=false worker-only 模式下的共享栈测试
  */
 
-#include "sylar/base/config.h"
+#include "config/config.h"
 #include "sylar/base/util.h"
 #include "sylar/fiber/fiber.h"
 #include "sylar/fiber/scheduler.h"
-#include "sylar/log/logger.h"
+#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>
