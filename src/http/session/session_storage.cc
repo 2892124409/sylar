@@ -23,7 +23,7 @@ namespace sylar
             // 对内存会话表加锁，保证并发读一致性。
             Mutex::Lock lock(m_mutex);
             // 在 map 中查找指定 SID。
-            std::map<std::string, Session::ptr>::iterator it = m_sessions.find(session_id);
+            std::unordered_map<std::string, Session::ptr>::iterator it = m_sessions.find(session_id);
             // 命中返回对象，未命中返回空指针。
             return it == m_sessions.end() ? Session::ptr() : it->second;
         }
@@ -45,7 +45,7 @@ namespace sylar
             // 记录本次清理掉的会话数量。
             size_t count = 0;
             // 遍历内存会话表，逐个判断是否过期。
-            for (std::map<std::string, Session::ptr>::iterator it = m_sessions.begin(); it != m_sessions.end();)
+            for (std::unordered_map<std::string, Session::ptr>::iterator it = m_sessions.begin(); it != m_sessions.end();)
             {
                 // 若会话已过期，则从 map 删除。
                 if (it->second->isExpired(now_ms))

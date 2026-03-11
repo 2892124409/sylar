@@ -106,7 +106,8 @@ namespace sylar
         public:
             struct ExecutionState
             {
-                std::vector<Middleware::ptr> entered;
+                // 记录 before 阶段成功进入的中间件数量（替代 vector 避免每请求堆分配）。
+                size_t enteredCount = 0;
             };
 
             // 注册一个中间件到链尾。

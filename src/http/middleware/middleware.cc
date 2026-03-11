@@ -18,7 +18,7 @@ namespace sylar
         // 执行 before 链：任一中间件返回 false 则立刻短路。
         bool MiddlewareChain::processBefore(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session, ExecutionState &state) const
         {
-            state.entered.clear();
+            state.enteredCount = 0;
             // 按注册顺序依次调用每个中间件的 before。
             for (size_t i = 0; i < m_middlewares.size(); ++i)
             {
@@ -28,7 +28,7 @@ namespace sylar
                     // 返回 false 告知上层主流程应被短路。
                     return false;
                 }
-                state.entered.push_back(m_middlewares[i]);
+                ++state.enteredCount;
             }
             // 全部 before 都通过，返回 true 继续主流程。
             return true;
@@ -37,11 +37,11 @@ namespace sylar
         // 执行 after 链：只对成功进入 before 的中间件做逆序收尾。
         void MiddlewareChain::processAfter(HttpRequest::ptr request, HttpResponse::ptr response, HttpSession::ptr session, const ExecutionState &state) const
         {
-            // 逆序执行更接近“入栈/出栈”的收尾语义。
-            for (size_t i = state.entered.size(); i > 0; --i)
+            // 逆序执行更接近”入栈/出栈”的收尾语义。
+            for (size_t i = state.enteredCount; i > 0; --i)
             {
                 // 调用当前已进入中间件的 after。
-                state.entered[i - 1]->after(request, response, session);
+                m_middlewares[i - 1]->after(request, response, session);
             }
         }
 

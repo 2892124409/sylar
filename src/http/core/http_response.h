@@ -3,9 +3,9 @@
 
 #include "http/core/http.h"
 
-#include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace sylar
@@ -30,7 +30,7 @@ namespace sylar
         {
         public:
             typedef std::shared_ptr<HttpResponse> ptr;
-            typedef std::map<std::string, std::string> MapType;
+            typedef std::unordered_map<std::string, std::string> MapType;
 
             /**
              * @brief 构造默认响应

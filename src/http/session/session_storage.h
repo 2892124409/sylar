@@ -8,8 +8,8 @@
 // 引入互斥锁，供内存存储实现做并发保护。
 #include "sylar/concurrency/mutex/mutex.h"
 
-// 引入 std::map，作为内存存储的底层容器。
-#include <map>
+// 引入 std::unordered_map，作为内存存储的底层容器。
+#include <unordered_map>
 // 引入 std::shared_ptr 等智能指针能力。
 #include <memory>
 // 引入 std::string，作为 Session ID 的字符串类型。
@@ -61,7 +61,7 @@ namespace sylar
             // 互斥锁：保护 m_sessions 的并发读写。
             Mutex m_mutex;
             // 内存会话表：key 为 SID，value 为 Session 对象。
-            std::map<std::string, Session::ptr> m_sessions;
+            std::unordered_map<std::string, Session::ptr> m_sessions;
         };
 
     } // namespace http

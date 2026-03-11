@@ -3,9 +3,9 @@
 
 #include "http/core/http.h"
 
-#include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 namespace sylar
 {
@@ -32,7 +32,7 @@ namespace sylar
         {
         public:
             typedef std::shared_ptr<HttpRequest> ptr;
-            typedef std::map<std::string, std::string> MapType;
+            typedef std::unordered_map<std::string, std::string> MapType;
 
             /**
              * @brief 构造一个默认请求对象

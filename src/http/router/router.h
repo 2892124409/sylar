@@ -6,8 +6,8 @@
 // 引入 HttpRequest/HttpMethod 等 HTTP 基础类型定义。
 #include "http/core/http_request.h"
 
-// 引入 std::map，用于保存路由参数 key-value。
-#include <map>
+// 引入 std::unordered_map，用于保存路由参数 key-value。
+#include <unordered_map>
 // 引入智能指针能力。
 #include <memory>
 // 引入 std::string 字符串类型。
@@ -32,7 +32,7 @@ namespace sylar
             // Router 智能指针别名。
             typedef std::shared_ptr<Router> ptr;
             // 路由参数映射类型，例如 :id -> 42。
-            typedef std::map<std::string, std::string> ParamsMap;
+            typedef std::unordered_map<std::string, std::string> ParamsMap;
 
             // RouteMatch：一次匹配的结构化结果。
             struct RouteMatch
