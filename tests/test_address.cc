@@ -3,7 +3,7 @@
 #include "sylar/base/endian.h"
 #include <iostream>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 // ============================================================================
 // IPv4Address 测试

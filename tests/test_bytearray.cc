@@ -8,7 +8,7 @@
 #include <iostream>
 #include <cassert>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 // ============================================================================
 // 固定长度类型测试

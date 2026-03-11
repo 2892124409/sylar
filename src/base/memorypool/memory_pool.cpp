@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace sylar
+namespace base
 {
 
     /**
@@ -417,4 +417,4 @@ namespace sylar
         pools[index]->deallocate(ptr);
     }
 
-} // namespace sylar
+} // namespace base

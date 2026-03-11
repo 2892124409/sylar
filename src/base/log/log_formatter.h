@@ -7,7 +7,7 @@
 #include <iostream> // for std::ostream
 #include "log_event.h"
 
-namespace sylar
+namespace base
 {
 
     /**
@@ -87,6 +87,6 @@ namespace sylar
         bool m_error = false;                 // 是否解析出错
     };
 
-} // namespace sylar
+} // namespace base
 
 #endif

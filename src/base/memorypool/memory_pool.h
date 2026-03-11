@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-namespace sylar
+namespace base
 {
 
     /**
@@ -209,6 +209,6 @@ namespace sylar
         }
     }
 
-} // namespace sylar
+} // namespace base
 
 #endif // SYLAR_MEMORY_POOL_H

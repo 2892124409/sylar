@@ -10,18 +10,18 @@
 #include <string>
 #include <vector>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 int main()
 {
     sylar::set_hook_enable(true);
     sylar::IOManager iom(2, true, "sse_test");
-    sylar::http::HttpServer::ptr server(new sylar::http::HttpServer(&iom, &iom));
-    server->getServletDispatch()->addServlet("/events", [](sylar::http::HttpRequest::ptr,
-                                                           sylar::http::HttpResponse::ptr rsp,
-                                                           sylar::http::HttpSession::ptr session)
+    http::HttpServer::ptr server(new http::HttpServer(&iom, &iom));
+    server->getServletDispatch()->addServlet("/events", [](http::HttpRequest::ptr,
+                                                           http::HttpResponse::ptr rsp,
+                                                           http::HttpSession::ptr session)
                                              {
-        rsp->setStatus(sylar::http::HttpStatus::OK);
+        rsp->setStatus(http::HttpStatus::OK);
         rsp->setKeepAlive(false);
         rsp->setStream(true);
         rsp->setHeader("Content-Type", "text/event-stream");
@@ -32,7 +32,7 @@ int main()
             return -1;
         }
 
-        sylar::http::SSEWriter writer(session);
+        http::SSEWriter writer(session);
         if (writer.sendComment("ping") <= 0) {
             return -1;
         }
@@ -80,6 +80,6 @@ int main()
         sleep(2);
         server->stop(); });
 
-    SYLAR_LOG_INFO(g_logger) << "test_sse_server passed";
+    BASE_LOG_INFO(g_logger) << "test_sse_server passed";
     return 0;
 }

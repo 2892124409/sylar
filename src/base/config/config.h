@@ -17,7 +17,7 @@
 #include "log/logger.h"
 #include "sylar/base/util.h"
 
-namespace sylar
+namespace base
 {
 
     /**
@@ -458,7 +458,7 @@ namespace sylar
          * 作用：当配置值发生变化时，通知所有注册了该事件的代码进行热更新处理
          */
         std::map<uint64_t, on_change_cb> m_cbs;
-        typedef std::mutex MutexType; // 这里的 MutexType 其实还没定义，我们需要引入mutex头文件或者使用 sylar::Logger::MutexType
+        typedef std::mutex MutexType; // 这里的 MutexType 其实还没定义，我们需要引入mutex头文件或者使用 base::Logger::MutexType
         MutexType m_mutex;
     };
 

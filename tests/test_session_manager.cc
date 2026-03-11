@@ -9,21 +9,21 @@
 #include <vector>
 
 // 测试日志器：复用 system logger，保持测试输出风格一致。
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 // 用例1：验证 create/get 的基础闭环。
 void test_create_and_get() {
     // 创建 SessionManager，最大非活跃时间设为 1000ms。
-    sylar::http::SessionManager::ptr manager(new sylar::http::SessionManager(1000));
+    http::SessionManager::ptr manager(new http::SessionManager(1000));
     // 创建一个新会话。
-    sylar::http::Session::ptr session = manager->create();
+    http::Session::ptr session = manager->create();
     // 断言会话创建成功。
     assert(session);
     // 设置会话属性 user=alice。
     session->set("user", "alice");
 
     // 按 SID 取回会话。
-    sylar::http::Session::ptr loaded = manager->get(session->getId());
+    http::Session::ptr loaded = manager->get(session->getId());
     // 断言能取回。
     assert(loaded);
     // 断言 SID 一致。
@@ -35,27 +35,27 @@ void test_create_and_get() {
 // 用例2：验证 getOrCreate 的“命中复用/未命中新建”语义。
 void test_get_or_create_reuse() {
     // 创建 SessionManager。
-    sylar::http::SessionManager::ptr manager(new sylar::http::SessionManager(1000));
+    http::SessionManager::ptr manager(new http::SessionManager(1000));
 
     // 第一次请求：没有 SID，预期新建会话。
-    sylar::http::HttpRequest::ptr request1(new sylar::http::HttpRequest());
+    http::HttpRequest::ptr request1(new http::HttpRequest());
     // 第一次请求对应响应对象。
-    sylar::http::HttpResponse::ptr response1(new sylar::http::HttpResponse());
+    http::HttpResponse::ptr response1(new http::HttpResponse());
     // 调用 getOrCreate，预期创建并下发 SID cookie。
-    sylar::http::Session::ptr session1 = manager->getOrCreate(request1, response1);
+    http::Session::ptr session1 = manager->getOrCreate(request1, response1);
     // 断言 session 创建成功。
     assert(session1);
     // 断言响应里包含 Set-Cookie。
     assert(!response1->getSetCookies().empty());
 
     // 第二次请求：携带第一次返回的 SID，预期复用旧会话。
-    sylar::http::HttpRequest::ptr request2(new sylar::http::HttpRequest());
+    http::HttpRequest::ptr request2(new http::HttpRequest());
     // 第二次请求对应响应对象。
-    sylar::http::HttpResponse::ptr response2(new sylar::http::HttpResponse());
+    http::HttpResponse::ptr response2(new http::HttpResponse());
     // 在请求 cookie 中写入 SID。
     request2->setCookie("SID", session1->getId());
     // 再次调用 getOrCreate，预期命中旧会话。
-    sylar::http::Session::ptr session2 = manager->getOrCreate(request2, response2);
+    http::Session::ptr session2 = manager->getOrCreate(request2, response2);
     // 断言会话存在。
     assert(session2);
     // 断言两次返回 SID 相同（复用成功）。
@@ -67,11 +67,11 @@ void test_get_or_create_reuse() {
 // 用例3：验证会话过期与 sweepExpired 行为。
 void test_expire_and_sweep() {
     // 创建 SessionManager，过期时间设置得较短（20ms）以便测试。
-    sylar::http::SessionManager::ptr manager(new sylar::http::SessionManager(20));
+    http::SessionManager::ptr manager(new http::SessionManager(20));
     // 连续创建两个会话。
-    sylar::http::Session::ptr session1 = manager->create();
+    http::Session::ptr session1 = manager->create();
     // 创建第二个会话。
-    sylar::http::Session::ptr session2 = manager->create();
+    http::Session::ptr session2 = manager->create();
     // 断言创建成功。
     assert(session1 && session2);
 
@@ -93,9 +93,9 @@ void test_timer_sweep() {
     // 创建单线程 IOManager，作为 TimerManager 使用。
     sylar::IOManager iom(1, false, "session_timer_test");
     // 创建 SessionManager，过期时间 30ms。
-    sylar::http::SessionManager::ptr manager(new sylar::http::SessionManager(30));
+    http::SessionManager::ptr manager(new http::SessionManager(30));
     // 创建一个会话。
-    sylar::http::Session::ptr session = manager->create();
+    http::Session::ptr session = manager->create();
     // 断言创建成功。
     assert(session);
     // 启动周期清理定时器（每 10ms 一次）。
@@ -117,7 +117,7 @@ void test_timer_sweep() {
 // 用例5：验证并发 create/get 的线程安全基础行为。
 void test_concurrent_access() {
     // 创建 SessionManager。
-    sylar::http::SessionManager::ptr manager(new sylar::http::SessionManager(1000));
+    http::SessionManager::ptr manager(new http::SessionManager(1000));
     // 原子计数器：统计创建总数。
     std::atomic<int> created(0);
     // 线程容器。
@@ -130,7 +130,7 @@ void test_concurrent_access() {
             // 每个线程循环 100 次。
             for (int j = 0; j < 100; ++j) {
                 // 创建会话。
-                sylar::http::Session::ptr session = manager->create();
+                http::Session::ptr session = manager->create();
                 // 断言创建成功。
                 assert(session);
                 // 原子递增创建计数。
@@ -154,11 +154,11 @@ void test_concurrent_access() {
 // 用例6：验证第四阶段新增的 SessionStorage 注入能力。
 void test_session_storage_injection() {
     // 构造默认内存存储实现。
-    sylar::http::SessionStorage::ptr storage(new sylar::http::MemorySessionStorage());
+    http::SessionStorage::ptr storage(new http::MemorySessionStorage());
     // 将 storage 注入 SessionManager。
-    sylar::http::SessionManager::ptr manager(new sylar::http::SessionManager(1000, storage));
+    http::SessionManager::ptr manager(new http::SessionManager(1000, storage));
     // 通过 manager 创建会话。
-    sylar::http::Session::ptr session = manager->create();
+    http::Session::ptr session = manager->create();
     // 断言创建成功。
     assert(session);
     // 设置一个业务属性 role=admin。
@@ -167,7 +167,7 @@ void test_session_storage_injection() {
     storage->save(session);
 
     // 直接从 storage 加载会话。
-    sylar::http::Session::ptr loaded = storage->load(session->getId());
+    http::Session::ptr loaded = storage->load(session->getId());
     // 断言可加载。
     assert(loaded);
     // 断言属性值正确。
@@ -193,7 +193,7 @@ int main() {
     // 运行 SessionStorage 注入测试。
     test_session_storage_injection();
     // 打印测试通过日志。
-    SYLAR_LOG_INFO(g_logger) << "test_session_manager passed";
+    BASE_LOG_INFO(g_logger) << "test_session_manager passed";
     // 返回 0 表示程序正常退出。
     return 0;
 }

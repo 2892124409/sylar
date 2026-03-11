@@ -1,7 +1,7 @@
 #include "logger.h"
 #include <iostream>
 
-namespace sylar
+namespace base
 {
 
     // ======================= LogEventWrap 实现 =======================
@@ -59,7 +59,7 @@ namespace sylar
 
     void Logger::setFormatter(const std::string &val)
     {
-        sylar::LogFormatter::ptr new_val(new sylar::LogFormatter(val));
+        base::LogFormatter::ptr new_val(new base::LogFormatter(val));
         if (new_val->isError())
         {
             std::cout << "Logger setFormatter name=" << m_name
@@ -199,4 +199,4 @@ namespace sylar
         // 预留接口，未来用于从配置文件加载日志器配置
     }
 
-} // namespace sylar
+} // namespace base

@@ -20,7 +20,7 @@
 // 全局日志器
 // ============================================================================
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 // ============================================================================
 // EchoUdpServer - 继承 UdpServer 实现 Echo 服务

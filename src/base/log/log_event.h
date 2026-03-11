@@ -7,7 +7,7 @@
 #include <sstream>
 #include "log_level.h"
 
-namespace sylar
+namespace base
 {
 
     class Logger; // 前置声明
@@ -75,6 +75,6 @@ namespace sylar
         LogLevel::Level m_level;          // 日志级别
     };
 
-} // namespace sylar
+} // namespace base
 
 #endif

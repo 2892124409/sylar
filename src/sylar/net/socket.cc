@@ -12,7 +12,7 @@
 namespace sylar
 {
 
-    static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+    static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
     // ============================================================================
     // Socket 静态工厂方法实现
@@ -109,7 +109,7 @@ namespace sylar
         m_sock = socket(m_family, m_type, m_protocol);
         if (m_sock < 0)
         {
-            SYLAR_LOG_ERROR(g_logger) << "socket(" << m_family << ", "
+            BASE_LOG_ERROR(g_logger) << "socket(" << m_family << ", "
                                       << m_type << ", " << m_protocol << ") fail "
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
@@ -192,7 +192,7 @@ namespace sylar
     {
         if (::getsockopt(m_sock, level, option, result, len))
         {
-            SYLAR_LOG_DEBUG(g_logger) << "getsockopt sock=" << m_sock
+            BASE_LOG_DEBUG(g_logger) << "getsockopt sock=" << m_sock
                                       << " level=" << level
                                       << " option=" << option
                                       << " errno=" << errno
@@ -206,7 +206,7 @@ namespace sylar
     {
         if (::setsockopt(m_sock, level, option, result, len))
         {
-            SYLAR_LOG_DEBUG(g_logger) << "setsockopt sock=" << m_sock
+            BASE_LOG_DEBUG(g_logger) << "setsockopt sock=" << m_sock
                                       << " level=" << level
                                       << " option=" << option
                                       << " errno=" << errno
@@ -228,7 +228,7 @@ namespace sylar
         int client_sock = ::accept(m_sock, (sockaddr *)&addr, &len);
         if (client_sock < 0)
         {
-            SYLAR_LOG_ERROR(g_logger) << "accept sock=" << m_sock
+            BASE_LOG_ERROR(g_logger) << "accept sock=" << m_sock
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
             return nullptr;
@@ -256,7 +256,7 @@ namespace sylar
         }
         if (::bind(m_sock, addr->getAddr(), addr->getAddrLen()))
         {
-            SYLAR_LOG_ERROR(g_logger) << "bind sock=" << m_sock
+            BASE_LOG_ERROR(g_logger) << "bind sock=" << m_sock
                                       << " addr=" << addr->toString()
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
@@ -282,7 +282,7 @@ namespace sylar
         }
         if (::connect(m_sock, addr->getAddr(), addr->getAddrLen()))
         {
-            SYLAR_LOG_ERROR(g_logger) << "connect sock=" << m_sock
+            BASE_LOG_ERROR(g_logger) << "connect sock=" << m_sock
                                       << " addr=" << addr->toString()
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
@@ -311,7 +311,7 @@ namespace sylar
         }
         if (::listen(m_sock, backlog))
         {
-            SYLAR_LOG_ERROR(g_logger) << "listen sock=" << m_sock
+            BASE_LOG_ERROR(g_logger) << "listen sock=" << m_sock
                                       << " backlog=" << backlog
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
@@ -331,7 +331,7 @@ namespace sylar
 
         if (::close(m_sock) != 0)
         {
-            SYLAR_LOG_ERROR(g_logger) << "close sock=" << m_sock
+            BASE_LOG_ERROR(g_logger) << "close sock=" << m_sock
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
             return false;
@@ -481,7 +481,7 @@ namespace sylar
         socklen_t len = sizeof(addr);
         if (getsockname(m_sock, (sockaddr *)&addr, &len))
         {
-            SYLAR_LOG_ERROR(g_logger) << "getsockname sock=" << m_sock
+            BASE_LOG_ERROR(g_logger) << "getsockname sock=" << m_sock
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
             return Address::ptr();

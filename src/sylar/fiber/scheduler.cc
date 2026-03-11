@@ -15,7 +15,7 @@
 namespace sylar
 {
 
-    static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+    static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
     /// 当前线程的调度器指针（TLS）
     static thread_local Scheduler *t_scheduler = nullptr;
@@ -30,7 +30,7 @@ namespace sylar
     Scheduler::Scheduler(size_t threads, bool use_caller, const std::string &name)
         : m_name(name)
     {
-        SYLAR_ASSERT(threads > 0);
+        BASE_ASSERT(threads > 0);
         m_stopping = true;
 
         if (use_caller)
@@ -40,7 +40,7 @@ namespace sylar
             --threads; // 总线程数减1，因为当前线程也要占一个名额
 
             // 2. 一个线程只能有一个调度器
-            SYLAR_ASSERT(GetThis() == nullptr);
+            BASE_ASSERT(GetThis() == nullptr);
             t_scheduler = this;
 
             /**
@@ -68,7 +68,7 @@ namespace sylar
 
     Scheduler::~Scheduler()
     {
-        SYLAR_ASSERT(m_stopping);
+        BASE_ASSERT(m_stopping);
         if (GetThis() == this)
         {
             t_scheduler = nullptr;
@@ -98,7 +98,7 @@ namespace sylar
             return;
         }
         m_stopping = false;
-        SYLAR_ASSERT(m_threads.empty());
+        BASE_ASSERT(m_threads.empty());
 
         // 创建线程池
         m_threads.resize(m_threadCount);
@@ -117,7 +117,7 @@ namespace sylar
         // 如果是 use_caller 模式，且只有主线程在工作
         if (m_rootFiber && m_threadCount == 0 && (m_rootFiber->getState() == Fiber::TERM || m_rootFiber->getState() == Fiber::INIT))
         {
-            SYLAR_LOG_INFO(g_logger) << this << " stopped";
+            BASE_LOG_INFO(g_logger) << this << " stopped";
             m_stopping = true;
 
             if (stopping())
@@ -129,11 +129,11 @@ namespace sylar
         // 检查是否有资格调 stop
         if (m_rootThread != -1)
         {
-            SYLAR_ASSERT(GetThis() == this);
+            BASE_ASSERT(GetThis() == this);
         }
         else
         {
-            SYLAR_ASSERT(GetThis() != this);
+            BASE_ASSERT(GetThis() != this);
         }
 
         m_stopping = true;
@@ -175,7 +175,7 @@ namespace sylar
 
     void Scheduler::tickle()
     {
-        SYLAR_LOG_INFO(g_logger) << "tickle";
+        BASE_LOG_INFO(g_logger) << "tickle";
     }
 
     bool Scheduler::stopping()
@@ -187,7 +187,7 @@ namespace sylar
 
     void Scheduler::idle()
     {
-        SYLAR_LOG_INFO(g_logger) << "idle";
+        BASE_LOG_INFO(g_logger) << "idle";
         FiberPool *pool = FiberPool::GetThreadLocal();
         uint64_t last_shrink_ms = 0;
         while (!stopping())
@@ -208,7 +208,7 @@ namespace sylar
 
     void Scheduler::run()
     {
-        SYLAR_LOG_DEBUG(g_logger) << m_name << " run";
+        BASE_LOG_DEBUG(g_logger) << m_name << " run";
         setThis();
         set_hook_enable(true); // 在工作线程中启用 Hook
 
@@ -244,7 +244,7 @@ namespace sylar
                         continue;
                     }
 
-                    SYLAR_ASSERT(it->fiber || it->cb);
+                    BASE_ASSERT(it->fiber || it->cb);
                     // 如果协程已经在跑了，跳过
                     if (it->fiber && it->fiber->getState() == Fiber::EXEC)
                     {
@@ -381,7 +381,7 @@ namespace sylar
                 // 如果调度器已经关门了，且 idle 协程也跑完了，就彻底退出循环
                 if (idle_fiber->getState() == Fiber::TERM)
                 {
-                    SYLAR_LOG_INFO(g_logger) << "idle fiber term";
+                    BASE_LOG_INFO(g_logger) << "idle fiber term";
                     break;
                 }
 

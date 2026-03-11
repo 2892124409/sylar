@@ -12,7 +12,7 @@
 namespace sylar
 {
 
-    static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+    static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
     bool GetDefaultIOManagerUseCaller()
     {
@@ -32,7 +32,7 @@ namespace sylar
         case IOManager::WRITE:
             return write;
         default:
-            SYLAR_ASSERT2(false, "getEventContext invalid event");
+            BASE_ASSERT2(false, "getEventContext invalid event");
         }
         throw std::invalid_argument("getEventContext invalid event");
     }
@@ -54,7 +54,7 @@ namespace sylar
     void IOManager::FdContext::triggerEvent(IOManager::Event event)
     {
         // 确认该事件确实在当前监听列表中
-        SYLAR_ASSERT(events & event);
+        BASE_ASSERT(events & event);
 
         // 清除掉该事件（一次性触发）
         events = (Event)(events & ~event);
@@ -87,11 +87,11 @@ namespace sylar
 
         // 1. 创建 epoll 句柄
         m_epfd = epoll_create(5000);
-        SYLAR_ASSERT(m_epfd > 0);
+        BASE_ASSERT(m_epfd > 0);
 
         // 2. 创建用于 tickle (唤醒) 的管道
         int rt = pipe(m_tickleFds);
-        SYLAR_ASSERT(rt == 0);
+        BASE_ASSERT(rt == 0);
 
         // 3. 将管道的读端注册到 epoll 中
         // 使用边缘触发 (ET) 模式，配合非阻塞读取，这是高性能 IO 的标准做法
@@ -102,11 +102,11 @@ namespace sylar
 
         // 将管道读端设为非阻塞，防止 epoll 误唤醒导致 read 阻塞整个线程
         rt = fcntl(m_tickleFds[0], F_SETFL, O_NONBLOCK);
-        SYLAR_ASSERT(rt == 0);
+        BASE_ASSERT(rt == 0);
 
         // 将 tickle fd 添加进 epoll 监控
         rt = epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_tickleFds[0], &event);
-        SYLAR_ASSERT(rt == 0);
+        BASE_ASSERT(rt == 0);
 
         // 4. 初始化上下文容器大小
         contextResize(32);
@@ -182,10 +182,10 @@ namespace sylar
         // 检查事件是否重复添加
         if (SYLAR_UNLIKELY(fd_ctx->events & event))
         {
-            SYLAR_LOG_ERROR(g_logger) << "addEvent assert fd=" << fd
+            BASE_LOG_ERROR(g_logger) << "addEvent assert fd=" << fd
                                       << " event=" << event
                                       << " fd_ctx.event=" << fd_ctx->events;
-            SYLAR_ASSERT(!(fd_ctx->events & event));
+            BASE_ASSERT(!(fd_ctx->events & event));
         }
 
         // 确定是第一次添加监听(ADD)还是在原有基础上修改(MOD)
@@ -199,7 +199,7 @@ namespace sylar
         int rt = epoll_ctl(m_epfd, op, fd, &epevent);
         if (rt)
         {
-            SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
+            BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
                                       << op << "," << fd << "," << epevent.events << "):"
                                       << rt << " (" << errno << ") (" << strerror(errno) << ")";
             return -1;
@@ -212,7 +212,7 @@ namespace sylar
 
         // 获取并配置对应事件的上下文
         FdContext::EventContext &event_ctx = fd_ctx->getEventContext(event);
-        SYLAR_ASSERT(!event_ctx.scheduler && !event_ctx.fiber && !event_ctx.cb);
+        BASE_ASSERT(!event_ctx.scheduler && !event_ctx.fiber && !event_ctx.cb);
 
         event_ctx.scheduler = Scheduler::GetThis();
         if (cb)
@@ -225,7 +225,7 @@ namespace sylar
             event_ctx.fiber = Fiber::GetThis();
             if (!event_ctx.fiber || event_ctx.fiber->getState() != Fiber::EXEC)
             {
-                SYLAR_LOG_ERROR(g_logger) << "addEvent bind current fiber invalid"
+                BASE_LOG_ERROR(g_logger) << "addEvent bind current fiber invalid"
                                           << " fd=" << fd
                                           << " event=" << event
                                           << " fiber_id=" << (event_ctx.fiber ? event_ctx.fiber->getId() : 0)
@@ -243,7 +243,7 @@ namespace sylar
                 int rollback_rt = epoll_ctl(m_epfd, rollback_op, fd, &rollback_event);
                 if (rollback_rt)
                 {
-                    SYLAR_LOG_ERROR(g_logger) << "addEvent rollback epoll_ctl(" << m_epfd << ", "
+                    BASE_LOG_ERROR(g_logger) << "addEvent rollback epoll_ctl(" << m_epfd << ", "
                                               << rollback_op << "," << fd << "," << rollback_event.events << ")"
                                               << ":" << rollback_rt << " (" << errno << ") (" << strerror(errno) << ")";
                 }
@@ -284,7 +284,7 @@ namespace sylar
         int rt = epoll_ctl(m_epfd, op, fd, &epevent);
         if (rt)
         {
-            SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
+            BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
                                       << op << "," << fd << "," << epevent.events << "):"
                                       << rt << " (" << errno << ") (" << strerror(errno) << ")";
             return false;
@@ -326,7 +326,7 @@ namespace sylar
         int rt = epoll_ctl(m_epfd, op, fd, &epevent);
         if (rt)
         {
-            SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
+            BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
                                       << op << "," << fd << "," << epevent.events << "):"
                                       << rt << " (" << errno << ") (" << strerror(errno) << ")";
             return false;
@@ -365,7 +365,7 @@ namespace sylar
         int rt = epoll_ctl(m_epfd, op, fd, &epevent);
         if (rt)
         {
-            SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
+            BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
                                       << op << "," << fd << "," << epevent.events << "):"
                                       << rt << " (" << errno << ") (" << strerror(errno) << ")";
             return false;
@@ -383,7 +383,7 @@ namespace sylar
             --m_pendingEventCount;
         }
 
-        SYLAR_ASSERT(fd_ctx->events == NONE);
+        BASE_ASSERT(fd_ctx->events == NONE);
         return true;
     }
 
@@ -396,7 +396,7 @@ namespace sylar
         if (hasIdleThreads())
         {
             int rt = write(m_tickleFds[1], "T", 1);
-            SYLAR_ASSERT(rt == 1);
+            BASE_ASSERT(rt == 1);
         }
     }
 
@@ -441,7 +441,7 @@ namespace sylar
             uint64_t next_timeout = 0;
             if (stopping(next_timeout))
             {
-                SYLAR_LOG_INFO(g_logger) << "name=" << getName() << " idle stopping exit";
+                BASE_LOG_INFO(g_logger) << "name=" << getName() << " idle stopping exit";
                 break;
             }
 
@@ -528,7 +528,7 @@ namespace sylar
                 int rt2 = epoll_ctl(m_epfd, op, fd_ctx->fd, &event);
                 if (rt2)
                 {
-                    SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
+                    BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
                                               << op << "," << fd_ctx->fd << "," << event.events << "):"
                                               << rt2 << " (" << errno << ") (" << strerror(errno) << ")";
                     continue;

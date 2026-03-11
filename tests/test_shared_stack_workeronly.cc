@@ -13,7 +13,7 @@
 #include <cassert>
 #include <iostream>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
+static base::Logger::ptr g_logger = BASE_LOG_ROOT();
 static std::atomic<int> g_worker_steps(0);
 static std::atomic<int> g_worker_first_tid(0);
 static std::atomic<int> g_worker_thread_mismatch(0);
@@ -33,7 +33,7 @@ static void workeronly_job()
         }
 
         int step = g_worker_steps.fetch_add(1) + 1;
-        SYLAR_LOG_INFO(g_logger) << "workeronly_job step=" << step
+        BASE_LOG_INFO(g_logger) << "workeronly_job step=" << step
                                  << " fiber_id=" << sylar::Fiber::GetFiberId()
                                  << " thread_id=" << tid;
 
@@ -51,7 +51,7 @@ int main()
     g_worker_thread_mismatch.store(0);
     sylar::Fiber::ResetSharedStackStats();
 
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(true);
 
     sylar::Scheduler sc(2, false, "shared_stack_workeronly");
@@ -59,7 +59,7 @@ int main()
     sc.schedule(&workeronly_job);
     sc.stop();
 
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(false);
 
     sylar::Fiber::SharedStackStats stats = sylar::Fiber::GetSharedStackStats();
@@ -76,6 +76,6 @@ int main()
     assert(stats.save_count > 0);
     assert(stats.restore_count > 0);
 
-    SYLAR_LOG_INFO(g_logger) << "test_shared_stack_workeronly passed";
+    BASE_LOG_INFO(g_logger) << "test_shared_stack_workeronly passed";
     return 0;
 }

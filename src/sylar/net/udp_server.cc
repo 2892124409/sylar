@@ -14,7 +14,7 @@ namespace sylar
     {
 
         // 全局日志器
-        static Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+        static Logger::ptr g_logger = BASE_LOG_NAME("system");
 
         // ============================================================================
         // 构造函数与析构函数
@@ -64,7 +64,7 @@ namespace sylar
                 Socket::ptr sock = Socket::CreateUDP(addr);
                 if (!sock)
                 {
-                    SYLAR_LOG_ERROR(g_logger) << "bind create socket fail: "
+                    BASE_LOG_ERROR(g_logger) << "bind create socket fail: "
                                               << addr->toString();
                     fails.push_back(addr);
                     continue;
@@ -73,13 +73,13 @@ namespace sylar
                 // 绑定地址（UDP 不需要 listen）
                 if (!sock->bind(addr))
                 {
-                    SYLAR_LOG_ERROR(g_logger) << "bind fail: " << addr->toString();
+                    BASE_LOG_ERROR(g_logger) << "bind fail: " << addr->toString();
                     fails.push_back(addr);
                     continue;
                 }
 
                 new_socks.push_back(sock);
-                SYLAR_LOG_INFO(g_logger) << "udp server bind success: " << addr->toString();
+                BASE_LOG_INFO(g_logger) << "udp server bind success: " << addr->toString();
             }
 
             // 如果有失败的绑定，清空所有 Socket
@@ -152,9 +152,9 @@ namespace sylar
             sock->cancelAll();  // 取消所有事件
             sock->close();
         }
-        SYLAR_LOG_INFO(g_logger) << "UdpServer cleanup completed"; });
+        BASE_LOG_INFO(g_logger) << "UdpServer cleanup completed"; });
 
-            SYLAR_LOG_INFO(g_logger) << "UdpServer stop scheduled";
+            BASE_LOG_INFO(g_logger) << "UdpServer stop scheduled";
         }
 
         // ============================================================================
@@ -168,7 +168,7 @@ namespace sylar
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (sockIndex >= m_socks.size())
                 {
-                    SYLAR_LOG_ERROR(g_logger) << "sendTo invalid sockIndex=" << sockIndex
+                    BASE_LOG_ERROR(g_logger) << "sendTo invalid sockIndex=" << sockIndex
                                               << " socks.size()=" << m_socks.size();
                     return -1;
                 }
@@ -176,7 +176,7 @@ namespace sylar
             }
             if (!sock)
             {
-                SYLAR_LOG_ERROR(g_logger) << "sendTo invalid sockIndex=" << sockIndex
+                BASE_LOG_ERROR(g_logger) << "sendTo invalid sockIndex=" << sockIndex
                                           << " sock is null";
                 return -1;
             }
@@ -190,7 +190,7 @@ namespace sylar
         void UdpServer::handleDatagram(const void *data, size_t len,
                                        Address::ptr from, Socket::ptr sock)
         {
-            SYLAR_LOG_INFO(g_logger) << "handleDatagram from " << from->toString()
+            BASE_LOG_INFO(g_logger) << "handleDatagram from " << from->toString()
                                      << " len=" << len
                                      << " data=" << std::string((const char *)data, len);
             // 默认实现：只打印日志
@@ -223,12 +223,12 @@ namespace sylar
                     {
                         break;
                     }
-                    SYLAR_LOG_ERROR(g_logger) << "recvfrom errno=" << errno
+                    BASE_LOG_ERROR(g_logger) << "recvfrom errno=" << errno
                                               << " str=" << strerror(errno);
                     // 如果是致命错误（socket已关闭），退出循环
                     if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK)
                     {
-                        SYLAR_LOG_ERROR(g_logger) << "recvfrom socket error, exit receive loop";
+                        BASE_LOG_ERROR(g_logger) << "recvfrom socket error, exit receive loop";
                         break;
                     }
                 }
@@ -236,7 +236,7 @@ namespace sylar
             }
 
             delete[] buffer;
-            SYLAR_LOG_INFO(g_logger) << "startReceive exit";
+            BASE_LOG_INFO(g_logger) << "startReceive exit";
         }
 
         // ============================================================================

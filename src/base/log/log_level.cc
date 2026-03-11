@@ -1,7 +1,7 @@
 #include "log_level.h"
 #include <algorithm>
 
-namespace sylar
+namespace base
 {
 
     const char *LogLevel::ToString(LogLevel::Level level)

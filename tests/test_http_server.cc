@@ -12,46 +12,46 @@
 #include <string>
 #include <vector>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 int main() {
     sylar::set_hook_enable(true);
-    sylar::http::HttpFrameworkConfig::SetErrorResponseFormat(sylar::http::HttpFrameworkConfig::ERROR_FORMAT_JSON);
+    http::HttpFrameworkConfig::SetErrorResponseFormat(http::HttpFrameworkConfig::ERROR_FORMAT_JSON);
     sylar::IOManager iom(2, true, "http_test");
-    sylar::http::HttpServer::ptr server(new sylar::http::HttpServer(&iom, &iom));
-    server->getServletDispatch()->addServlet("/ping", [](sylar::http::HttpRequest::ptr,
-                                                        sylar::http::HttpResponse::ptr rsp,
-                                                        sylar::http::HttpSession::ptr) {
+    http::HttpServer::ptr server(new http::HttpServer(&iom, &iom));
+    server->getServletDispatch()->addServlet("/ping", [](http::HttpRequest::ptr,
+                                                        http::HttpResponse::ptr rsp,
+                                                        http::HttpSession::ptr) {
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("pong");
         return 0;
     });
-    server->getServletDispatch()->addServlet("/user/me", [](sylar::http::HttpRequest::ptr,
-                                                           sylar::http::HttpResponse::ptr rsp,
-                                                           sylar::http::HttpSession::ptr) {
+    server->getServletDispatch()->addServlet("/user/me", [](http::HttpRequest::ptr,
+                                                           http::HttpResponse::ptr rsp,
+                                                           http::HttpSession::ptr) {
         rsp->setBody("exact-user");
         return 0;
     });
-    server->getServletDispatch()->addParamServlet("/user/:id", [](sylar::http::HttpRequest::ptr req,
-                                                                  sylar::http::HttpResponse::ptr rsp,
-                                                                  sylar::http::HttpSession::ptr) {
+    server->getServletDispatch()->addParamServlet("/user/:id", [](http::HttpRequest::ptr req,
+                                                                  http::HttpResponse::ptr rsp,
+                                                                  http::HttpSession::ptr) {
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("user:" + req->getRouteParam("id"));
         return 0;
     });
-    server->getServletDispatch()->addPreInterceptor([](sylar::http::HttpRequest::ptr req,
-                                                      sylar::http::HttpResponse::ptr rsp,
-                                                      sylar::http::HttpSession::ptr) {
+    server->getServletDispatch()->addPreInterceptor([](http::HttpRequest::ptr req,
+                                                      http::HttpResponse::ptr rsp,
+                                                      http::HttpSession::ptr) {
         rsp->setHeader("X-Pre", "1");
         if (req->getPath() == "/blocked") {
-            sylar::http::ApplyErrorResponse(rsp, sylar::http::HttpStatus::BAD_REQUEST, "Blocked", "blocked by pre interceptor");
+            http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Blocked", "blocked by pre interceptor");
             return false;
         }
         return true;
     });
-    server->getServletDispatch()->addPostInterceptor([](sylar::http::HttpRequest::ptr,
-                                                       sylar::http::HttpResponse::ptr rsp,
-                                                       sylar::http::HttpSession::ptr) {
+    server->getServletDispatch()->addPostInterceptor([](http::HttpRequest::ptr,
+                                                       http::HttpResponse::ptr rsp,
+                                                       http::HttpSession::ptr) {
         rsp->setHeader("X-Post", "1");
     });
 
@@ -143,8 +143,8 @@ int main() {
 
     iom.schedule([]() {
         sleep(6);
-        size_t old_header = sylar::http::HttpRequestParser::GetMaxHeaderSize();
-        sylar::http::HttpRequestParser::SetMaxHeaderSize(32);
+        size_t old_header = http::HttpRequestParser::GetMaxHeaderSize();
+        http::HttpRequestParser::SetMaxHeaderSize(32);
 
         sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
         assert(sock->connect(sylar::Address::LookupAny("127.0.0.1:28080")));
@@ -158,7 +158,7 @@ int main() {
         assert(rsp.find("\"code\":413") != std::string::npos);
         stream.close();
 
-        sylar::http::HttpRequestParser::SetMaxHeaderSize(old_header);
+        http::HttpRequestParser::SetMaxHeaderSize(old_header);
     });
 
     iom.schedule([server]() {
@@ -166,6 +166,6 @@ int main() {
         server->stop();
     });
 
-    SYLAR_LOG_INFO(g_logger) << "test_http_server passed";
+    BASE_LOG_INFO(g_logger) << "test_http_server passed";
     return 0;
 }

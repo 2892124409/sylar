@@ -22,7 +22,7 @@
 // 全局日志器
 // ============================================================================
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 // ============================================================================
 // 测试1：SocketStream 基本读写
@@ -50,12 +50,12 @@ void test_basic_read_write()
         sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:8090");
 
         if (!server->bind(addr)) {
-            SYLAR_LOG_ERROR(g_logger) << "服务器 bind 失败";
+            BASE_LOG_ERROR(g_logger) << "服务器 bind 失败";
             return;
         }
 
         if (!server->listen()) {
-            SYLAR_LOG_ERROR(g_logger) << "服务器 listen 失败";
+            BASE_LOG_ERROR(g_logger) << "服务器 listen 失败";
             return;
         }
 
@@ -64,7 +64,7 @@ void test_basic_read_write()
         // 接受连接
         sylar::Socket::ptr client = server->accept();
         if (!client) {
-            SYLAR_LOG_ERROR(g_logger) << "accept 失败";
+            BASE_LOG_ERROR(g_logger) << "accept 失败";
             return;
         }
 
@@ -98,7 +98,7 @@ void test_basic_read_write()
         sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:8090");
 
         if (!sock->connect(addr)) {
-            SYLAR_LOG_ERROR(g_logger) << "客户端 connect 失败";
+            BASE_LOG_ERROR(g_logger) << "客户端 connect 失败";
             return;
         }
 

@@ -1,6 +1,6 @@
 #include "config.h"
 
-namespace sylar
+namespace base
 {
 
     static void ListAllMember(const std::string &prefix,
@@ -9,7 +9,7 @@ namespace sylar
     {
         if (prefix.find_first_not_of("abcdefghijklmnopqrstuvwxyz._0123456789") != std::string::npos)
         {
-            SYLAR_LOG_ERROR(SYLAR_LOG_ROOT()) << "Config invalid name: " << prefix << " : " << node;
+            BASE_LOG_ERROR(BASE_LOG_ROOT()) << "Config invalid name: " << prefix << " : " << node;
             return;
         }
         output.push_back(std::make_pair(prefix, node));

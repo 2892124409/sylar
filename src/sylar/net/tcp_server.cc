@@ -14,7 +14,7 @@ namespace sylar
     {
 
         // 全局日志器
-        static Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+        static Logger::ptr g_logger = BASE_LOG_NAME("system");
 
         // ============================================================================
         // 构造函数与析构函数
@@ -64,7 +64,7 @@ namespace sylar
                 Socket::ptr sock = Socket::CreateTCP(addr);
                 if (!sock)
                 {
-                    SYLAR_LOG_ERROR(g_logger) << "bind create socket fail: "
+                    BASE_LOG_ERROR(g_logger) << "bind create socket fail: "
                                               << addr->toString();
                     fails.push_back(addr);
                     continue;
@@ -73,7 +73,7 @@ namespace sylar
                 // 绑定地址
                 if (!sock->bind(addr))
                 {
-                    SYLAR_LOG_ERROR(g_logger) << "bind fail: " << addr->toString();
+                    BASE_LOG_ERROR(g_logger) << "bind fail: " << addr->toString();
                     fails.push_back(addr);
                     continue;
                 }
@@ -81,13 +81,13 @@ namespace sylar
                 // 开始监听
                 if (!sock->listen())
                 {
-                    SYLAR_LOG_ERROR(g_logger) << "listen fail: " << addr->toString();
+                    BASE_LOG_ERROR(g_logger) << "listen fail: " << addr->toString();
                     fails.push_back(addr);
                     continue;
                 }
 
                 new_socks.push_back(sock);
-                SYLAR_LOG_INFO(g_logger) << "server bind success: " << addr->toString();
+                BASE_LOG_INFO(g_logger) << "server bind success: " << addr->toString();
             }
 
             // 如果有失败的绑定，清空所有 Socket
@@ -161,9 +161,9 @@ namespace sylar
             sock->cancelAll();  // 取消所有事件
             sock->close();
         }
-        SYLAR_LOG_INFO(g_logger) << "TcpServer cleanup completed"; });
+        BASE_LOG_INFO(g_logger) << "TcpServer cleanup completed"; });
 
-            SYLAR_LOG_INFO(g_logger) << "TcpServer stop scheduled";
+            BASE_LOG_INFO(g_logger) << "TcpServer stop scheduled";
         }
 
         // ============================================================================
@@ -172,7 +172,7 @@ namespace sylar
 
         void TcpServer::handleClient(Socket::ptr client)
         {
-            SYLAR_LOG_INFO(g_logger) << "handleClient: " << *client;
+            BASE_LOG_INFO(g_logger) << "handleClient: " << *client;
             // 默认实现：只打印日志
             // 子类可以重写此方法实现具体业务逻辑
         }
@@ -195,17 +195,17 @@ namespace sylar
                     {
                         break;
                     }
-                    SYLAR_LOG_ERROR(g_logger) << "accept errno=" << errno
+                    BASE_LOG_ERROR(g_logger) << "accept errno=" << errno
                                               << " str=" << strerror(errno);
                     // 如果是致命错误（socket已关闭），退出循环
                     if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK)
                     {
-                        SYLAR_LOG_ERROR(g_logger) << "accept socket error, exit accept loop";
+                        BASE_LOG_ERROR(g_logger) << "accept socket error, exit accept loop";
                         break;
                     }
                 }
             }
-            SYLAR_LOG_INFO(g_logger) << "startAccept exit";
+            BASE_LOG_INFO(g_logger) << "startAccept exit";
         }
 
         // ============================================================================

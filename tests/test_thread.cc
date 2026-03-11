@@ -14,7 +14,7 @@ sylar::Mutex s_mutex;
 
 void func1()
 {
-    SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "thread name: " << sylar::Thread::GetName()
+    BASE_LOG_INFO(BASE_LOG_ROOT()) << "thread name: " << sylar::Thread::GetName()
                                      << " this.name: " << sylar::Thread::GetThis()->getName()
                                      << " id: " << sylar::GetThreadId()
                                      << " this.id: " << sylar::Thread::GetThis()->getId();
@@ -30,7 +30,7 @@ void func2()
 {
     while (true)
     {
-        SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        BASE_LOG_INFO(BASE_LOG_ROOT()) << "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
     }
 }
 
@@ -38,13 +38,13 @@ void func3()
 {
     while (true)
     {
-        SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "========================================";
+        BASE_LOG_INFO(BASE_LOG_ROOT()) << "========================================";
     }
 }
 
 int main(int argc, char **argv)
 {
-    SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "thread test begin";
+    BASE_LOG_INFO(BASE_LOG_ROOT()) << "thread test begin";
 
     std::vector<sylar::Thread::ptr> thrs;
     for (int i = 0; i < 5; ++i)
@@ -58,8 +58,8 @@ int main(int argc, char **argv)
         thrs[i]->join();
     }
 
-    SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "thread test end";
-    SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "count=" << count;
+    BASE_LOG_INFO(BASE_LOG_ROOT()) << "thread test end";
+    BASE_LOG_INFO(BASE_LOG_ROOT()) << "count=" << count;
 
     return 0;
 }

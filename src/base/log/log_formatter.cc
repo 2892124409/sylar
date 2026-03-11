@@ -8,7 +8,7 @@
 #include <time.h>
 #include "logger.h" // 引入logger.h，以便使用Logger的方法
 
-namespace sylar
+namespace base
 {
 
     // ======================= 各类格式化子项实现 =======================
@@ -467,4 +467,4 @@ namespace sylar
         }
     }
 
-} // namespace sylar
+} // namespace base

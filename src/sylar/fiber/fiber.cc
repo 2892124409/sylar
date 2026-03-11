@@ -56,12 +56,12 @@ namespace sylar
         // getcontext: 抓取当前 CPU 上下文存入 当前Fiber实例的私有成员变量m_ctx
         if (getcontext(&m_ctx))
         {
-            SYLAR_ASSERT2(false, "getcontext");
+            BASE_ASSERT2(false, "getcontext");
         }
 
         ++s_fiber_count;     // 统计当前进程中活着的协程总数
         m_id = ++s_fiber_id; // 让每个协程分配一个全局唯一的 ID
-        SYLAR_LOG_DEBUG(SYLAR_LOG_ROOT()) << "Fiber::Fiber main id=" << m_id;
+        BASE_LOG_DEBUG(BASE_LOG_ROOT()) << "Fiber::Fiber main id=" << m_id;
     }
 
     /**
@@ -78,7 +78,7 @@ namespace sylar
             if (!scheduler || !scheduler->supportsSharedStackV1())
             {
                 ++s_shared_unsupported_mode_count;
-                SYLAR_LOG_WARN(SYLAR_LOG_ROOT())
+                BASE_LOG_WARN(BASE_LOG_ROOT())
                     << "fiber.use_shared_stack is enabled, but current scheduler mode is not validated for V1; "
                     << "fallback to independent stack. fiber_id=" << m_id;
                 want_shared_stack = false;
@@ -90,9 +90,9 @@ namespace sylar
         if (m_useSharedStack)
         {
             m_stacksize = FiberFrameworkConfig::GetFiberSharedStackSize();
-            SYLAR_ASSERT2(ThreadLocalSharedStack::SetStackSize(m_stacksize),
+            BASE_ASSERT2(ThreadLocalSharedStack::SetStackSize(m_stacksize),
                           "shared stack size must remain globally consistent");
-            SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "Fiber::Fiber shared-stack V1 enabled id=" << m_id;
+            BASE_LOG_INFO(BASE_LOG_ROOT()) << "Fiber::Fiber shared-stack V1 enabled id=" << m_id;
             return;
         }
 
@@ -102,7 +102,7 @@ namespace sylar
         // 2. 获取当前上下文副本，作为初始模板
         if (getcontext(&m_ctx))
         {
-            SYLAR_ASSERT2(false, "getcontext");
+            BASE_ASSERT2(false, "getcontext");
         }
 
         // 3. 修改上下文：指定该协程运行完后没有后继上下文（uc_link = nullptr）
@@ -114,7 +114,7 @@ namespace sylar
         // 5. makecontext: 修改上下文，使其入口指向静态函数 MainFunc
         makecontext(&m_ctx, &Fiber::MainFunc, 0);
 
-        SYLAR_LOG_DEBUG(SYLAR_LOG_ROOT()) << "Fiber::Fiber sub id=" << m_id;
+        BASE_LOG_DEBUG(BASE_LOG_ROOT()) << "Fiber::Fiber sub id=" << m_id;
     }
 
     Fiber::~Fiber()
@@ -135,19 +135,19 @@ namespace sylar
         if (m_useSharedStack)
         {
             // 共享栈 Fiber 本身不拥有独立栈，但也不是线程主协程
-            SYLAR_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT || m_state == READY || m_state == HOLD);
+            BASE_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT || m_state == READY || m_state == HOLD);
         }
         else if (m_stack)
         {
             // 子协程：必须在 TERM 或 EXCEPT 状态下析构，并释放栈内存
-            SYLAR_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT);
+            BASE_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT);
             StackAllocator::Dealloc(m_stack, m_stacksize);
         }
         else
         {
             // 主协程：没有栈（使用线程原始栈），且必须在运行中析构
-            SYLAR_ASSERT(!m_cb);
-            SYLAR_ASSERT(m_state == EXEC);
+            BASE_ASSERT(!m_cb);
+            BASE_ASSERT(m_state == EXEC);
 
             Fiber *cur = t_fiber;
             if (cur == this)
@@ -155,7 +155,7 @@ namespace sylar
                 SetThis(nullptr);
             }
         }
-        SYLAR_LOG_DEBUG(SYLAR_LOG_ROOT()) << "Fiber::~Fiber id=" << m_id
+        BASE_LOG_DEBUG(BASE_LOG_ROOT()) << "Fiber::~Fiber id=" << m_id
                                           << " total=" << s_fiber_count;
     }
 
@@ -165,8 +165,8 @@ namespace sylar
      */
     void Fiber::reset(std::function<void()> cb)
     {
-        SYLAR_ASSERT(m_stack || m_useSharedStack); // 子协程才能 reset
-        SYLAR_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT);
+        BASE_ASSERT(m_stack || m_useSharedStack); // 子协程才能 reset
+        BASE_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT);
         m_cb = cb;
 
         if (m_useSharedStack)
@@ -192,7 +192,7 @@ namespace sylar
 
         if (getcontext(&m_ctx))
         {
-            SYLAR_ASSERT2(false, "getcontext");
+            BASE_ASSERT2(false, "getcontext");
         }
 
         m_ctx.uc_link = nullptr;
@@ -205,13 +205,13 @@ namespace sylar
 
     void Fiber::initSharedStackContext()
     {
-        SYLAR_ASSERT(m_useSharedStack);
-        SYLAR_ASSERT(m_sharedStack);
-        SYLAR_ASSERT(!m_ctxInited);
+        BASE_ASSERT(m_useSharedStack);
+        BASE_ASSERT(m_sharedStack);
+        BASE_ASSERT(!m_ctxInited);
 
         if (getcontext(&m_ctx))
         {
-            SYLAR_ASSERT2(false, "getcontext");
+            BASE_ASSERT2(false, "getcontext");
         }
 
         m_ctx.uc_link = nullptr;
@@ -243,7 +243,7 @@ namespace sylar
 
     void Fiber::ensureSharedStackBinding()
     {
-        SYLAR_ASSERT(m_useSharedStack);
+        BASE_ASSERT(m_useSharedStack);
         int tid = sylar::GetThreadId();
         if (m_boundThread == -1)
         {
@@ -251,12 +251,12 @@ namespace sylar
             ++s_shared_bind_count;
             return;
         }
-        SYLAR_ASSERT2(m_boundThread == tid, "shared-stack fiber resumed on wrong thread");
+        BASE_ASSERT2(m_boundThread == tid, "shared-stack fiber resumed on wrong thread");
     }
 
     void Fiber::prepareSharedStackBeforeResume()
     {
-        SYLAR_ASSERT(m_useSharedStack);
+        BASE_ASSERT(m_useSharedStack);
         ensureSharedStackBinding();
 
         if (!m_sharedStack)
@@ -267,7 +267,7 @@ namespace sylar
         {
             ++s_shared_acquire_fail_count;
         }
-        SYLAR_ASSERT2(m_sharedStack, "shared stack unavailable before resume");
+        BASE_ASSERT2(m_sharedStack, "shared stack unavailable before resume");
 
         if (!m_ctxInited)
         {
@@ -334,8 +334,8 @@ namespace sylar
 
     void Fiber::saveSharedStackToBuffer()
     {
-        SYLAR_ASSERT(m_useSharedStack);
-        SYLAR_ASSERT(m_sharedStack);
+        BASE_ASSERT(m_useSharedStack);
+        BASE_ASSERT(m_sharedStack);
 
         if (m_savedStackLen == 0)
         {
@@ -343,7 +343,7 @@ namespace sylar
         }
 
         void *buf = SaveBufferAllocator::Alloc(m_savedStackLen);
-        SYLAR_ASSERT2(buf, "save buffer allocation failed");
+        BASE_ASSERT2(buf, "save buffer allocation failed");
 
         char *base = static_cast<char *>(m_sharedStack);
         std::memcpy(buf, base + m_savedStackOffset, m_savedStackLen);
@@ -365,7 +365,7 @@ namespace sylar
 
         if (m_boundThread != -1 && m_boundThread != sylar::GetThreadId())
         {
-            SYLAR_LOG_WARN(SYLAR_LOG_ROOT())
+            BASE_LOG_WARN(BASE_LOG_ROOT())
                 << "shared-stack fiber bound to thread " << m_boundThread
                 << ", but resumed on thread " << sylar::GetThreadId();
             return;
@@ -415,7 +415,7 @@ namespace sylar
 
     void Fiber::finalizeSharedStackAfterYield()
     {
-        SYLAR_ASSERT(m_useSharedStack);
+        BASE_ASSERT(m_useSharedStack);
 
         if (!m_sharedStack)
         {
@@ -445,7 +445,7 @@ namespace sylar
      */
     void Fiber::resume()
     {
-        SYLAR_ASSERT(m_state != EXEC && m_state != TERM && m_state != EXCEPT);
+        BASE_ASSERT(m_state != EXEC && m_state != TERM && m_state != EXCEPT);
 
         SetThis(this);
         m_state = EXEC;
@@ -456,7 +456,7 @@ namespace sylar
             scheduler_fiber = Scheduler::GetMainFiber();
             if (!scheduler_fiber)
             {
-                SYLAR_LOG_WARN(SYLAR_LOG_ROOT()) << "Fiber::resume fallback to thread fiber, id=" << m_id;
+                BASE_LOG_WARN(BASE_LOG_ROOT()) << "Fiber::resume fallback to thread fiber, id=" << m_id;
             }
         }
 
@@ -465,15 +465,15 @@ namespace sylar
         {
             if (swapcontext(&scheduler_fiber->m_ctx, &m_ctx))
             {
-                SYLAR_ASSERT2(false, "swapcontext");
+                BASE_ASSERT2(false, "swapcontext");
             }
         }
         else
         {
-            SYLAR_ASSERT2(t_thread_fiber, "resume without thread main fiber");
+            BASE_ASSERT2(t_thread_fiber, "resume without thread main fiber");
             if (swapcontext(&t_thread_fiber->m_ctx, &m_ctx))
             {
-                SYLAR_ASSERT2(false, "swapcontext");
+                BASE_ASSERT2(false, "swapcontext");
             }
         }
     }
@@ -483,7 +483,7 @@ namespace sylar
      */
     void Fiber::yield()
     {
-        SYLAR_ASSERT(m_state == EXEC || m_state == READY || m_state == HOLD ||
+        BASE_ASSERT(m_state == EXEC || m_state == READY || m_state == HOLD ||
                      m_state == TERM || m_state == EXCEPT);
 
         Fiber *scheduler_fiber = nullptr;
@@ -492,7 +492,7 @@ namespace sylar
             scheduler_fiber = Scheduler::GetMainFiber();
             if (!scheduler_fiber)
             {
-                SYLAR_LOG_WARN(SYLAR_LOG_ROOT()) << "Fiber::yield fallback to thread fiber, id=" << m_id;
+                BASE_LOG_WARN(BASE_LOG_ROOT()) << "Fiber::yield fallback to thread fiber, id=" << m_id;
             }
         }
 
@@ -503,7 +503,7 @@ namespace sylar
         }
         else
         {
-            SYLAR_ASSERT2(t_thread_fiber, "yield without thread main fiber");
+            BASE_ASSERT2(t_thread_fiber, "yield without thread main fiber");
             SetThis(t_thread_fiber.get());
         }
 
@@ -518,7 +518,7 @@ namespace sylar
             const char *stack_base = static_cast<const char *>(m_sharedStack);
             const char *stack_top = stack_base + ThreadLocalSharedStack::GetStackSize();
             const char *current_sp = &marker;
-            SYLAR_ASSERT2(current_sp >= stack_base && current_sp < stack_top,
+            BASE_ASSERT2(current_sp >= stack_base && current_sp < stack_top,
                           "shared-stack current sp out of range before yield");
 
             size_t used = static_cast<size_t>(stack_top - current_sp);
@@ -538,15 +538,15 @@ namespace sylar
         {
             if (swapcontext(&m_ctx, &scheduler_fiber->m_ctx))
             {
-                SYLAR_ASSERT2(false, "swapcontext");
+                BASE_ASSERT2(false, "swapcontext");
             }
         }
         else
         {
-            SYLAR_ASSERT2(t_thread_fiber, "yield swap without thread main fiber");
+            BASE_ASSERT2(t_thread_fiber, "yield swap without thread main fiber");
             if (swapcontext(&m_ctx, &t_thread_fiber->m_ctx))
             {
-                SYLAR_ASSERT2(false, "swapcontext");
+                BASE_ASSERT2(false, "swapcontext");
             }
         }
     }
@@ -560,7 +560,7 @@ namespace sylar
         m_state = EXEC;
         if (swapcontext(&t_thread_fiber->m_ctx, &m_ctx))
         {
-            SYLAR_ASSERT2(false, "swapcontext");
+            BASE_ASSERT2(false, "swapcontext");
         }
     }
 
@@ -572,7 +572,7 @@ namespace sylar
         SetThis(t_thread_fiber.get());
         if (swapcontext(&m_ctx, &t_thread_fiber->m_ctx))
         {
-            SYLAR_ASSERT2(false, "swapcontext");
+            BASE_ASSERT2(false, "swapcontext");
         }
     }
 
@@ -593,7 +593,7 @@ namespace sylar
         }
         // 自动初始化主协程
         Fiber::ptr main_fiber(new Fiber);
-        SYLAR_ASSERT(t_fiber == main_fiber.get());
+        BASE_ASSERT(t_fiber == main_fiber.get());
         t_thread_fiber = main_fiber;
         return t_fiber->shared_from_this();
     }
@@ -604,7 +604,7 @@ namespace sylar
     void Fiber::YieldToReady()
     {
         Fiber::ptr cur = GetThis();
-        SYLAR_ASSERT(cur->m_state == EXEC);
+        BASE_ASSERT(cur->m_state == EXEC);
         cur->m_state = READY;
         cur->yield();
     }
@@ -615,7 +615,7 @@ namespace sylar
     void Fiber::YieldToHold()
     {
         Fiber::ptr cur = GetThis();
-        SYLAR_ASSERT(cur->m_state == EXEC);
+        BASE_ASSERT(cur->m_state == EXEC);
         cur->yield();
     }
 
@@ -631,7 +631,7 @@ namespace sylar
     {
         // 1. 获取当前正在跑的子协程
         Fiber::ptr cur = GetThis();
-        SYLAR_ASSERT(cur);
+        BASE_ASSERT(cur);
 
         try
         {
@@ -643,7 +643,7 @@ namespace sylar
         catch (std::exception &ex)
         {
             cur->m_state = EXCEPT;
-            SYLAR_LOG_ERROR(SYLAR_LOG_ROOT()) << "Fiber Except: " << ex.what()
+            BASE_LOG_ERROR(BASE_LOG_ROOT()) << "Fiber Except: " << ex.what()
                                               << " fiber_id=" << cur->getId()
                                               << std::endl
                                               << sylar::BacktraceToString();
@@ -651,7 +651,7 @@ namespace sylar
         catch (...)
         {
             cur->m_state = EXCEPT;
-            SYLAR_LOG_ERROR(SYLAR_LOG_ROOT()) << "Fiber Except"
+            BASE_LOG_ERROR(BASE_LOG_ROOT()) << "Fiber Except"
                                               << " fiber_id=" << cur->getId()
                                               << std::endl
                                               << sylar::BacktraceToString();
@@ -680,7 +680,7 @@ namespace sylar
         }
 
         // 代码永远不应该运行到这里
-        SYLAR_ASSERT2(false, "never reach fiber_id=" + std::to_string(raw_ptr->getId()));
+        BASE_ASSERT2(false, "never reach fiber_id=" + std::to_string(raw_ptr->getId()));
     }
 
     uint64_t Fiber::GetFiberId()

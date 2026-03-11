@@ -23,7 +23,7 @@
 // 全局日志器
 // ============================================================================
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 // ============================================================================
 // EchoServer - 继承 TcpServer 实现 Echo 服务
@@ -50,7 +50,7 @@ protected:
      */
     virtual void handleClient(sylar::Socket::ptr client) override
     {
-        SYLAR_LOG_INFO(g_logger) << "EchoServer::handleClient: " << *client;
+        BASE_LOG_INFO(g_logger) << "EchoServer::handleClient: " << *client;
 
         // 使用 SocketStream 包装 Socket
         sylar::SocketStream::ptr stream(new sylar::SocketStream(client));
@@ -62,12 +62,12 @@ protected:
             int len = stream->read(buf, sizeof(buf) - 1);
             if (len <= 0)
             {
-                SYLAR_LOG_INFO(g_logger) << "client disconnected: " << client->toString();
+                BASE_LOG_INFO(g_logger) << "client disconnected: " << client->toString();
                 break;
             }
 
             buf[len] = '\0';
-            SYLAR_LOG_INFO(g_logger) << "received: " << buf << " (" << len << " bytes)";
+            BASE_LOG_INFO(g_logger) << "received: " << buf << " (" << len << " bytes)";
 
             // Echo 回去
             stream->write(buf, len);
@@ -86,8 +86,8 @@ void test_echo_server_use_caller()
     std::cout << "\n========== Echo 服务器测试 (共享栈 + use_caller=true) ==========\n";
 
     // 启用共享栈模式
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")->setValue(true);
-    sylar::Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size")->setValue(128 * 1024);
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")->setValue(true);
+    base::Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size")->setValue(128 * 1024);
 
     std::cout << "[配置] 共享栈模式已启用\n";
     std::cout << "[配置] 共享栈大小: 128KB\n";
@@ -111,7 +111,7 @@ void test_echo_server_use_caller()
     std::vector<sylar::Address::ptr> fails;
     if (!server->bind(addrs, fails))
     {
-        SYLAR_LOG_ERROR(g_logger) << "bind fail";
+        BASE_LOG_ERROR(g_logger) << "bind fail";
         for (auto &addr : fails)
         {
             std::cout << "  绑定失败: " << addr->toString() << "\n";
@@ -203,8 +203,8 @@ void test_echo_server_worker_only()
     sylar::Fiber::ResetSharedStackStats();
 
     // 启用共享栈模式
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")->setValue(true);
-    sylar::Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size")->setValue(128 * 1024);
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")->setValue(true);
+    base::Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size")->setValue(128 * 1024);
 
     std::cout << "[配置] 共享栈模式已启用\n";
     std::cout << "[配置] 共享栈大小: 128KB\n";
@@ -228,7 +228,7 @@ void test_echo_server_worker_only()
     std::vector<sylar::Address::ptr> fails;
     if (!server->bind(addrs, fails))
     {
-        SYLAR_LOG_ERROR(g_logger) << "bind fail";
+        BASE_LOG_ERROR(g_logger) << "bind fail";
         for (auto &addr : fails)
         {
             std::cout << "  绑定失败: " << addr->toString() << "\n";

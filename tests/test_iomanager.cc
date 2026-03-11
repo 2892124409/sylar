@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
+static base::Logger::ptr g_logger = BASE_LOG_ROOT();
 int pipe_fds[2];
 
 /**
@@ -13,7 +13,7 @@ void test_busy_work()
 {
     for (int i = 0; i < 5; ++i)
     {
-        SYLAR_LOG_INFO(g_logger) << "数数协程正在工作中... " << i;
+        BASE_LOG_INFO(g_logger) << "数数协程正在工作中... " << i;
         sleep(1);
         sylar::Fiber::YieldToReady(); // 主动让出一下，给别人机会
     }
@@ -24,7 +24,7 @@ void test_busy_work()
  */
 void test_fiber_sync()
 {
-    SYLAR_LOG_INFO(g_logger) << "同步协程：准备等数据了...";
+    BASE_LOG_INFO(g_logger) << "同步协程：准备等数据了...";
     sylar::IOManager::GetThis()->addEvent(pipe_fds[0], sylar::IOManager::READ);
 
     // 关键点！
@@ -35,7 +35,7 @@ void test_fiber_sync()
 
     char byte;
     read(pipe_fds[0], &byte, 1);
-    SYLAR_LOG_INFO(g_logger) << "同步协程：数据终于到了，读到: " << byte;
+    BASE_LOG_INFO(g_logger) << "同步协程：数据终于到了，读到: " << byte;
 }
 
 void test_iomanager()

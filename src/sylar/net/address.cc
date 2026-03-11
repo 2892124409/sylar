@@ -14,7 +14,7 @@ namespace sylar
     // 全局日志器 - 用于记录网络地址相关的日志信息
     // static: 文件作用域，只在当前编译单元内可见，避免命名冲突
     // ============================================================================
-    static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+    static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
     // ============================================================================
     // 辅助函数：创建掩码
@@ -194,7 +194,7 @@ namespace sylar
         int error = getaddrinfo(node.c_str(), service, &hints, &results);
         if (error)
         {
-            SYLAR_LOG_DEBUG(g_logger) << "Address::Lookup getaddress(" << host << ", "
+            BASE_LOG_DEBUG(g_logger) << "Address::Lookup getaddress(" << host << ", "
                                       << family << ", " << type << ") err=" << error
                                       << " errstr=" << gai_strerror(error);
             return false;
@@ -205,7 +205,7 @@ namespace sylar
         while (next)
         {
             result.push_back(Create(next->ai_addr, (socklen_t)next->ai_addrlen));
-            SYLAR_LOG_DEBUG(g_logger) << "family:" << next->ai_family
+            BASE_LOG_DEBUG(g_logger) << "family:" << next->ai_family
                                       << ", sock type:" << next->ai_socktype;
             next = next->ai_next;
         }
@@ -263,7 +263,7 @@ namespace sylar
         // 获取本机网卡地址信息
         if (getifaddrs(&results) != 0)
         {
-            SYLAR_LOG_DEBUG(g_logger) << "Address::GetInterfaceAddresses getifaddrs "
+            BASE_LOG_DEBUG(g_logger) << "Address::GetInterfaceAddresses getifaddrs "
                                       << " err=" << errno
                                       << " errstr=" << strerror(errno);
             return false;
@@ -317,7 +317,7 @@ namespace sylar
         }
         catch (...)
         {
-            SYLAR_LOG_ERROR(g_logger) << "Address::GetInterfaceAddresses exception";
+            BASE_LOG_ERROR(g_logger) << "Address::GetInterfaceAddresses exception";
             freeifaddrs(results);
             return false;
         }
@@ -382,7 +382,7 @@ namespace sylar
         int error = getaddrinfo(address, NULL, &hints, &results);
         if (error)
         {
-            SYLAR_LOG_DEBUG(g_logger) << "IPAddress::Create(" << address
+            BASE_LOG_DEBUG(g_logger) << "IPAddress::Create(" << address
                                       << ", " << port << ") error=" << error
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
@@ -424,7 +424,7 @@ namespace sylar
         int result = inet_pton(AF_INET, address, &rt->m_addr.sin_addr);
         if (result <= 0)
         {
-            SYLAR_LOG_DEBUG(g_logger) << "IPv4Address::Create(" << address << ", "
+            BASE_LOG_DEBUG(g_logger) << "IPv4Address::Create(" << address << ", "
                                       << port << ") rt=" << result
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);
@@ -561,7 +561,7 @@ namespace sylar
         int result = inet_pton(AF_INET6, address, &rt->m_addr.sin6_addr);
         if (result <= 0)
         {
-            SYLAR_LOG_DEBUG(g_logger) << "IPv6Address::Create(" << address << ", "
+            BASE_LOG_DEBUG(g_logger) << "IPv6Address::Create(" << address << ", "
                                       << port << ") rt=" << result
                                       << " errno=" << errno
                                       << " errstr=" << strerror(errno);

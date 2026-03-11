@@ -8,7 +8,7 @@
 #include "log/logger.h"
 #include <unistd.h>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
+static base::Logger::ptr g_logger = BASE_LOG_ROOT();
 
 /**
  * @brief 演示任务函数
@@ -17,7 +17,7 @@ static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
 void test_fiber()
 {
     static int s_count = 5;
-    SYLAR_LOG_INFO(g_logger) << "【协程任务】执行中, fiber_id="
+    BASE_LOG_INFO(g_logger) << "【协程任务】执行中, fiber_id="
                              << sylar::Fiber::GetFiberId()
                              << ", thread_id=" << sylar::GetThreadId()
                              << ", count=" << s_count;
@@ -36,7 +36,7 @@ void test_fiber()
 
 int main(int argc, char **argv)
 {
-    SYLAR_LOG_INFO(g_logger) << "--- [TEST BEGIN] ---";
+    BASE_LOG_INFO(g_logger) << "--- [TEST BEGIN] ---";
 
     /**
      * 1. 创建调度器
@@ -50,7 +50,7 @@ int main(int argc, char **argv)
      * 此时线程池中的线程已经创建并进入 Scheduler::run() 循环
      * 但因为队列是空的，它们都在 idle() 协程里待命。
      */
-    SYLAR_LOG_INFO(g_logger) << "【主线程】启动调度器 (Non-blocking)";
+    BASE_LOG_INFO(g_logger) << "【主线程】启动调度器 (Non-blocking)";
     sc.start();
 
     /**
@@ -58,7 +58,7 @@ int main(int argc, char **argv)
      * 调度器会通过 tickle() 唤醒正在睡觉的线程
      */
     sleep(2); // 稍等片刻，观察 idle 状态
-    SYLAR_LOG_INFO(g_logger) << "【主线程】投放第一个业务协程";
+    BASE_LOG_INFO(g_logger) << "【主线程】投放第一个业务协程";
     sc.schedule(&test_fiber);
 
     /**
@@ -67,9 +67,9 @@ int main(int argc, char **argv)
      * 瞬间“变身”为调度工人，进入 run() 循环。
      * 只有当所有任务（包括裂变出来的）都跑完，stop() 才会返回。
      */
-    SYLAR_LOG_INFO(g_logger) << "【主线程】执行 stop()，主线程加入战斗...";
+    BASE_LOG_INFO(g_logger) << "【主线程】执行 stop()，主线程加入战斗...";
     sc.stop();
 
-    SYLAR_LOG_INFO(g_logger) << "--- [TEST OVER] ---";
+    BASE_LOG_INFO(g_logger) << "--- [TEST OVER] ---";
     return 0;
 }

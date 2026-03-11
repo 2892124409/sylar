@@ -10,7 +10,7 @@
 #include "log_level.h"
 #include "log_formatter.h"
 
-namespace sylar
+namespace base
 {
 
     class Logger; // 前置声明
@@ -84,6 +84,6 @@ namespace sylar
         uint64_t m_lastTime = 0;    // 上次打开时间
     };
 
-} // namespace sylar
+} // namespace base
 
 #endif

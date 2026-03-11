@@ -1,6 +1,6 @@
 #include "log_appender.h"
 
-namespace sylar
+namespace base
 {
 
     void LogAppender::setFormatter(LogFormatter::ptr val)
@@ -67,4 +67,4 @@ namespace sylar
         return !!m_filestream;
     }
 
-} // namespace sylar
+} // namespace base

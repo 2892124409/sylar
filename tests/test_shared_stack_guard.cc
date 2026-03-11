@@ -12,7 +12,7 @@
 #include <cassert>
 #include <iostream>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
+static base::Logger::ptr g_logger = BASE_LOG_ROOT();
 static std::atomic<int> g_guard_steps(0);
 
 static void guard_job()
@@ -20,7 +20,7 @@ static void guard_job()
     for (int i = 0; i < 3; ++i)
     {
         int step = g_guard_steps.fetch_add(1) + 1;
-        SYLAR_LOG_INFO(g_logger) << "guard_job step=" << step
+        BASE_LOG_INFO(g_logger) << "guard_job step=" << step
                                  << " fiber_id=" << sylar::Fiber::GetFiberId();
         if (i < 2)
         {
@@ -34,7 +34,7 @@ int main()
     g_guard_steps.store(0);
     sylar::Fiber::ResetSharedStackStats();
 
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(true);
 
     sylar::Fiber::GetThis();
@@ -44,7 +44,7 @@ int main()
         fiber->resume();
     }
 
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(false);
 
     sylar::Fiber::SharedStackStats stats = sylar::Fiber::GetSharedStackStats();
@@ -56,6 +56,6 @@ int main()
     assert(stats.unsupported_mode_fallback_count > 0);
     assert(stats.prepare_count == 0);
 
-    SYLAR_LOG_INFO(g_logger) << "test_shared_stack_guard passed";
+    BASE_LOG_INFO(g_logger) << "test_shared_stack_guard passed";
     return 0;
 }

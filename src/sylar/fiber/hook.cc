@@ -13,7 +13,7 @@
 #include "sylar/fiber/fd_manager.h" // For FdManager, FdCtx
 
 // 定义一个静态的logger，用于hook模块的日志输出
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 namespace sylar
 {
@@ -211,7 +211,7 @@ namespace sylar
                 if (SYLAR_UNLIKELY(ret))
                 {
                     // 如果添加事件失败，记录错误并返回
-                    SYLAR_LOG_ERROR(g_logger) << hook_fun_name << " addEvent(" << fd << ", " << event << ") error:" << errno << " " << strerror(errno);
+                    BASE_LOG_ERROR(g_logger) << hook_fun_name << " addEvent(" << fd << ", " << event << ") error:" << errno << " " << strerror(errno);
                     if (timer)
                     {
                         timer->cancel(); // 取消定时器
@@ -433,7 +433,7 @@ extern "C"
             {
                 timer->cancel();
             }
-            SYLAR_LOG_ERROR(g_logger) << "connect addEvent(" << fd << ", WRITE) error";
+            BASE_LOG_ERROR(g_logger) << "connect addEvent(" << fd << ", WRITE) error";
         }
 
         int error = 0;

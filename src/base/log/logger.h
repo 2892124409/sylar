@@ -11,7 +11,7 @@
 #include "log_appender.h"
 #include "sylar/base/util.h"
 
-namespace sylar
+namespace base
 {
 
     class Logger;
@@ -195,33 +195,33 @@ namespace sylar
      */
     typedef LoggerManager LoggerMgr;
 
-} // namespace sylar
+} // namespace base
 
 /**
  * @brief 使用流式方式将日志级别level的日志写入到logger
  * @details 核心点：创建临时LogEventWrap对象，行结束时触发析构执行log
  */
-#define SYLAR_LOG_LEVEL(logger, level)                                                                        \
+#define BASE_LOG_LEVEL(logger, level)                                                                        \
     if (logger->getLevel() <= level)                                                                          \
-    sylar::LogEventWrap(sylar::LogEvent::ptr(new sylar::LogEvent(logger, level,                               \
-                                                                 __FILE__, __LINE__, 0, sylar::GetThreadId(), \
-                                                                 sylar::GetFiberId(), time(0), "main")))      \
+    base::LogEventWrap(base::LogEvent::ptr(new base::LogEvent(logger, level,                               \
+                                                                 __FILE__, __LINE__, 0, base::GetThreadId(), \
+                                                                 base::GetFiberId(), time(0), "main")))      \
         .getSS()
 
-#define SYLAR_LOG_DEBUG(logger) SYLAR_LOG_LEVEL(logger, sylar::LogLevel::DEBUG)
-#define SYLAR_LOG_INFO(logger) SYLAR_LOG_LEVEL(logger, sylar::LogLevel::INFO)
-#define SYLAR_LOG_WARN(logger) SYLAR_LOG_LEVEL(logger, sylar::LogLevel::WARN)
-#define SYLAR_LOG_ERROR(logger) SYLAR_LOG_LEVEL(logger, sylar::LogLevel::ERROR)
-#define SYLAR_LOG_FATAL(logger) SYLAR_LOG_LEVEL(logger, sylar::LogLevel::FATAL)
+#define BASE_LOG_DEBUG(logger) BASE_LOG_LEVEL(logger, base::LogLevel::DEBUG)
+#define BASE_LOG_INFO(logger) BASE_LOG_LEVEL(logger, base::LogLevel::INFO)
+#define BASE_LOG_WARN(logger) BASE_LOG_LEVEL(logger, base::LogLevel::WARN)
+#define BASE_LOG_ERROR(logger) BASE_LOG_LEVEL(logger, base::LogLevel::ERROR)
+#define BASE_LOG_FATAL(logger) BASE_LOG_LEVEL(logger, base::LogLevel::FATAL)
 
 /**
  * @brief 获取主日志器
  */
-#define SYLAR_LOG_ROOT() sylar::LoggerMgr::GetInstance()->getRoot()
+#define BASE_LOG_ROOT() base::LoggerMgr::GetInstance()->getRoot()
 
 /**
  * @brief 获取指定名称的日志器
  */
-#define SYLAR_LOG_NAME(name) sylar::LoggerMgr::GetInstance()->getLogger(name)
+#define BASE_LOG_NAME(name) base::LoggerMgr::GetInstance()->getLogger(name)
 
 #endif

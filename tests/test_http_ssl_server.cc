@@ -13,7 +13,7 @@
 #include <string>
 #include <unistd.h>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 namespace
 {
@@ -41,15 +41,15 @@ int main()
     std::string fixture_dir = PrepareSslFixtures();
 
     sylar::IOManager iom(2, true, "http_ssl_test");
-    sylar::http::HttpServer::ptr server(new sylar::http::HttpServer(&iom, &iom));
-    sylar::http::ssl::SslConfig config;
+    http::HttpServer::ptr server(new http::HttpServer(&iom, &iom));
+    http::ssl::SslConfig config;
     config.setCertificateFile(fixture_dir + "/server.crt");
     config.setPrivateKeyFile(fixture_dir + "/server.key");
     assert(server->setSslConfig(config));
 
-    server->getServletDispatch()->addServlet("/ping", [](sylar::http::HttpRequest::ptr,
-                                                         sylar::http::HttpResponse::ptr rsp,
-                                                         sylar::http::HttpSession::ptr) {
+    server->getServletDispatch()->addServlet("/ping", [](http::HttpRequest::ptr,
+                                                         http::HttpResponse::ptr rsp,
+                                                         http::HttpSession::ptr) {
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("secure-pong");
         return 0;
@@ -63,12 +63,12 @@ int main()
 
     iom.schedule([]() {
         sleep(1);
-        sylar::http::ssl::SslConfig client_config;
-        sylar::http::ssl::SslContext::ptr client_ctx(new sylar::http::ssl::SslContext(client_config, sylar::http::ssl::SslMode::CLIENT));
+        http::ssl::SslConfig client_config;
+        http::ssl::SslContext::ptr client_ctx(new http::ssl::SslContext(client_config, http::ssl::SslMode::CLIENT));
         assert(client_ctx->initialize());
-        sylar::http::ssl::SslSocket::ptr sock = sylar::http::ssl::SslSocket::CreateTCPSocket(client_ctx, sylar::http::ssl::SslMode::CLIENT);
+        http::ssl::SslSocket::ptr sock = http::ssl::SslSocket::CreateTCPSocket(client_ctx, http::ssl::SslMode::CLIENT);
         assert(sock->connect(sylar::Address::LookupAny("127.0.0.1:28443")));
-        sylar::http::ssl::SslSocketStream stream(sock);
+        http::ssl::SslSocketStream stream(sock);
         std::string req = "GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         assert(stream.writeFixSize(req.c_str(), req.size()) == static_cast<int>(req.size()));
         char buf[1024] = {0};
@@ -85,6 +85,6 @@ int main()
         server->stop();
     });
 
-    SYLAR_LOG_INFO(g_logger) << "test_http_ssl_server passed";
+    BASE_LOG_INFO(g_logger) << "test_http_ssl_server passed";
     return 0;
 }

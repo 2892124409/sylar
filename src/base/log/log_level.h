@@ -3,7 +3,7 @@
 
 #include <string>
 
-namespace sylar
+namespace base
 {
     /**
      * @brief 日志级别

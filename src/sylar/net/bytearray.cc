@@ -18,7 +18,7 @@
 namespace sylar
 {
 
-    static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
+    static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
     // ============================================================================
     // ByteArray 内存池管理
@@ -680,7 +680,7 @@ namespace sylar
         ofs.open(name, std::ios::trunc | std::ios::binary);
         if (!ofs)
         {
-            SYLAR_LOG_ERROR(g_logger) << "writeToFile name=" << name
+            BASE_LOG_ERROR(g_logger) << "writeToFile name=" << name
                                       << " error, errno=" << errno
                                       << " errstr=" << strerror(errno);
             return false;
@@ -709,7 +709,7 @@ namespace sylar
         ifs.open(name, std::ios::binary);
         if (!ifs)
         {
-            SYLAR_LOG_ERROR(g_logger) << "readFromFile name=" << name
+            BASE_LOG_ERROR(g_logger) << "readFromFile name=" << name
                                       << " error, errno=" << errno
                                       << " errstr=" << strerror(errno);
             return false;

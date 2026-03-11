@@ -13,7 +13,7 @@
 #include <functional>
 #include <iostream>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
+static base::Logger::ptr g_logger = BASE_LOG_ROOT();
 static std::atomic<int> g_stress_steps(0);
 static std::atomic<int> g_stress_checksum(0);
 
@@ -38,7 +38,7 @@ static void deep_stack_job(int depth)
     for (int i = 0; i < 10; ++i)
     {
         int step = g_stress_steps.fetch_add(1) + 1;
-        SYLAR_LOG_INFO(g_logger) << "shared_stack_stress step=" << step
+        BASE_LOG_INFO(g_logger) << "shared_stack_stress step=" << step
                                  << " fiber_id=" << sylar::Fiber::GetFiberId();
         if (i < 9)
         {
@@ -52,7 +52,7 @@ int main()
     g_stress_steps = 0;
     g_stress_checksum = 0;
 
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(true);
 
     sylar::Scheduler sc(1, true, "shared_stack_stress");
@@ -60,7 +60,7 @@ int main()
     sc.schedule([]() { deep_stack_job(8); });
     sc.stop();
 
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(false);
 
     std::cout << "shared_stack_stress steps=" << static_cast<int>(g_stress_steps)
@@ -69,6 +69,6 @@ int main()
     assert(static_cast<int>(g_stress_steps) == 10);
     assert(static_cast<int>(g_stress_checksum) != 0);
 
-    SYLAR_LOG_INFO(g_logger) << "test_shared_stack_stress passed";
+    BASE_LOG_INFO(g_logger) << "test_shared_stack_stress passed";
     return 0;
 }

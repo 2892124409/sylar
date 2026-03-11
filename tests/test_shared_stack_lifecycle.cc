@@ -13,14 +13,14 @@
 #include <iostream>
 #include <stdexcept>
 
-static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
+static base::Logger::ptr g_logger = BASE_LOG_ROOT();
 static std::atomic<int> g_lifecycle_steps(0);
 static sylar::Fiber::ptr g_lifecycle_fiber;
 
 static void throwing_job()
 {
     g_lifecycle_steps.fetch_add(1);
-    SYLAR_LOG_INFO(g_logger) << "throwing_job fiber_id=" << sylar::Fiber::GetFiberId();
+    BASE_LOG_INFO(g_logger) << "throwing_job fiber_id=" << sylar::Fiber::GetFiberId();
     throw std::runtime_error("shared stack lifecycle test exception");
 }
 
@@ -29,7 +29,7 @@ static void reset_job()
     for (int i = 0; i < 2; ++i)
     {
         int step = g_lifecycle_steps.fetch_add(1) + 1;
-        SYLAR_LOG_INFO(g_logger) << "reset_job step=" << step
+        BASE_LOG_INFO(g_logger) << "reset_job step=" << step
                                  << " fiber_id=" << sylar::Fiber::GetFiberId();
         if (i == 0)
         {
@@ -43,7 +43,7 @@ int main()
     sylar::Fiber::ResetSharedStackStats();
     g_lifecycle_steps.store(0);
 
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(true);
 
     {
@@ -71,7 +71,7 @@ int main()
     assert(f->getState() == sylar::Fiber::TERM);
     assert(g_lifecycle_steps.load() == 3);
 
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(false);
 
     std::cout << "shared_stack_lifecycle steps=" << g_lifecycle_steps.load()
@@ -82,6 +82,6 @@ int main()
     assert(stats.save_count > 0);
     assert(stats.restore_count > 0);
 
-    SYLAR_LOG_INFO(g_logger) << "test_shared_stack_lifecycle passed";
+    BASE_LOG_INFO(g_logger) << "test_shared_stack_lifecycle passed";
     return 0;
 }

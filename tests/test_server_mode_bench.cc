@@ -65,11 +65,11 @@ std::string modeLabel(const Mode& mode) {
 }
 
 void applyMode(const Mode& mode, const BenchConfig& config) {
-    sylar::Config::Lookup<bool>("fiber.pool.enabled", true, "enable fiber pool")
+    base::Config::Lookup<bool>("fiber.pool.enabled", true, "enable fiber pool")
         ->setValue(mode.pool_enabled);
-    sylar::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
+    base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")
         ->setValue(mode.shared_stack);
-    sylar::Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size")
+    base::Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size")
         ->setValue(config.shared_stack_size);
 }
 
@@ -379,8 +379,8 @@ void printSummary(const std::vector<BenchResult>& results, const std::string& pr
 } // namespace
 
 int main(int argc, char** argv) {
-    sylar::LoggerMgr::GetInstance()->getRoot()->setLevel(sylar::LogLevel::FATAL);
-    sylar::LoggerMgr::GetInstance()->getLogger("system")->setLevel(sylar::LogLevel::FATAL);
+    base::LoggerMgr::GetInstance()->getRoot()->setLevel(sylar::LogLevel::FATAL);
+    base::LoggerMgr::GetInstance()->getLogger("system")->setLevel(sylar::LogLevel::FATAL);
 
     BenchConfig config;
 
