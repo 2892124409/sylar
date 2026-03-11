@@ -41,6 +41,10 @@ set(SYLAR_SOURCES
     sylar/http/http_response.cc
     sylar/http/http_framework_config.cc
     sylar/http/http_error.cc
+    sylar/http/ssl/ssl_config.cc
+    sylar/http/ssl/ssl_context.cc
+    sylar/http/ssl/ssl_socket.cc
+    sylar/http/ssl/ssl_socket_stream.cc
     sylar/http/http_context.cc
     sylar/http/http_parser.cc
     sylar/http/http_session.cc
@@ -51,6 +55,8 @@ set(SYLAR_SOURCES
     sylar/http/session_storage.cc
     sylar/http/session_manager.cc
     sylar/http/middleware.cc
+    sylar/http/middleware/cors/cors_config.cc
+    sylar/http/middleware/cors/cors_middleware.cc
     sylar/http/sse.cc
 )
 
@@ -58,7 +64,7 @@ set(SYLAR_SOURCES
 add_library(sylar SHARED ${SYLAR_SOURCES})
 
 # 链接库
-target_link_libraries(sylar yaml-cpp pthread dl)
+target_link_libraries(sylar yaml-cpp pthread dl ssl crypto)
 
 # 定义输出路径
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
@@ -132,6 +138,12 @@ target_link_libraries(test_http_router sylar)
 
 add_executable(test_http_server tests/test_http_server.cc)
 target_link_libraries(test_http_server sylar)
+
+add_executable(test_http_ssl_server tests/test_http_ssl_server.cc)
+target_link_libraries(test_http_ssl_server sylar)
+
+add_executable(test_cors_middleware tests/test_cors_middleware.cc)
+target_link_libraries(test_cors_middleware sylar)
 
 add_executable(test_http_dispatch tests/test_http_dispatch.cc)
 target_link_libraries(test_http_dispatch sylar)

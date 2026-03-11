@@ -8,6 +8,194 @@
 
 ---
 
+## 第七阶段：HTTPS/SSL 接入与 HTTP 模块工程化收尾
+
+### 0. 第七阶段改动类速览
+#### 0.1 `ssl/` 模块新增
+- 新增 `ssl_types.h`
+- 新增 `ssl_config.h / ssl_config.cc`
+- 新增 `ssl_context.h / ssl_context.cc`
+- 新增 `ssl_socket.h / ssl_socket.cc`
+- 新增 `ssl_socket_stream.h / ssl_socket_stream.cc`
+
+#### 0.2 `http_server.h / http_server.cc`
+- `HttpServer` 新增 `setSslConfig()`
+- `HttpServer` 可基于 `SslContext` 把普通 TCP 客户端包装为 `SslSocket`
+- 维持原有 HTTP 主循环、分发、400/413、keep-alive 语义
+
+#### 0.3 `middleware/cors/` 模块新增
+- 新增 `cors_config.h / cors_config.cc`
+- 新增 `cors_middleware.h / cors_middleware.cc`
+- 提供框架级内建 CORS middleware 示例实现
+
+#### 0.4 测试改动
+- 新增 `test_http_ssl_server`
+- 新增 `test_cors_middleware`
+- 回归现有 HTTP / router / session / SSE 测试
+
+### 1. 本阶段目标
+#### 模块作用
+第七阶段的目标，不再是继续扩很多新功能点，而是完成“HTTP 框架层基本对齐参考仓库”的最后一轮工程化收口。
+
+第六阶段结束后，核心 HTTP 模块边界已经基本形成：
+
+- `http_context`
+- `router`
+- `middleware`
+- `session`
+- `http_server`
+
+但与参考仓库相比，还差三块关键拼图：
+
+1. 独立 `ssl/` 模块与 HTTPS 能力
+2. 至少一个框架级内建 middleware 成品模块
+3. 更接近参考仓库的目录级工程边界
+
+所以第七阶段的重点是：
+
+- 补齐 HTTPS/SSL
+- 补齐内建 CORS middleware
+- 完成 HTTP 层最后的结构收尾
+
+---
+
+### 2. 本阶段完成项
+#### 设计要点
+
+#### 1. `ssl/` 模块落地
+这一项是第七阶段的主线：给 HTTP 层补齐独立 SSL 边界。
+
+##### 新增模块职责
+- `SslTypes`：定义 SSL 侧基础枚举
+- `SslConfig`：承载证书、私钥、CA、校验开关等配置
+- `SslContext`：管理 OpenSSL 的 `SSL_CTX`
+- `SslSocket`：把已有 `Socket` 扩展为可进行 TLS 握手与加解密收发的连接对象
+- `SslSocketStream`：把 `SslSocket` 包装成 Stream/SocketStream 风格接口，方便沿用现有收发模型
+
+##### 设计取舍
+- 继续复用现有 `Socket` / `SocketStream` / `HttpSession` 主链路
+- 不单独重写一套 HTTPS 版 `HttpSession`
+- 通过 `SslSocket` 在 socket 层完成“加密连接替换”，上层 HTTP 解析逻辑保持不变
+
+##### 当前效果
+- HTTPS 连接在进入 `HttpSession` 之前完成 TLS 握手
+- `HttpContext`、`HttpParser`、`ServletDispatch`、`SessionManager` 不需要因为 HTTPS 单独改写逻辑
+
+#### 2. `HttpServer` 接入 HTTPS
+第七阶段让 `HttpServer` 从“只能处理明文 HTTP”扩展为“也能处理 HTTPS”。
+
+##### 新增能力
+- `setSslConfig()`：加载并初始化 `SslContext`
+- `isSSLEnabled()`：查询当前是否启用 HTTPS
+- `addMiddleware()`：补一个更像框架门面的 middleware 注册入口
+
+##### 请求链路变化
+现在 `handleClient()` 会先判断：
+
+- 若未启用 SSL：沿用原普通 `Socket -> HttpSession` 路径
+- 若启用 SSL：先把 `Socket` 包装为 `SslSocket` 并完成握手，再交给 `HttpSession`
+
+##### 当前取舍
+- 保持 `HttpServer` 仍然是统一编排入口
+- 保持普通 HTTP 行为完全兼容
+- 先实现服务端 HTTPS 主链路，不在本阶段扩展复杂双向证书认证场景
+
+#### 3. 内建 `CorsMiddleware` 新增
+这一项是第七阶段“框架成品感”增强的关键。
+
+##### 为什么选 CORS
+- 参考仓库已有 `CorsMiddleware`
+- 它是非常典型的 HTTP 框架级 middleware
+- 适合验证当前 `MiddlewareChain` 是否已经能承载真正的框架功能，而不只是抽象接口
+
+##### 当前能力
+- `CorsConfig`：配置允许源、允许方法、允许头、暴露头、最大缓存时间、是否允许凭证
+- `CorsMiddleware`：
+  - 普通跨域请求时补齐 CORS 响应头
+  - `OPTIONS` 预检请求时直接构造 204 响应并短路主业务链路
+
+##### 当前取舍
+- 先做最常用的 CORS 核心能力
+- 先不做更复杂的动态 origin 白名单源加载
+
+#### 4. 工程结构继续向参考仓库靠拢
+这一阶段没有强制一次性移动所有历史文件，但已经开始按目标目录组织新增模块：
+
+- `sylar/http/ssl/`
+- `sylar/http/middleware/cors/`
+
+这意味着当前工程结构已经不再完全平铺，开始沿着“HTTP 模块 -> 子域目录”的方向收口。
+
+---
+
+### 3. 测试与验证
+#### 当前验证结果
+第七阶段新增测试：
+
+- `test_http_ssl_server`
+  - 启动 HTTPS 服务
+  - 动态生成测试证书
+  - 用 `SslSocket` 作为客户端完成 TLS 握手并发起 HTTP 请求
+  - 验证 HTTPS 响应成功返回
+
+- `test_cors_middleware`
+  - 验证普通跨域请求的 CORS 响应头
+  - 验证 `OPTIONS` 预检请求短路返回 204
+
+回归通过：
+
+- `./bin/test_cors_middleware`
+- `./bin/test_http_ssl_server`
+- `./bin/test_http_server`
+- `./bin/test_http_dispatch`
+- `./bin/test_http_context`
+- `./bin/test_http_router`
+- `./bin/test_http_parser`
+- `./bin/test_session_manager`
+- `./bin/test_sse_writer`
+- `./bin/test_sse_server`
+
+---
+
+### 4. 当前实现与后续优化
+#### 设计取舍
+
+**当前实现：**
+- 已具备独立 `ssl/` 模块，`HttpServer` 可跑 HTTPS
+- 已具备一个框架级内建 middleware：`CorsMiddleware`
+- 工程目录边界比第六阶段更接近参考仓库
+
+**仍可继续优化：**
+- 进一步整理旧文件目录，把更多模块迁移到子目录中
+- 若未来需要，可补更复杂的 SSL 双向认证与更细粒度配置
+- route group / group middleware 仍可作为增强项继续推进
+
+---
+
+### 5. 阶段总结
+#### 一句话总结
+第七阶段的核心，是补齐 HTTPS/SSL 与内建 CORS middleware，让 HTTP 框架层从“边界已经拆清”进一步走到“核心能力和工程结构都基本对齐参考仓库”。
+
+#### 当前结论
+到这里，当前项目已经可以认为达成了“HTTP 框架层基本对齐参考仓库”的目标：
+
+- 模块边界对齐
+- 核心能力对齐
+- 工程结构接近
+- 但不追求逐文件逐接口复制
+
+### 6. 后续方向
+#### 若继续演进可以做什么
+后续如果还要继续深化，不再是“补齐参考仓库差距”，而是走自己的增强路线，例如：
+
+1. route group / group middleware
+2. 更丰富的内建 middleware 生态
+3. Redis/DB `SessionStorage`
+4. 更强路由表达能力
+5. 更完整的 HTTPS 配置与双向认证
+
+---
+
 ## 第一阶段：HTTP 核心框架骨架
 
 ### 0. `http.h / http.cc`

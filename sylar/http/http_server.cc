@@ -3,6 +3,7 @@
 #include "sylar/http/http_error.h"
 #include "sylar/http/http_framework_config.h"
 #include "sylar/http/http_parser.h"
+#include "sylar/http/ssl/ssl_socket.h"
 #include "sylar/log/logger.h"
 
 namespace sylar
@@ -30,9 +31,39 @@ namespace sylar
             sylar::net::TcpServer::stop();
         }
 
+        bool HttpServer::setSslConfig(const ssl::SslConfig &config)
+        {
+            ssl::SslContext::ptr context(new ssl::SslContext(config, ssl::SslMode::SERVER));
+            if (!context->initialize())
+            {
+                return false;
+            }
+            m_sslContext = context;
+            return true;
+        }
+
         void HttpServer::handleClient(Socket::ptr client)
         {
             // 把底层 TCP 连接包装成 HttpSession，后续 HTTP 收发都经由它完成。
+            if (m_sslContext)
+            {
+                ssl::SslSocket::ptr ssl_client = ssl::SslSocket::FromSocket(client, m_sslContext, ssl::SslMode::SERVER);
+                if (!ssl_client || !ssl_client->handshake())
+                {
+                    if (ssl_client)
+                    {
+                        ssl_client->close();
+                    }
+                    else if (client)
+                    {
+                        client->close();
+                    }
+                    SYLAR_LOG_ERROR(g_logger) << "HttpServer SSL handshake failed";
+                    return;
+                }
+                client = ssl_client;
+            }
+
             HttpSession::ptr session(new HttpSession(client));
 
             // keep-alive 场景下，一个连接可承载多次请求，因此循环处理直到需要断开。

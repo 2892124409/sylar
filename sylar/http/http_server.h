@@ -3,6 +3,8 @@
 
 #include "sylar/http/servlet.h"
 #include "sylar/http/session_manager.h"
+#include "sylar/http/ssl/ssl_config.h"
+#include "sylar/http/ssl/ssl_context.h"
 #include "sylar/net/tcp_server.h"
 
 namespace sylar
@@ -42,6 +44,15 @@ namespace sylar
             /// 返回 Session 管理器，便于后续业务或框架扩展使用
             SessionManager::ptr getSessionManager() const { return m_sessionManager; }
 
+            /// 直接向分发器注册 middleware 的便捷入口。
+            void addMiddleware(Middleware::ptr middleware) { m_dispatch->addMiddleware(middleware); }
+
+            /// 配置 HTTPS/SSL，成功后当前 HttpServer 将按 HTTPS 方式处理连接。
+            bool setSslConfig(const ssl::SslConfig &config);
+
+            /// 当前服务器是否已启用 SSL。
+            bool isSSLEnabled() const { return m_sslContext != nullptr; }
+
             /// 停止 HTTP 服务并关闭 SessionManager 的后台清理定时器
             virtual void stop() override;
 
@@ -63,6 +74,8 @@ namespace sylar
             ServletDispatch::ptr m_dispatch;
             /// Session 管理器：负责基于 SID 的会话创建、查找和续期
             SessionManager::ptr m_sessionManager;
+            /// HTTPS SSL 上下文；为空表示当前服务走普通 HTTP。
+            ssl::SslContext::ptr m_sslContext;
         };
 
     } // namespace http
