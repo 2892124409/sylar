@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <sstream>
 
 namespace sylar
 {
@@ -18,6 +17,33 @@ namespace sylar
                                [](unsigned char c)
                                { return static_cast<char>(std::tolower(c)); });
                 return lower;
+            }
+
+            /**
+             * @brief 估算 header 序列化后的总字节数
+             * @details
+             * 用于 reserve() 预分配，避免拼接过程中多次扩容。
+             * 估算公式：每个 header = key.size() + ": ".size(2) + value.size() + "\r\n".size(2)
+             */
+            static size_t EstimateHeadersSize(const HttpResponse::MapType &headers,
+                                              const std::vector<std::string> &setCookies)
+            {
+                // 状态行 "HTTP/1.1 200 OK\r\n" 约 20~30 字节
+                // 加上 Connection / Content-Length 自动补齐行约 40 字节
+                // 尾部空行 "\r\n" 2 字节
+                size_t size = 72;
+                for (HttpResponse::MapType::const_iterator it = headers.begin();
+                     it != headers.end(); ++it)
+                {
+                    // "key: value\r\n"
+                    size += it->first.size() + 2 + it->second.size() + 2;
+                }
+                for (size_t i = 0; i < setCookies.size(); ++i)
+                {
+                    // "set-cookie: value\r\n"
+                    size += 12 + setCookies[i].size() + 2;
+                }
+                return size;
             }
         } // namespace
 
@@ -51,95 +77,116 @@ namespace sylar
 
         std::string HttpResponse::toHeaderString() const
         {
-            // 字符串流用于高可读性拼接 HTTP 报文文本
-            std::ostringstream ss;
-            // reason phrase：
-            // - 用户没自定义时，用状态码默认文本（如 200 -> OK）
-            // - 有自定义时优先使用自定义文本
             std::string reason = m_reason.empty() ? HttpStatusToString(m_status) : m_reason;
-            // 写入状态行：HTTP/1.1 200 OK\r\n
-            ss << getVersionString() << " " << static_cast<int>(m_status) << " " << reason << "\r\n";
 
-            // 标记是否已有 Connection 头，避免重复写
+            // 预估总大小，一次 reserve 到位，避免多次扩容
+            size_t estimated = EstimateHeadersSize(m_headers, m_setCookies);
+            std::string result;
+            result.reserve(estimated);
+
+            // 状态行：HTTP/1.1 200 OK\r\n
+            result.append(getVersionString());
+            result.append(" ");
+            result.append(std::to_string(static_cast<int>(m_status)));
+            result.append(" ");
+            result.append(reason);
+            result.append("\r\n");
+
+            // 写出所有普通响应头
             bool has_connection = false;
-            // 写出所有普通响应头（m_headers）
             for (MapType::const_iterator it = m_headers.begin(); it != m_headers.end(); ++it)
             {
-                // 记录是否已有 Connection
                 if (it->first == "connection")
                 {
                     has_connection = true;
                 }
-                // 逐行写出：Key: Value\r\n
-                ss << it->first << ": " << it->second << "\r\n";
+                result.append(it->first);
+                result.append(": ");
+                result.append(it->second);
+                result.append("\r\n");
             }
 
             // 若用户未显式给 Connection，则按 keepalive 语义自动补
             if (!has_connection)
             {
-                ss << "connection: " << (m_keepalive ? "keep-alive" : "close") << "\r\n";
+                result.append("connection: ");
+                result.append(m_keepalive ? "keep-alive" : "close");
+                result.append("\r\n");
             }
-            // 逐条写 Set-Cookie（一个响应可能有多个）
+            // 逐条写 Set-Cookie
             for (size_t i = 0; i < m_setCookies.size(); ++i)
             {
-                ss << "set-cookie: " << m_setCookies[i] << "\r\n";
+                result.append("set-cookie: ");
+                result.append(m_setCookies[i]);
+                result.append("\r\n");
             }
-            // 头部结束空行（\r\n）
-            ss << "\r\n";
-            // 仅返回"头部文本"，不带 body / Content-Length（供流式场景使用）
-            return ss.str();
+            // 头部结束空行
+            result.append("\r\n");
+            return result;
         }
 
         std::string HttpResponse::toString() const
         {
-            // 字符串流用于组装完整 HTTP 响应（头 + 体）
-            std::ostringstream ss;
-            // reason phrase 选择逻辑同 toHeaderString()
             std::string reason = m_reason.empty() ? HttpStatusToString(m_status) : m_reason;
-            // 写状态行
-            ss << getVersionString() << " " << static_cast<int>(m_status) << " " << reason << "\r\n";
 
-            // 记录是否已有 Content-Length / Connection，避免重复写
+            // 预估总大小 = header 部分 + body，一次 reserve 到位
+            size_t estimated = EstimateHeadersSize(m_headers, m_setCookies) + m_body.size();
+            std::string result;
+            result.reserve(estimated);
+
+            // 状态行
+            result.append(getVersionString());
+            result.append(" ");
+            result.append(std::to_string(static_cast<int>(m_status)));
+            result.append(" ");
+            result.append(reason);
+            result.append("\r\n");
+
+            // 写普通响应头，同时检测是否已有 Content-Length / Connection
             bool has_content_length = false;
             bool has_connection = false;
-            // 写普通响应头
             for (MapType::const_iterator it = m_headers.begin(); it != m_headers.end(); ++it)
             {
-                // 用户已设置 Content-Length
                 if (it->first == "content-length")
                 {
                     has_content_length = true;
                 }
-                // 用户已设置 Connection
                 else if (it->first == "connection")
                 {
                     has_connection = true;
                 }
-                // 写头部行
-                ss << it->first << ": " << it->second << "\r\n";
+                result.append(it->first);
+                result.append(": ");
+                result.append(it->second);
+                result.append("\r\n");
             }
 
-            // 若未提供 Connection，按 keepalive 自动补齐
+            // 自动补齐 Connection
             if (!has_connection)
             {
-                ss << "connection: " << (m_keepalive ? "keep-alive" : "close") << "\r\n";
+                result.append("connection: ");
+                result.append(m_keepalive ? "keep-alive" : "close");
+                result.append("\r\n");
             }
-            // 若未提供 Content-Length，按当前 body 实际字节数自动补齐
+            // 自动补齐 Content-Length
             if (!has_content_length)
             {
-                ss << "content-length: " << m_body.size() << "\r\n";
+                result.append("content-length: ");
+                result.append(std::to_string(m_body.size()));
+                result.append("\r\n");
             }
             // 写所有 Set-Cookie 头
             for (size_t i = 0; i < m_setCookies.size(); ++i)
             {
-                ss << "set-cookie: " << m_setCookies[i] << "\r\n";
+                result.append("set-cookie: ");
+                result.append(m_setCookies[i]);
+                result.append("\r\n");
             }
             // 头部结束空行
-            ss << "\r\n";
+            result.append("\r\n");
             // 追加响应体正文
-            ss << m_body;
-            // 返回完整 HTTP 响应文本
-            return ss.str();
+            result.append(m_body);
+            return result;
         }
 
     } // namespace http
