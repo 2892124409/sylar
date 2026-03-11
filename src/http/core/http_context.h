@@ -64,6 +64,12 @@ namespace sylar
 
             /// 连接级接收缓冲区：跨多次 read() 累积数据，处理半包与粘包。
             std::string m_buffer;
+
+            /// 读偏移量：标记 m_buffer 中已消费但尚未 erase 的前缀长度。
+            /// 解析成功后只推进偏移量，延迟到下一次 recvRequest 入口才执行
+            /// 一次 erase 紧凑。这样在 keep-alive 场景下，上层处理请求期间
+            /// 无需承担 O(n) 搬移开销。
+            size_t m_offset = 0;
         };
 
     } // namespace http

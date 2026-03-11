@@ -14,17 +14,24 @@ namespace sylar
             // 循环读取并解析，直到成功返回请求或失败退出。
             while (true)
             {
-                // 记录本轮 parse 消费的字节数。
+                // 如果有未消费的前缀，先紧凑一次再解析。
+                // 这样 parser 始终拿到干净的 m_buffer 引用，无需临时子串。
+                if (m_offset > 0)
+                {
+                    m_buffer.erase(0, m_offset);
+                    m_offset = 0;
+                }
+
                 size_t consumed = 0;
-                // 先尝试直接解析当前缓冲区中的数据。
                 HttpRequest::ptr request = m_parser.parse(m_buffer, consumed);
 
-                // 解析成功：移除已消费字节，并返回请求对象。
+                // 解析成功：记录偏移量而不立刻 erase，下次循环再紧凑。
                 if (request)
                 {
-                    // 保留未消费尾部数据，支持粘包与 keep-alive 多请求。
-                    m_buffer.erase(0, consumed);
-                    // 返回成功解析出的请求。
+                    // 累积偏移量，延迟 erase 到下一轮循环入口。
+                    // 对于 keep-alive 连接，下一次 recvRequest 调用时才紧凑，
+                    // 避免每次解析成功都做一次 O(n) 搬移。
+                    m_offset = consumed;
                     return request;
                 }
 
@@ -36,7 +43,6 @@ namespace sylar
 
                 // 当前数据还不完整，继续从底层流读取更多字节。
                 char buffer[4096];
-                // 从流中读取数据块。
                 int rt = stream.read(buffer, sizeof(buffer));
 
                 // 读取失败或连接关闭：返回空指针。
@@ -55,8 +61,9 @@ namespace sylar
         {
             // 复位内部解析器的错误信息。
             m_parser.reset();
-            // 清空连接级缓冲区，回到初始上下文状态。
+            // 清空连接级缓冲区和偏移量，回到初始上下文状态。
             m_buffer.clear();
+            m_offset = 0;
         }
 
     } // namespace http
