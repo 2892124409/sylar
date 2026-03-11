@@ -2822,6 +2822,94 @@ keep-alive 能成立的关键并不是一个 if，而是：
 - 新增 `ssl_socket.h / ssl_socket.cc`
 - 新增 `ssl_socket_stream.h / ssl_socket_stream.cc`
 
+##### `SslContext` 类说明（`src/http/ssl/ssl_context.h/.cc`）
+`SslContext` 的定位是“TLS 运行环境上下文”，负责管理 OpenSSL 的 `SSL_CTX` 生命周期。
+
+它的职责边界：
+- 负责基于 `SslConfig` 初始化 `SSL_CTX`；
+- 负责在服务端模式下加载证书/私钥并校验匹配；
+- 负责加载可选 CA 与设置证书校验策略；
+- 不负责单连接握手与数据收发（那是 `SslSocket` 的职责）。
+
+核心流程（`initialize()`）：
+1. 执行 OpenSSL 全局初始化（只做一次）；
+2. 根据模式选择 `TLS_server_method()` 或 `TLS_client_method()`；
+3. 调 `SSL_CTX_new` 创建上下文；
+4. 服务端模式下加载证书、私钥并执行 `SSL_CTX_check_private_key`；
+5. 如配置了 CA 文件则加载；
+6. 按 `verifyPeer` 设置 `SSL_VERIFY_PEER/SSL_VERIFY_NONE`。
+
+学习时要抓住的点：
+- `SslContext` 是“连接之前”的上下文，不是“连接本身”；
+- `SSL_CTX` 可被多个连接复用；
+- 真正每个连接的 TLS 会话对象是 `SSL*`，由 `SslSocket` 基于 `SSL_CTX` 创建。
+
+###### 学习问答记录（`SSL_CTX* m_ctx`）
+**Q：`SslContext` 里的 `SSL_CTX* m_ctx` 是什么？**
+
+**A：**
+`m_ctx` 是 OpenSSL 的“上下文句柄”，可以理解成 TLS 连接工厂的核心资源。
+
+它保存的是“可复用配置与状态”，例如：
+- 证书与私钥配置；
+- 算法与协议参数；
+- 证书校验策略。
+
+在当前实现中：
+1. `initialize()` 里通过 `SSL_CTX_new(...)` 创建 `m_ctx`；
+2. 析构函数里通过 `SSL_CTX_free(...)` 释放 `m_ctx`。
+
+**Q：什么叫“连接级别之上”？**
+
+**A：**
+意思是它不属于某一条具体连接，而是可以被多条连接共享复用：
+
+- `SSL_CTX*`：上下文级（共享，通常一个server实例一份）；
+- `SSL*`：连接级（每条连接一个，会话对象）。
+
+也就是说，每个连接的 `SSL*` 都是基于 `SSL_CTX*` 创建出来的。
+
+##### `SslSocket` 类说明（`src/http/ssl/ssl_socket.h/.cc`）
+`SslSocket` 的定位是“TLS 连接执行层”：它继承 `Socket`，但把原本明文收发替换为基于 `SSL*` 的加密收发。
+
+它和网络层 `Socket` 的关系：
+- `Socket`：只负责 TCP 连接和明文 `send/recv`；
+- `SslSocket`：在 TCP 之上增加 TLS 会话，负责 `initializeSsl + handshake + SSL_read/SSL_write`。
+
+这意味着上层调用接口仍然是 socket 风格，但底层传输语义已从“明文”升级为“加密”。
+
+###### 学习问答记录（`SslSocket`）
+**Q：`typedef struct ssl_st SSL;` 只是别名吗？**
+
+**A：**
+是的，本质上就是给 OpenSSL 的 `struct ssl_st` 起了一个可用名 `SSL`。
+
+但它同时有一个工程意义：
+- 这是“前置声明 + 类型别名”写法；
+- 能在头文件里直接使用 `SSL*`，而不需要立刻包含 `<openssl/ssl.h>`；
+- 从而减少头文件耦合与编译开销。
+
+**Q：`SslSocket` 相比 `Socket` 重写了哪些函数？新增了哪些？**
+
+**A：**
+`SslSocket` 对 `Socket` 的核心重写是“连接与收发路径”四件事：
+
+1. 重写 `connect(...)`：TCP 建连后补 `initializeSsl()` + `handshake()`；
+2. 重写 `close()`：先关闭 TLS 会话（`SSL_shutdown/SSL_free`）再关底层 fd；
+3. 重写 `send(...) / recv(...)`（含 iovec 版本）：改为走 `SSL_write/SSL_read`，这两个函数就是 TLS 版的 send/recv；
+4. 保持接口形态兼容，便于复用现有 `SocketStream/HttpSession` 链路。
+
+此外新增了 TLS 专属能力：
+- `initializeSsl()`：创建 `SSL*` 并绑定套接字文件描述符 fd；
+- `handshake()`：按模式执行 `SSL_accept/SSL_connect`；
+- `isHandshakeDone()`：握手状态查询；
+- `CreateTCPSocket(...)` / `FromSocket(...)`：创建或包装 TLS 连接对象。
+
+学习时要抓住的点：
+- `SslContext` 负责“共享上下文（SSL_CTX）”；
+- `SslSocket` 负责“单连接会话（SSL*）”；
+- 二者共同完成 HTTPS 的传输层接入。
+
 #### 0.2 `http_server.h / http_server.cc`
 - `HttpServer` 新增 `setSslConfig()`
 - `HttpServer` 可基于 `SslContext` 把普通 TCP 客户端包装为 `SslSocket`
@@ -2831,6 +2919,56 @@ keep-alive 能成立的关键并不是一个 if，而是：
 - 新增 `cors_config.h / cors_config.cc`
 - 新增 `cors_middleware.h / cors_middleware.cc`
 - 提供框架级内建 CORS middleware 示例实现
+
+##### 类/模块作用
+第七阶段新增 `middleware/cors` 的目标，不是引入新的分发机制，而是在现有 `MiddlewareChain` 上落地一个可直接使用的“框架级能力”。
+
+这个模块负责统一处理跨域响应策略，避免每个业务路由重复设置：
+- `Access-Control-Allow-Origin`
+- `Access-Control-Allow-Methods`
+- `Access-Control-Allow-Headers`
+- `Access-Control-Allow-Credentials`
+- `Access-Control-Max-Age`
+- `Access-Control-Expose-Headers`
+
+##### 新增内容拆分
+1. `CorsConfig`（策略对象）
+   - 负责描述跨域策略参数，不参与请求分发；
+   - 关键字段：`allowedOrigins`、`allowedMethods`、`allowedHeaders`、`exposeHeaders`、`maxAge`、`allowCredentials`；
+   - 提供 `isOriginAllowed(origin)` 作为来源判断入口。
+
+2. `CorsMiddleware`（执行对象）
+   - 基于 `Middleware` 抽象实现 CORS 规则落地；
+   - `before()` 负责预检短路与基础头写入；
+   - `after()` 负责兜底补头与 `Expose-Headers` 输出。
+
+##### 执行语义（重点）
+- 普通请求：
+  - `before()` 写通用头后返回 `true`；
+  - 继续进入路由/handler；
+  - `after()` 再兜底补齐头部。
+
+- `OPTIONS` 预检请求：
+  - `before()` 直接构造 `204 No Content`；
+  - 写入 `Allow-Methods/Allow-Headers/Max-Age`；
+  - 返回 `false`，短路业务 handler。
+
+##### 与 Middleware 抽象的关系
+`CorsMiddleware` 和 `Middleware` 不是并列关系，而是“抽象层与实现层”的关系：
+- `Middleware` 解决“怎么挂扩展点”；
+- `CorsMiddleware` 解决“跨域策略怎么落地”。
+
+这标志着框架从“有机制”进入“有内建成品能力”的阶段。
+
+##### 当前取舍
+- 先实现最常用 CORS 主链路；
+- 先不引入动态 Origin 白名单源加载；
+- 先不做路径级/租户级细粒度策略分层。
+
+##### 对应测试关注点
+- `test_cors_middleware` 验证普通跨域请求头是否正确；
+- 验证 `OPTIONS` 预检是否返回 204 并正确短路；
+- 验证模块与现有 `ServletDispatch + MiddlewareChain` 链路兼容。
 
 #### 0.4 测试改动
 - 新增 `test_http_ssl_server`
@@ -2884,6 +3022,101 @@ keep-alive 能成立的关键并不是一个 if，而是：
 ##### 当前效果
 - HTTPS 连接在进入 `HttpSession` 之前完成 TLS 握手
 - `HttpContext`、`HttpParser`、`ServletDispatch`、`SessionManager` 不需要因为 HTTPS 单独改写逻辑
+
+##### 学习问答记录（SSL/TLS）
+**Q：什么是 SSL？**
+
+**A：**
+SSL 是历史叫法，现在标准名称是 TLS。它不是业务协议，而是“传输安全层”，位置在：
+
+```text
+HTTP
+  ↓
+TLS(SSL)
+  ↓
+TCP
+```
+
+TLS 的核心能力有三件事：
+
+1. **机密性（Confidentiality）**：传输数据被加密，抓包也看不到明文；
+2. **完整性（Integrity）**：可检测篡改，防止中间人改包；
+3. **身份认证（Authentication）**：通过证书证明服务端身份，避免连到伪造站点。
+
+---
+
+**Q：为什么 HTTP 框架必须支持 SSL/TLS？**
+
+**A：**
+因为明文 HTTP 在真实网络环境下风险很高，核心问题是：
+
+1. **可窃听**：Cookie、Token、业务数据会直接暴露；
+2. **可篡改**：中间链路可插入/修改响应内容；
+3. **难信任对端**：客户端无法确认“对面真的是目标服务器”。
+
+对框架层来说，TLS 不是“锦上添花”，而是生产可用性的基础能力。
+
+---
+
+**Q：TLS 握手和 TCP 握手是什么关系？**
+
+**A：**
+两者是不同层次、不同目标的握手：
+
+1. **TCP 三次握手**：先建立“可通信的传输连接”；
+2. **TLS 握手**：在 TCP 建连后进行，协商加密套件、校验证书、生成会话密钥；
+3. **应用数据传输**：握手完成后，HTTP 请求/响应才会进入加密通道。
+
+也就是说：TCP 解决“能不能连上”，TLS 解决“连上后是否安全可信”。
+
+---
+
+**Q：SSL/TLS 的原理是什么？**
+
+**A：**
+TLS 的核心原理可以概括为：
+
+```text
+用非对称加密做身份认证与密钥协商，
+再用对称加密做高效数据传输，
+并用消息认证/AEAD保证完整性。
+```
+
+可拆成三个层次理解：
+
+1. **身份认证层**
+   - 服务端通过证书证明身份；
+   - 客户端校验证书链、有效期、域名匹配，防止连接到伪造服务。
+
+2. **密钥协商层**
+   - 通过握手过程协商会话密钥（现代常见 ECDHE）；
+   - 目标是双方在不暴露密钥明文的前提下，得到同一份会话密钥。
+
+3. **数据保护层**
+   - 握手完成后，应用层数据（HTTP）使用会话密钥做对称加密；
+   - 同时附带完整性校验，确保报文未被篡改。
+
+为什么不是全程用非对称加密：
+
+- 非对称加密计算开销大，适合做握手阶段的认证与协商；
+- 对称加密性能高，适合承载后续高频业务数据传输。
+
+所以 TLS 采用“握手期偏非对称、传输期偏对称”的组合模型。
+
+---
+
+**Q：TLS 握手发生在什么时候？是每个请求都握手吗？**
+
+**A：**
+TLS 握手是“连接级”而不是“请求级”动作：
+
+1. 每个**新建 TCP 连接**在发送第一条 HTTPS 请求前，通常会进行一次 TLS 握手；
+2. 在 keep-alive 场景下，同一连接上的多个请求会复用该安全会话，不会每个请求都重新完整握手；
+3. 连接断开后重连，通常会再次握手（可通过会话恢复降低开销）。
+
+当前第七阶段实现也遵循这个语义：
+- `HttpServer` 在连接进入 `HttpSession` 之前先完成 TLS 握手；
+- 握手成功后，上层仍按原 HTTP 请求循环处理。
 
 #### 2. `HttpServer` 接入 HTTPS
 第七阶段让 `HttpServer` 从“只能处理明文 HTTP”扩展为“也能处理 HTTPS”。

@@ -46,7 +46,6 @@ set(SYLAR_SOURCES
     src/http/ssl/ssl_config.cc
     src/http/ssl/ssl_context.cc
     src/http/ssl/ssl_socket.cc
-    src/http/ssl/ssl_socket_stream.cc
     src/http/core/http_context.cc
     src/http/core/http_parser.cc
     src/http/server/http_session.cc
