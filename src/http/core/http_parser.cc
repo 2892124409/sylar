@@ -318,10 +318,10 @@ namespace sylar
             // 第三步：确定 body 长度。
             // 当前只支持 Content-Length，不支持 chunked request body。
             size_t content_length = 0;
-            if (request->hasHeader("Content-Length"))
+            if (request->hasHeader("content-length"))
             {
                 // 读取并解析 Content-Length 文本值。
-                const std::string content_length_str = request->getHeader("Content-Length");
+                const std::string content_length_str = request->getHeader("content-length");
                 char *end = nullptr;
                 unsigned long value = std::strtoul(content_length_str.c_str(), &end, 10);
                 if (!end || *end != '\0')
@@ -359,7 +359,7 @@ namespace sylar
 
             // 第四步：计算 keep-alive 语义。
             // 优先看 Connection 头；若未显式给出，则按 HTTP 版本默认规则决定。
-            std::string connection = ToLower(request->getHeader("Connection"));
+            std::string connection = ToLower(request->getHeader("connection"));
             if (connection == "close")
             {
                 // 显式要求关闭连接。
@@ -380,9 +380,9 @@ namespace sylar
             }
 
             // 第五步：如果有 Cookie 头，拆成 cookies 键值对。
-            if (request->hasHeader("Cookie"))
+            if (request->hasHeader("cookie"))
             {
-                ParseCookieHeader(request->getHeader("Cookie"), request);
+                ParseCookieHeader(request->getHeader("cookie"), request);
             }
 
             // 告诉调用方：本次成功消费了多少字节。

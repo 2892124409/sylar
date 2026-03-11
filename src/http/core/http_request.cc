@@ -1,9 +1,24 @@
 #include "http/core/http_request.h"
 
+#include <algorithm>
+#include <cctype>
+
 namespace sylar
 {
     namespace http
     {
+        namespace
+        {
+            // 将字符串转为小写，用于 header key 归一化。
+            static std::string HeaderKeyToLower(const std::string &key)
+            {
+                std::string lower = key;
+                std::transform(lower.begin(), lower.end(), lower.begin(),
+                               [](unsigned char c)
+                               { return static_cast<char>(std::tolower(c)); });
+                return lower;
+            }
+        } // namespace
 
         HttpRequest::HttpRequest()
             : m_method(HttpMethod::GET), m_versionMajor(1), m_versionMinor(1), m_keepalive(true), m_path("/")
@@ -12,18 +27,18 @@ namespace sylar
 
         void HttpRequest::setHeader(const std::string &key, const std::string &value)
         {
-            m_headers[key] = value;
+            m_headers[HeaderKeyToLower(key)] = value;
         }
 
         std::string HttpRequest::getHeader(const std::string &key, const std::string &def) const
         {
-            MapType::const_iterator it = m_headers.find(key);
+            MapType::const_iterator it = m_headers.find(HeaderKeyToLower(key));
             return it == m_headers.end() ? def : it->second;
         }
 
         bool HttpRequest::hasHeader(const std::string &key) const
         {
-            return m_headers.find(key) != m_headers.end();
+            return m_headers.find(HeaderKeyToLower(key)) != m_headers.end();
         }
 
         void HttpRequest::setParam(const std::string &key, const std::string &value)

@@ -64,9 +64,9 @@ int main()
         }
 
         assert(rsp.find("HTTP/1.1 200 OK\r\n") != std::string::npos);
-        assert(rsp.find("Content-Type: text/event-stream\r\n") != std::string::npos);
-        assert(rsp.find("Cache-Control: no-cache\r\n") != std::string::npos);
-        assert(rsp.find("Connection: close\r\n") != std::string::npos);
+        assert(rsp.find("content-type: text/event-stream\r\n") != std::string::npos);
+        assert(rsp.find("cache-control: no-cache\r\n") != std::string::npos);
+        assert(rsp.find("connection: close\r\n") != std::string::npos);
         assert(rsp.find(": ping\n\n") != std::string::npos);
         assert(rsp.find("event: message\n") != std::string::npos);
         assert(rsp.find("id: evt-1\n") != std::string::npos);

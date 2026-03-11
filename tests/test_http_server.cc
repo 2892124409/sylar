@@ -74,8 +74,8 @@ int main() {
         std::string rsp(buf, rt);
         assert(rsp.find("200 OK") != std::string::npos);
         assert(rsp.find("pong") != std::string::npos);
-        assert(rsp.find("X-Pre: 1") != std::string::npos);
-        assert(rsp.find("X-Post: 1") != std::string::npos);
+        assert(rsp.find("x-pre: 1") != std::string::npos);
+        assert(rsp.find("x-post: 1") != std::string::npos);
         stream.close();
     });
 
@@ -122,7 +122,7 @@ int main() {
         std::string rsp(buf, rt);
         assert(rsp.find("\"code\":400") != std::string::npos);
         assert(rsp.find("blocked by pre interceptor") != std::string::npos);
-        assert(rsp.find("X-Post: 1") != std::string::npos);
+        assert(rsp.find("x-post: 1") != std::string::npos);
         stream.close();
     });
 
