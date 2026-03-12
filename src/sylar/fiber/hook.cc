@@ -1,5 +1,6 @@
 #include "hook.h"
 #include <dlfcn.h>      // For dlsym
+#include <atomic>
 #include <stdarg.h>     // For va_list in fcntl and ioctl
 #include <errno.h>      // For errno and error codes (EAGAIN, EINTR, EBADF, ETIMEDOUT)
 #include <sys/socket.h> // For SO_RCVTIMEO, SO_SNDTIMEO, etc.
@@ -120,7 +121,12 @@ namespace sylar
 
 struct timer_info
 {
-    int cancelled = 0;
+    std::atomic<int> cancelled;
+
+    timer_info()
+        : cancelled(0)
+    {
+    }
 };
 
 namespace sylar
@@ -168,28 +174,12 @@ namespace sylar
         // 获取对应的超时时间 (毫秒)
         uint64_t timeout = ctx->getTimeout(timeout_so_type);
         sylar::Timer::ptr timer; // 定时器智能指针
-        // 获取当前协程的弱引用，用于定时器回调中安全地访问协程
-        std::weak_ptr<sylar::Fiber> cur_fiber = sylar::Fiber::GetThis();
+        std::shared_ptr<timer_info> tinfo;
+        std::weak_ptr<timer_info> winfo;
 
         // 循环直到IO操作成功、出现永久错误或超时
         while (true)
         {
-            // 如果设置了超时 (timeout != (uint64_t)-1)
-            if (timeout != (uint64_t)-1)
-            {
-                // 添加一个条件定时器，当超时时间到达时，唤醒当前协程
-                // 使用weak_ptr确保协程在销毁后不会触发无效回调
-                timer = iom->addConditionTimer(timeout, [&, cur_fiber, iom, fd, event]()
-                                               {
-                auto ptr = cur_fiber.lock(); // 尝试提升弱引用为强引用
-                if (ptr) {
-                    // 超时时，设置errno并取消IO事件，然后调度协程
-                    errno = ETIMEDOUT; // 设置errno为超时
-                    iom->cancelEvent(fd, event); // 取消该文件描述符上注册的IO事件
-                    iom->schedule(ptr); // 将协程重新添加到调度队列，使其被唤醒处理超时
-                } }, cur_fiber); // 条件定时器绑定到当前协程的weak_ptr
-            }
-
             // 尝试执行原始IO函数
             ssize_t rt = fun(fd, std::forward<Args>(args)...);
 
@@ -206,6 +196,32 @@ namespace sylar
             // 如果IO操作返回-1且errno为EAGAIN或EINTR (表示IO未就绪或被中断)
             if (errno == EAGAIN || errno == EINTR)
             {
+                // 只有在真正需要挂起等待时，才为本次 do_io 调用创建超时状态与定时器，
+                // 避免成功快路径每次都分配 shared_ptr 并注册/取消 timer。
+                if (timeout != (uint64_t)-1)
+                {
+                    if (!tinfo)
+                    {
+                        tinfo.reset(new timer_info);
+                        winfo = tinfo;
+                    }
+
+                    timer = iom->addConditionTimer(timeout, [winfo, iom, fd, event]()
+                                                   {
+                    auto t = winfo.lock();
+                    if (!t || t->cancelled.load(std::memory_order_acquire)) {
+                        return;
+                    }
+
+                    // 只有在事件仍处于挂起状态并被 cancelEvent() 真正取消时，
+                    // 才把超时结果写入共享状态。写入发生在 triggerEvent() 之前，
+                    // 保证恢复后的 fiber 能在任意线程上稳定观察到 ETIMEDOUT。
+                    iom->cancelEvent(fd, event, [t]()
+                    {
+                        t->cancelled.store(ETIMEDOUT, std::memory_order_release);
+                    }); }, winfo);
+                }
+
                 // 在IOManager中注册IO事件 (READ或WRITE)，等待IO就绪
                 int ret = iom->addEvent(fd, event);
                 if (SYLAR_UNLIKELY(ret))
@@ -228,11 +244,16 @@ namespace sylar
                     if (timer)
                     {
                         timer->cancel(); // 如果有定时器，取消它（因为协程已被IO事件唤醒，不再需要定时器了）
+                        timer.reset();
                     }
-                    // 检查 errno 是否已被定时器设置为 ETIMEDOUT
-                    if (errno == ETIMEDOUT)
-                    {              // 这表示协程被超时定时器唤醒
-                        return -1; // 返回-1表示超时
+                    if (tinfo)
+                    {
+                        int cancelled = tinfo->cancelled.load(std::memory_order_acquire);
+                        if (cancelled)
+                        {
+                            errno = cancelled;
+                            return -1;
+                        }
                     }
                     // 如果不是超时唤醒，则循环继续，重新尝试IO操作
                 }
@@ -412,11 +433,13 @@ extern "C"
             timer = iom->addConditionTimer(timeout_ms, [winfo, fd, iom]()
                                            {
             auto t = winfo.lock();
-            if(!t || t->cancelled) {
-                return;
-            }
-            t->cancelled = ETIMEDOUT;
-            iom->cancelEvent(fd, sylar::IOManager::WRITE); }, winfo);
+                if(!t || t->cancelled.load(std::memory_order_acquire)) {
+                    return;
+                }
+                iom->cancelEvent(fd, sylar::IOManager::WRITE, [t]()
+                {
+                    t->cancelled.store(ETIMEDOUT, std::memory_order_release);
+                }); }, winfo);
         }
 
         int rt = iom->addEvent(fd, sylar::IOManager::WRITE);
@@ -427,9 +450,10 @@ extern "C"
             {
                 timer->cancel();
             }
-            if (tinfo->cancelled)
+            int cancelled = tinfo->cancelled.load(std::memory_order_acquire);
+            if (cancelled)
             {
-                errno = tinfo->cancelled;
+                errno = cancelled;
                 return -1;
             }
         }

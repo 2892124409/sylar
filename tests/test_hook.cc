@@ -9,7 +9,11 @@
 #include "log/logger.h"
 #include "sylar/fiber/iomanager.h"
 #include "sylar/fiber/fiber.h"
+#include "sylar/fiber/fd_manager.h"
 #include "sylar/fiber/hook.h"
+#include <cassert>
+#include <atomic>
+#include <memory>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -327,6 +331,61 @@ void test_setsockopt_timeout()
     BASE_LOG_INFO(g_logger) << "=======================================";
 }
 
+// ==================== 测试7: socket超时只恢复一次 ====================
+
+void test_socket_timeout_resume_once()
+{
+    BASE_LOG_INFO(g_logger) << "========== 测试7: socket超时只恢复一次 ==========";
+
+    sylar::IOManager *iom = sylar::IOManager::GetThis();
+
+    int sock_pair[2] = {-1, -1};
+    int rt = ::socketpair(AF_UNIX, SOCK_STREAM, 0, sock_pair);
+    assert(rt == 0);
+    (void)rt;
+
+    sylar::FdMgr::GetInstance()->get(sock_pair[0], true);
+    sylar::FdMgr::GetInstance()->get(sock_pair[1], true);
+
+    const int read_fd = sock_pair[0];
+    const int write_fd = sock_pair[1];
+
+    timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100 * 1000;
+    rt = setsockopt(sock_pair[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    assert(rt == 0);
+    (void)rt;
+
+    auto resume_count = std::make_shared<std::atomic<int>>(0);
+    auto resumed_twice = std::make_shared<std::atomic<bool>>(false);
+
+    iom->schedule([read_fd, resume_count, resumed_twice]()
+                  {
+        char buffer[8] = {0};
+        ssize_t n = recv(read_fd, buffer, sizeof(buffer), 0);
+
+        assert(n == -1);
+        (void)n;
+        assert(errno == ETIMEDOUT);
+        assert(resume_count->fetch_add(1) == 0);
+
+        sylar::Fiber::YieldToHold();
+
+        resumed_twice->store(true);
+        resume_count->fetch_add(1); });
+
+    iom->addTimer(300, [read_fd, write_fd, resume_count, resumed_twice]()
+                  {
+        assert(resume_count->load() == 1);
+        assert(!resumed_twice->load());
+        close(read_fd);
+        close(write_fd); });
+
+    BASE_LOG_INFO(g_logger) << "测试7完成: socket超时不会重复恢复同一个协程";
+    BASE_LOG_INFO(g_logger) << "=======================================";
+}
+
 // ==================== 主函数 ====================
 
 int main(int argc, char **argv)
@@ -359,12 +418,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // 运行测试2-6
+    // 运行测试2-7
     iom.schedule(test_sleep);              // 测试2: 睡眠函数Hook
     iom.schedule(test_pipe_io);            // 测试3: Pipe读写Hook
     iom.schedule(test_iov);                // 测试4: readv/writev
     iom.schedule(test_fcntl_nonblock);     // 测试5: fcntl非阻塞
     iom.schedule(test_setsockopt_timeout); // 测试6: setsockopt超时
+    iom.schedule(test_socket_timeout_resume_once); // 测试7: socket超时只恢复一次
 
     // 10秒后自动停止
     iom.addTimer(10000, [&iom]()

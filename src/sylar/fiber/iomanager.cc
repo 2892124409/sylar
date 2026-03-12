@@ -301,7 +301,7 @@ namespace sylar
      * @brief 取消事件
      * @details 逻辑删除：如果事件存在，则强制触发它一次（恢复协程执行），然后撤销监听
      */
-    bool IOManager::cancelEvent(int fd, Event event)
+    bool IOManager::cancelEvent(int fd, Event event, std::function<void()> on_cancel)
     {
         RWMutexType::ReadLock lock(m_mutex);
         if ((int)m_fdContexts.size() <= fd)
@@ -330,6 +330,11 @@ namespace sylar
                                       << op << "," << fd << "," << epevent.events << "):"
                                       << rt << " (" << errno << ") (" << strerror(errno) << ")";
             return false;
+        }
+
+        if (on_cancel)
+        {
+            on_cancel();
         }
 
         // 核心：在删除前主动触发，保证了即使事件没发生，被取消的协程也能从 yield 处醒来

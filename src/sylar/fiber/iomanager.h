@@ -127,7 +127,7 @@ namespace sylar
          * @param[in] event 事件类型
          * @return 是否删除成功
          */
-        bool cancelEvent(int fd, Event event);
+        bool cancelEvent(int fd, Event event, std::function<void()> on_cancel = nullptr);
 
         /**
          * @brief 取消所有事件
