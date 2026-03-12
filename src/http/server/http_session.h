@@ -47,6 +47,17 @@ namespace http
          */
         int sendResponse(HttpResponse::ptr response);
 
+        /**
+         * @brief 发送文件内容（用于文件下载）
+         * @param file_path 文件路径
+         * @param chunk_size 每次读取的块大小（默认 64KB）
+         * @return 成功返回发送的字节数，失败返回 -1
+         * @details
+         * 分块读取文件并发送，避免大文件一次性加载到内存。
+         * 调用前需要先用 sendResponse() 发送响应头（设置 Content-Length 和 Content-Type）。
+         */
+        int sendFile(const std::string &file_path, size_t chunk_size = 65536);
+
         /// 解析器是否出错
         bool hasParserError() const { return m_context.hasError(); }
 
