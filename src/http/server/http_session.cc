@@ -25,23 +25,9 @@ namespace http
             return writeFixSize(header.data(), header.size());
         }
 
-        // 普通响应：分离发送 header 和 body，减少内存拷贝
-        std::string header = response->toHeaderString();
-        int ret = writeFixSize(header.data(), header.size());
-        if (ret <= 0) {
-            return ret;  // header 发送失败
-        }
-
-        const std::string& body = response->getBody();
-        if (!body.empty()) {
-            int body_ret = writeFixSize(body.data(), body.size());
-            if (body_ret <= 0) {
-                return body_ret;  // body 发送失败
-            }
-            return ret + body_ret;  // 返回总发送字节数
-        }
-
-        return ret;  // 只有 header，无 body
+        // 普通响应一次性串行化并发送，避免 header/body 分开发送时在异常关闭路径上丢 body。
+        std::string data = response->toString();
+        return writeFixSize(data.data(), data.size());
     }
 
     int HttpSession::sendFile(const std::string &file_path, size_t chunk_size)

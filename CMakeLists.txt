@@ -117,6 +117,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(sylar PRIVATE -Wall)
 endif()
 
+add_executable(http_bench_server "benchmarks/http/http_bench_server.cc")
+target_link_libraries(http_bench_server PRIVATE sylar)
+
+set_target_properties(http_bench_server PROPERTIES
+    BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
+)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(http_bench_server PRIVATE -Wall)
+endif()
+
 function(add_sylar_test target_name)
     add_executable(${target_name} "tests/${target_name}.cc")
     target_link_libraries(${target_name} PRIVATE sylar)

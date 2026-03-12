@@ -144,7 +144,18 @@ namespace http
         if (max_connections > 0 && active_guard.current() > static_cast<size_t>(max_connections))
         {
             HttpSession::ptr rejected_session = MakeHttpPooledShared<HttpSession>(client);
+            HttpRequest::ptr rejected_request;
+            sylar::Socket::ptr rejected_socket = rejected_session->getSocket();
+            if (rejected_socket)
+            {
+                rejected_socket->setRecvTimeout(100);
+                rejected_request = rejected_session->recvRequest();
+            }
             HttpResponse::ptr response = MakeHttpPooledShared<HttpResponse>();
+            if (rejected_request)
+            {
+                response->setVersion(rejected_request->getVersionMajor(), rejected_request->getVersionMinor());
+            }
             response->setKeepAlive(false);
             ApplyErrorResponse(response, HttpStatus::SERVICE_UNAVAILABLE, "Service Unavailable", "too many active connections");
             rejected_session->sendResponse(response);
