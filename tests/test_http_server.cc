@@ -21,6 +21,23 @@ static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 namespace
 {
+    class ScopedHookState
+    {
+    public:
+        explicit ScopedHookState(bool enabled)
+            : m_old(sylar::is_hook_enable())
+        {
+            sylar::set_hook_enable(enabled);
+        }
+
+        ~ScopedHookState()
+        {
+            sylar::set_hook_enable(m_old);
+        }
+
+    private:
+        bool m_old;
+    };
 
     size_t ParseContentLength(const std::string &response)
     {
@@ -82,12 +99,55 @@ namespace
         return response;
     }
 
-    sylar::Socket::ptr ConnectTo(uint16_t port, int64_t recv_timeout_ms = 2000)
+    sylar::Socket::ptr ConnectTo(uint16_t port, int64_t recv_timeout_ms = 2000,
+                                 size_t attempts = 20, useconds_t retry_interval_us = 100 * 1000)
     {
-        sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
-        sock->setRecvTimeout(recv_timeout_ms);
-        assert(sock->connect(sylar::Address::LookupAny("127.0.0.1:" + std::to_string(port))));
-        return sock;
+        sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:" + std::to_string(port));
+        assert(addr);
+
+        for (size_t i = 0; i < attempts; ++i)
+        {
+            sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
+            sock->setRecvTimeout(recv_timeout_ms);
+            if (sock->connect(addr))
+            {
+                return sock;
+            }
+            sock->close();
+            if (i + 1 < attempts)
+            {
+                usleep(retry_interval_us);
+            }
+        }
+
+        assert(false && "ConnectTo exhausted retries");
+        return sylar::Socket::ptr();
+    }
+
+    sylar::Socket::ptr ConnectToEventuallyNoHook(uint16_t port, int64_t recv_timeout_ms = 2000,
+                                                 size_t attempts = 20, useconds_t retry_interval_us = 100 * 1000)
+    {
+        ScopedHookState hook_guard(false);
+        sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:" + std::to_string(port));
+        assert(addr);
+
+        for (size_t i = 0; i < attempts; ++i)
+        {
+            sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
+            sock->setRecvTimeout(recv_timeout_ms);
+            if (sock->connect(addr))
+            {
+                return sock;
+            }
+            sock->close();
+            if (i + 1 < attempts)
+            {
+                ::usleep(retry_interval_us);
+            }
+        }
+
+        assert(false && "ConnectToEventuallyNoHook exhausted retries");
+        return sylar::Socket::ptr();
     }
 
     uint16_t AllocatePort()
@@ -343,13 +403,20 @@ int main()
         assert(config_server->start());
 
         sleep(1);
-        sylar::Socket::ptr sock = ConnectTo(config_http_port);
-        sylar::SocketStream stream(sock);
-        SendRequest(stream, "GET /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-        std::string rsp = ReadHttpResponse(stream);
-        assert(rsp.find("200 OK") != std::string::npos);
-        assert(rsp.find("config-workers") != std::string::npos);
-        stream.close();
+        {
+            // 这段验证运行在主线程，当前线程没有 IOManager；hook 又是线程局部开关。
+            // 因此这里只在主线程局部关闭 hook，使用同步阻塞 socket 做探活；
+            // 服务端工作线程仍在 Scheduler::run() 内开启 hook，不受这里影响。
+            // 这样测试不会耦合到“hook 已开启但当前线程没有 IOManager”的退化语义。
+            ScopedHookState hook_guard(false);
+            sylar::Socket::ptr sock = ConnectToEventuallyNoHook(config_http_port);
+            sylar::SocketStream stream(sock);
+            SendRequest(stream, "GET /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            std::string rsp = ReadHttpResponse(stream);
+            assert(rsp.find("200 OK") != std::string::npos);
+            assert(rsp.find("config-workers") != std::string::npos);
+            stream.close();
+        }
 
         config_server->stop();
         sleep(1);

@@ -1,5 +1,6 @@
 #include "http/core/http_parser.h"
 
+#include "http/core/http_memory_pool.h"
 #include "http/core/http_framework_config.h"
 
 #include <algorithm>
@@ -248,7 +249,7 @@ namespace http
         }
 
         // 到这里，请求行合法，开始创建请求对象并填充基础字段。
-        HttpRequest::ptr request(new HttpRequest());
+        HttpRequest::ptr request = MakeHttpPooledShared<HttpRequest>();
         request->setMethod(method);
 
         // 版本字符串位置固定：HTTP/1.1 的 '1' 在下标 5 和 7。

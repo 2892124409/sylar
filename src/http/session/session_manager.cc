@@ -1,6 +1,7 @@
 #include "http/session/session_manager.h"
 
 #include "http/core/http_framework_config.h"
+#include "http/core/http_memory_pool.h"
 #include "sylar/base/util.h"
 
 #include <sstream>
@@ -45,7 +46,7 @@ namespace http
         // - id: 唯一 SID
         // - create_ms: 当前时间，同时也作为首次访问时间
         // - m_maxInactiveMs: 继承管理器的非活跃超时配置
-        Session::ptr session(new Session(id, sylar::GetCurrentMS(), m_maxInactiveMs));
+        Session::ptr session = MakeHttpPooledShared<Session>(id, sylar::GetCurrentMS(), m_maxInactiveMs);
         // 通过存储后端保存新会话
         m_storage->save(session);
         // 返回新建会话

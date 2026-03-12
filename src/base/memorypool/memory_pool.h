@@ -166,14 +166,9 @@ namespace base
         static std::vector<std::unique_ptr<MemoryPool>> &getPools();
 
         /**
-         * @brief 获取初始化互斥锁。
+         * @brief 获取桶表读写互斥锁。
          */
-        static std::mutex &getInitMutex();
-
-        /**
-         * @brief 获取初始化标记。
-         */
-        static bool &getInitializedFlag();
+        static std::mutex &getBucketMutex();
     };
 
     /**

@@ -1,9 +1,39 @@
 #include "memory_pool.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace base
 {
+    namespace
+    {
+        static std::vector<int> NormalizeSlotSizes(std::initializer_list<int> slotSizes)
+        {
+            std::vector<int> normalized(slotSizes.begin(), slotSizes.end());
+            normalized.erase(
+                std::remove_if(normalized.begin(), normalized.end(),
+                               [](int size)
+                               { return size <= 0; }),
+                normalized.end());
+            std::sort(normalized.begin(), normalized.end());
+            normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+            return normalized;
+        }
+
+        // 记录所有退化到系统分配器的指针，避免追加新桶后 freeMemory() 误回收到池里。
+        static std::unordered_set<void *> &GetFallbackAllocations()
+        {
+            static std::unordered_set<void *> fallbackAllocations;
+            return fallbackAllocations;
+        }
+
+        static std::mutex &GetFallbackMutex()
+        {
+            static std::mutex fallbackMutex;
+            return fallbackMutex;
+        }
+    } // namespace
+
 
     /**
      * @brief 构造内存池并初始化成员。
@@ -219,101 +249,51 @@ namespace base
     }
 
     /**
-     * @brief 返回初始化互斥锁。
+     * @brief 返回桶表读写互斥锁。
      */
-    std::mutex &HashBucket::getInitMutex()
+    std::mutex &HashBucket::getBucketMutex()
     {
-        static std::mutex initMutex;
-        return initMutex;
+        static std::mutex bucketMutex;
+        return bucketMutex;
     }
 
     /**
-     * @brief 返回初始化状态标志。
-     */
-    bool &HashBucket::getInitializedFlag()
-    {
-        // 函数内静态变量，只创建一次，生命周期到程序结束，所有地方拿到的都是同一个标记
-        static bool initialized = false;
-        return initialized;
-    }
-
-    /**
-     * @brief 按用户给定槽位大小初始化内存池集合。
+     * @brief 按用户给定槽位大小初始化/追加内存池集合。
      *
      * @param slotSizes 槽位大小列表（可无序、可重复），必须为正数。
      *
      * @details
      * - 会过滤非正数槽位。
      * - 会自动排序并去重。
-     * - 为避免运行期重建导致野指针风险，仅允许初始化一次。
+     * - 仅为新增尺寸追加新桶，不重建已有桶。
      */
     void HashBucket::initMemoryPool(std::initializer_list<int> slotSizes)
     {
-        // 加锁防止多线程并发初始化
-        // lock_guard 在作用域结束时自动解锁
-        std::lock_guard<std::mutex> lock(getInitMutex());
-
-        // 获取初始化标志的引用（引用才能修改原值）
-        bool &initialized = getInitializedFlag();
-
-        // 如果已经初始化过，直接返回，避免重复初始化
-        // 重复初始化会导致旧的 MemoryPool 被销毁，可能产生野指针
-        if (initialized)
-        {
-            return;
-        }
-
-        // 将 initializer_list 复制到 vector 中，方便后续处理
-        std::vector<int> normalized(slotSizes.begin(), slotSizes.end());
-
-        // 过滤掉非正数（<=0 的值）
-        // remove_if 把满足条件的元素移到末尾，返回新的逻辑末尾迭代器
-        // erase 真正删除这些元素
-        normalized.erase(
-            std::remove_if(normalized.begin(), normalized.end(),
-                           [](int size)
-                           { return size <= 0; }),
-            normalized.end());
-
-        // 按升序排序，为后续 lower_bound 二分查找做准备
-        std::sort(normalized.begin(), normalized.end());
-
-        // 去重：unique 把重复元素移到末尾，返回新的逻辑末尾迭代器
-        // erase 真正删除重复元素
-        // 例如：[64, 64, 128, 128, 256] → [64, 128, 256]
-        normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
-
-        // 如果过滤后列表为空（用户传入的全是非正数），直接返回
+        std::vector<int> normalized = NormalizeSlotSizes(slotSizes);
         if (normalized.empty())
         {
             return;
         }
 
-        // 获取全局存储的槽位大小列表和内存池列表
+        std::lock_guard<std::mutex> lock(getBucketMutex());
         std::vector<int> &storedSizes = getSlotSizes();
         std::vector<std::unique_ptr<MemoryPool>> &storedPools = getPools();
 
-        // 保存处理后的槽位大小列表
-        storedSizes = normalized;
-
-        // 清空旧的内存池（如果有），准备创建新的
-        storedPools.clear();
-        // 预分配空间，避免多次扩容
-        storedPools.reserve(storedSizes.size());
-
-        // 为每个槽位大小创建一个对应的 MemoryPool
-        for (int slotSize : storedSizes)
+        for (int slotSize : normalized)
         {
-            // 当前项目使用 C++11，这里直接 new 给 unique_ptr 托管
-            std::unique_ptr<MemoryPool> pool(new MemoryPool());
-            // 初始化内存池的槽位大小
-            pool->init(slotSize);
-            // 将内存池移动到列表中（unique_ptr 不能拷贝，只能移动）
-            storedPools.emplace_back(std::move(pool));
-        }
+            std::vector<int>::iterator it = std::lower_bound(storedSizes.begin(), storedSizes.end(), slotSize);
+            if (it != storedSizes.end() && *it == slotSize)
+            {
+                continue;
+            }
 
-        // 标记初始化完成，后续调用将直接返回
-        initialized = true;
+            size_t index = static_cast<size_t>(std::distance(storedSizes.begin(), it));
+            std::unique_ptr<MemoryPool> pool(new MemoryPool());
+            pool->init(slotSize);
+
+            storedSizes.insert(storedSizes.begin() + static_cast<std::ptrdiff_t>(index), slotSize);
+            storedPools.insert(storedPools.begin() + static_cast<std::ptrdiff_t>(index), std::move(pool));
+        }
     }
 
     /**
@@ -321,9 +301,15 @@ namespace base
      */
     MemoryPool &HashBucket::getMemoryPool(int index)
     {
-        std::vector<std::unique_ptr<MemoryPool>> &pools = getPools();
-        assert(index >= 0 && index < static_cast<int>(pools.size()));
-        return *pools[static_cast<size_t>(index)];
+        MemoryPool *pool = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(getBucketMutex());
+            std::vector<std::unique_ptr<MemoryPool>> &pools = getPools();
+            assert(index >= 0 && index < static_cast<int>(pools.size()));
+            pool = pools[static_cast<size_t>(index)].get();
+        }
+        assert(pool != nullptr);
+        return *pool;
     }
 
     /**
@@ -334,42 +320,38 @@ namespace base
      */
     void *HashBucket::useMemory(int size)
     {
-        // 参数校验：非正数请求直接返回空指针
         if (size <= 0)
         {
             return nullptr;
         }
 
-        // 获取全局槽位大小列表（已按升序排列）
-        // 例如：[64, 128, 256, 512, 1024]
-        const std::vector<int> &slotSizes = getSlotSizes();
-        // 获取全局内存池列表，每个池对应 slotSizes 中的一个槽位大小
-        const std::vector<std::unique_ptr<MemoryPool>> &pools = getPools();
-
-        // 如果尚未初始化（用户未调用 initMemoryPool），退化使用系统 new
-        if (slotSizes.empty() || pools.empty())
+        MemoryPool *pool = nullptr;
         {
-            return ::operator new(static_cast<size_t>(size));
+            std::lock_guard<std::mutex> lock(getBucketMutex());
+            const std::vector<int> &slotSizes = getSlotSizes();
+            const std::vector<std::unique_ptr<MemoryPool>> &pools = getPools();
+            if (!slotSizes.empty() && !pools.empty())
+            {
+                std::vector<int>::const_iterator it = std::lower_bound(slotSizes.begin(), slotSizes.end(), size);
+                if (it != slotSizes.end())
+                {
+                    size_t index = static_cast<size_t>(std::distance(slotSizes.begin(), it));
+                    pool = pools[index].get();
+                }
+            }
         }
 
-        // 二分查找：找到第一个 >= size 的槽位大小
-        // 例如：size=100，slotSizes=[64,128,256]，则找到 128
-        // lower_bound 返回指向该元素的迭代器
-        auto it = std::lower_bound(slotSizes.begin(), slotSizes.end(), size);
-
-        // 如果迭代器到达末尾，说明所有槽位都 < size
-        // 请求太大，没有合适的桶，退化使用系统 new
-        if (it == slotSizes.end())
+        if (pool != nullptr)
         {
-            return ::operator new(static_cast<size_t>(size));
+            return pool->allocate();
         }
 
-        // 计算找到的槽位在 vector 中的下标
-        // distance 返回从 begin 到 it 的元素个数
-        size_t index = static_cast<size_t>(std::distance(slotSizes.begin(), it));
-
-        // 从对应的内存池中分配一个槽位并返回
-        return pools[index]->allocate();
+        void *ptr = ::operator new(static_cast<size_t>(size));
+        {
+            std::lock_guard<std::mutex> fallbackLock(GetFallbackMutex());
+            GetFallbackAllocations().insert(ptr);
+        }
+        return ptr;
     }
 
     /**
@@ -380,41 +362,46 @@ namespace base
      */
     void HashBucket::freeMemory(void *ptr, int size)
     {
-        // 参数校验：空指针或非正数 size 直接返回，不做任何操作
         if (ptr == nullptr || size <= 0)
         {
             return;
         }
 
-        // 获取全局槽位大小列表（已按升序排列）
-        const std::vector<int> &slotSizes = getSlotSizes();
-        // 获取全局内存池列表
-        const std::vector<std::unique_ptr<MemoryPool>> &pools = getPools();
-
-        // 如果尚未初始化，说明当初是用系统 new 分配的，用系统 delete 释放
-        if (slotSizes.empty() || pools.empty())
         {
-            ::operator delete(ptr);
+            std::lock_guard<std::mutex> fallbackLock(GetFallbackMutex());
+            std::unordered_set<void *> &fallbackAllocations = GetFallbackAllocations();
+            std::unordered_set<void *>::iterator fallbackIt = fallbackAllocations.find(ptr);
+            if (fallbackIt != fallbackAllocations.end())
+            {
+                fallbackAllocations.erase(fallbackIt);
+                ::operator delete(ptr);
+                return;
+            }
+        }
+
+        MemoryPool *pool = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(getBucketMutex());
+            const std::vector<int> &slotSizes = getSlotSizes();
+            const std::vector<std::unique_ptr<MemoryPool>> &pools = getPools();
+            if (!slotSizes.empty() && !pools.empty())
+            {
+                std::vector<int>::const_iterator it = std::lower_bound(slotSizes.begin(), slotSizes.end(), size);
+                if (it != slotSizes.end())
+                {
+                    size_t index = static_cast<size_t>(std::distance(slotSizes.begin(), it));
+                    pool = pools[index].get();
+                }
+            }
+        }
+
+        if (pool != nullptr)
+        {
+            pool->deallocate(ptr);
             return;
         }
 
-        // 二分查找：找到当初分配时使用的槽位大小
-        // 必须与 useMemory 中的查找逻辑一致，确保释放到正确的池
-        auto it = std::lower_bound(slotSizes.begin(), slotSizes.end(), size);
-
-        // 如果迭代器到达末尾，说明当初是用系统 new 分配的（请求太大）
-        // 用系统 delete 释放
-        if (it == slotSizes.end())
-        {
-            ::operator delete(ptr);
-            return;
-        }
-
-        // 计算槽位在 vector 中的下标，找到对应的内存池
-        size_t index = static_cast<size_t>(std::distance(slotSizes.begin(), it));
-
-        // 将内存归还到对应的内存池（实际上是挂回 freeList_）
-        pools[index]->deallocate(ptr);
+        ::operator delete(ptr);
     }
 
 } // namespace base

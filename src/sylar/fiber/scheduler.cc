@@ -210,7 +210,9 @@ namespace sylar
     {
         BASE_LOG_DEBUG(g_logger) << m_name << " run";
         setThis();
-        set_hook_enable(true); // 在工作线程中启用 Hook
+        // hook 开关是线程局部状态：这里只给调度器工作线程开启。
+        // 其他非调度线程若需要阻塞语义，应在各自线程内显式关闭 hook。
+        set_hook_enable(true);
 
         // 如果当前线程不是主线程（即线程池创建的子线程）
         if (sylar::GetThreadId() != m_rootThread)

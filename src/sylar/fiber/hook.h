@@ -22,12 +22,20 @@ namespace sylar
 {
 
     /**
-     * @brief 当前线程是否hook
+     * @brief 当前线程是否启用 hook
+     * @details
+     * hook 开关是 thread_local 的，只影响当前线程：
+     * - IOManager/Scheduler 工作线程通常在进入调度循环时开启
+     * - 普通阻塞线程、探活线程、工具线程可以显式关闭
+     * - 不要把“hook 已开启但当前线程没有 IOManager”当作常规运行模型
      */
     bool is_hook_enable();
 
     /**
      * @brief 设置当前线程的hook状态
+     * @details
+     * 该接口只修改当前线程的 hook 标志，不会传播到其他线程。
+     * 如需某个线程走阻塞系统调用，应在该线程内显式关闭 hook。
      */
     void set_hook_enable(bool flag);
 

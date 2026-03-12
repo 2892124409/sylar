@@ -41,6 +41,7 @@ set(SYLAR_SOURCES
     src/http/core/http.cc
     src/http/core/http_request.cc
     src/http/core/http_response.cc
+    src/http/core/http_memory_pool.cc
     src/http/core/http_framework_config.cc
     src/http/core/http_error.cc
     src/http/ssl/ssl_config.cc
@@ -151,6 +152,9 @@ target_link_libraries(test_http_dispatch sylar)
 
 add_executable(test_http_framework_config tests/test_http_framework_config.cc)
 target_link_libraries(test_http_framework_config sylar)
+
+add_executable(test_memory_pool tests/test_memory_pool.cc)
+target_link_libraries(test_memory_pool sylar)
 
 add_executable(test_session_manager tests/test_session_manager.cc)
 target_link_libraries(test_session_manager sylar)

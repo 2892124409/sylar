@@ -2,6 +2,7 @@
 
 #include "http/core/http_error.h"
 #include "http/core/http_framework_config.h"
+#include "http/core/http_memory_pool.h"
 #include "http/core/http_parser.h"
 #include "http/ssl/ssl_socket.h"
 #include "log/logger.h"
@@ -143,7 +144,7 @@ namespace http
         if (max_connections > 0 && active_guard.current() > static_cast<size_t>(max_connections))
         {
             HttpSession::ptr rejected_session(new HttpSession(client));
-            HttpResponse::ptr response(new HttpResponse());
+            HttpResponse::ptr response = MakeHttpPooledShared<HttpResponse>();
             response->setKeepAlive(false);
             ApplyErrorResponse(response, HttpStatus::SERVICE_UNAVAILABLE, "Service Unavailable", "too many active connections");
             rejected_session->sendResponse(response);
@@ -174,7 +175,7 @@ namespace http
                 // 若为空且存在解析错误，返回 400 并附带错误信息。
                 if (session->hasParserError())
                 {
-                    HttpResponse::ptr response(new HttpResponse());
+                    HttpResponse::ptr response = MakeHttpPooledShared<HttpResponse>();
                     if (session->isRequestTooLarge())
                     {
                         response->setStatus(static_cast<HttpStatus>(413));
@@ -192,7 +193,7 @@ namespace http
             }
 
             // 构造本次请求对应的响应对象。
-            HttpResponse::ptr response(new HttpResponse());
+            HttpResponse::ptr response = MakeHttpPooledShared<HttpResponse>();
             // 响应版本跟随请求版本。
             response->setVersion(request->getVersionMajor(), request->getVersionMinor());
             // 默认 keep-alive 语义跟随请求。
