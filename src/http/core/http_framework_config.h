@@ -47,6 +47,36 @@ namespace http
         static void SetMaxBodySize(size_t value);
 
         /**
+         * @brief 获取 HTTP 连接读超时（毫秒）
+         * @details
+         * 当前在 HttpServer 构造时写入 TcpServer::recvTimeout。
+         * 重载形式：启动参数型（已启动服务不自动重配）。
+         */
+        static uint64_t GetConnectionTimeoutMs();
+
+        /**
+         * @brief 设置 HTTP 连接读超时（毫秒）
+         * @details
+         * 建议在服务启动前设置；0 会回退到默认值。
+         */
+        static void SetConnectionTimeoutMs(uint64_t value);
+
+        /**
+         * @brief 获取 Session 最大非活跃时间（毫秒）
+         * @details
+         * 当前在新建 SessionManager 或显式传 0 时生效。
+         * 重载形式：新对象生效型（已存在 SessionManager 不自动重配）。
+         */
+        static uint64_t GetSessionInactivityTimeoutMs();
+
+        /**
+         * @brief 设置 Session 最大非活跃时间（毫秒）
+         * @details
+         * 仅影响后续新建的 SessionManager；0 会回退到默认值。
+         */
+        static void SetSessionInactivityTimeoutMs(uint64_t value);
+
+        /**
          * @brief 获取 Session 后台清理周期（毫秒）
          * @details
          * 当前在 HttpServer 启动时用于创建清理定时器。
@@ -75,6 +105,97 @@ namespace http
          * 影响后续新启动的 SSE 发送逻辑。
          */
         static void SetSSEHeartbeatIntervalMs(uint64_t value);
+
+        /**
+         * @brief 获取 HTTP socket 单次读取缓冲大小（字节）
+         * @details
+         * 当前在 HttpContext::recvRequest 中按次读取。
+         * 重载形式：运行时动态读取型（后续读取立即生效）。
+         */
+        static size_t GetSocketReadBufferSize();
+
+        /**
+         * @brief 设置 HTTP socket 单次读取缓冲大小（字节）
+         * @details
+         * 后续读取流程立即按新值申请缓冲；0 会回退到默认值。
+         */
+        static void SetSocketReadBufferSize(size_t value);
+
+        /**
+         * @brief 获取 HTTP 最大并发连接数
+         * @details
+         * 0 表示不限制；当前通过监听器同步到 HttpServer 的运行时检查缓存。
+         * 重载形式：监听器驱动缓存同步型（配置变化后，新连接检查立即生效）。
+         */
+        static uint32_t GetMaxConnections();
+
+        /**
+         * @brief 设置 HTTP 最大并发连接数
+         * @details
+         * 0 表示不限制；设置后后续新连接立即按新上限校验。
+         */
+        static void SetMaxConnections(uint32_t value);
+
+        /**
+         * @brief 获取 keep-alive 空闲超时（毫秒）
+         * @details
+         * 当前通过监听器同步到 HttpServer 的运行时缓存，
+         * 用于同一连接上第 2 个及之后请求的等待超时。
+         * 重载形式：监听器驱动缓存同步型（配置变化后，后续 keep-alive 等待立即生效）。
+         */
+        static uint64_t GetKeepAliveTimeoutMs();
+
+        /**
+         * @brief 设置 keep-alive 空闲超时（毫秒）
+         * @details
+         * 设置后后续 keep-alive 等待立即按新值执行；0 会回退到默认值。
+         */
+        static void SetKeepAliveTimeoutMs(uint64_t value);
+
+        /**
+         * @brief 获取单连接 keep-alive 最大请求数
+         * @details
+         * 0 表示不限制；当前通过监听器同步到 HttpServer 的运行时缓存。
+         * 重载形式：监听器驱动缓存同步型（配置变化后，后续响应立即按新上限决策）。
+         */
+        static uint32_t GetKeepAliveMaxRequests();
+
+        /**
+         * @brief 设置单连接 keep-alive 最大请求数
+         * @details
+         * 0 表示不限制；设置后后续响应立即按新上限决定是否断开连接。
+         */
+        static void SetKeepAliveMaxRequests(uint32_t value);
+
+        /**
+         * @brief 获取默认 HTTP IO worker 线程数
+         * @details
+         * 当前仅在 HttpServer::CreateWithConfig() 中读取，用于创建内部 IOManager。
+         * 重载形式：启动参数型（已创建的 worker 不会自动扩缩容）。
+         */
+        static uint32_t GetIOWorkerThreads();
+
+        /**
+         * @brief 设置默认 HTTP IO worker 线程数
+         * @details
+         * 仅影响后续通过 HttpServer::CreateWithConfig() 创建的服务器；0 会回退到默认值。
+         */
+        static void SetIOWorkerThreads(uint32_t value);
+
+        /**
+         * @brief 获取默认 HTTP accept worker 线程数
+         * @details
+         * 当前仅在 HttpServer::CreateWithConfig() 中读取，用于创建内部 accept IOManager。
+         * 重载形式：启动参数型（已创建的 worker 不会自动扩缩容）。
+         */
+        static uint32_t GetAcceptWorkerThreads();
+
+        /**
+         * @brief 设置默认 HTTP accept worker 线程数
+         * @details
+         * 仅影响后续通过 HttpServer::CreateWithConfig() 创建的服务器；0 会回退到默认值。
+         */
+        static void SetAcceptWorkerThreads(uint32_t value);
 
         /**
          * @brief 获取默认错误响应格式

@@ -56,7 +56,7 @@ namespace http
 
     private:
         // 互斥锁：保护 m_sessions 的并发读写。
-        Mutex m_mutex;
+        sylar::Mutex m_mutex;
         // 内存会话表：key 为 SID，value 为 Session 对象。
         std::unordered_map<std::string, Session::ptr> m_sessions;
     };

@@ -211,4 +211,13 @@ namespace base
 
 } // namespace base
 
+namespace sylar
+{
+
+    using base::deleteElement;
+    using base::HashBucket;
+    using base::newElement;
+
+} // namespace sylar
+
 #endif // SYLAR_MEMORY_POOL_H

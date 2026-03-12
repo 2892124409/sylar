@@ -80,7 +80,7 @@ namespace http
         }
 
         /** @brief 从已有 Socket 包装 SSL Socket */
-        SslSocket::ptr SslSocket::FromSocket(Socket::ptr socket, SslContext::ptr ctx, SslMode mode)
+        SslSocket::ptr SslSocket::FromSocket(sylar::Socket::ptr socket, SslContext::ptr ctx, SslMode mode)
         {
             if (!socket || !ctx || !ctx->getNativeHandle())
             {
@@ -114,7 +114,7 @@ namespace http
         }
 
         /** @brief 客户端连接并握手 */
-        bool SslSocket::connect(const Address::ptr addr, uint64_t timeout_ms)
+        bool SslSocket::connect(const sylar::Address::ptr addr, uint64_t timeout_ms)
         {
             if (!Socket::connect(addr, timeout_ms))
             {

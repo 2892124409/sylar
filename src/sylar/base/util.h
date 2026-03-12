@@ -51,4 +51,16 @@ namespace sylar
 
 }
 
+namespace base
+{
+
+    using sylar::Backtrace;
+    using sylar::BacktraceToString;
+    using sylar::GetCurrentMS;
+    using sylar::GetCurrentUS;
+    using sylar::GetFiberId;
+    using sylar::GetThreadId;
+
+}
+
 #endif

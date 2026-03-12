@@ -397,6 +397,12 @@ extern "C"
         }
 
         sylar::IOManager *iom = sylar::IOManager::GetThis();
+        // 当前线程若不在 IOManager 调度上下文内，则退化为原始 connect。
+        // 这与 do_io/sleep 系列 hook 的策略保持一致，避免拿空调度器做超时管理。
+        if (!iom)
+        {
+            return connect_f(fd, addr, addrlen);
+        }
         sylar::Timer::ptr timer;
         std::shared_ptr<timer_info> tinfo(new timer_info);
         std::weak_ptr<timer_info> winfo(tinfo);

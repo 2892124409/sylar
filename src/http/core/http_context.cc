@@ -1,12 +1,16 @@
 // 引入 HttpContext 声明。
 #include "http/core/http_context.h"
 
+#include "http/core/http_framework_config.h"
+
+#include <vector>
+
 // sylar 顶层命名空间。
 namespace http
 {
 
     // 从流中持续读取数据，直到解析出一条完整请求或出现错误。
-    HttpRequest::ptr HttpContext::recvRequest(SocketStream &stream)
+    HttpRequest::ptr HttpContext::recvRequest(sylar::SocketStream &stream)
     {
         // 循环读取并解析，直到成功返回请求或失败退出。
         while (true)
@@ -39,8 +43,8 @@ namespace http
             }
 
             // 当前数据还不完整，继续从底层流读取更多字节。
-            char buffer[4096];
-            int rt = stream.read(buffer, sizeof(buffer));
+            std::vector<char> buffer(HttpFrameworkConfig::GetSocketReadBufferSize());
+            int rt = stream.read(buffer.data(), buffer.size());
 
             // 读取失败或连接关闭：返回空指针。
             if (rt <= 0)
@@ -49,7 +53,7 @@ namespace http
             }
 
             // 把新读到的数据追加到连接级缓冲区，等待下一轮解析。
-            m_buffer.append(buffer, rt);
+            m_buffer.append(buffer.data(), rt);
         }
     }
 

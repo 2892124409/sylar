@@ -30,7 +30,7 @@ namespace http
              * @param mode 客户端或服务端模式
              * @param family 地址族
              */
-            SslSocket(SslContext::ptr ctx, SslMode mode, int family = Socket::IPv4);
+            SslSocket(SslContext::ptr ctx, SslMode mode, int family = sylar::Socket::IPv4);
 
             /** @brief 析构并释放 SSL 会话资源 */
             virtual ~SslSocket();
@@ -38,16 +38,16 @@ namespace http
             /**
              * @brief 创建尚未连接的 TCP SslSocket
              */
-            static SslSocket::ptr CreateTCPSocket(SslContext::ptr ctx, SslMode mode, int family = Socket::IPv4);
+            static SslSocket::ptr CreateTCPSocket(SslContext::ptr ctx, SslMode mode, int family = sylar::Socket::IPv4);
 
             /**
              * @brief 基于已有 Socket 包装出 SslSocket
              * @details 常用于服务端 accept 后升级 TLS。
              */
-            static SslSocket::ptr FromSocket(Socket::ptr socket, SslContext::ptr ctx, SslMode mode);
+            static SslSocket::ptr FromSocket(sylar::Socket::ptr socket, SslContext::ptr ctx, SslMode mode);
 
             /** @brief TCP 连接后执行 TLS 握手 */
-            virtual bool connect(const Address::ptr addr, uint64_t timeout_ms = -1) override;
+            virtual bool connect(const sylar::Address::ptr addr, uint64_t timeout_ms = -1) override;
 
             /** @brief 关闭 TLS 会话并关闭底层 socket */
             virtual bool close() override;

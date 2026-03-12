@@ -9,7 +9,7 @@ namespace http
     void MemorySessionStorage::save(Session::ptr session)
     {
         // 对内存会话表加锁，保证并发写安全。
-        Mutex::Lock lock(m_mutex);
+        sylar::Mutex::Lock lock(m_mutex);
         // 以 session id 为 key 保存会话对象。
         m_sessions[session->getId()] = session;
     }
@@ -18,7 +18,7 @@ namespace http
     Session::ptr MemorySessionStorage::load(const std::string &session_id)
     {
         // 对内存会话表加锁，保证并发读一致性。
-        Mutex::Lock lock(m_mutex);
+        sylar::Mutex::Lock lock(m_mutex);
         // 在 map 中查找指定 SID。
         std::unordered_map<std::string, Session::ptr>::iterator it = m_sessions.find(session_id);
         // 命中返回对象，未命中返回空指针。
@@ -29,7 +29,7 @@ namespace http
     bool MemorySessionStorage::remove(const std::string &session_id)
     {
         // 删除前加锁，保证并发安全。
-        Mutex::Lock lock(m_mutex);
+        sylar::Mutex::Lock lock(m_mutex);
         // erase 返回删除数量，大于 0 代表删除成功。
         return m_sessions.erase(session_id) > 0;
     }
@@ -38,7 +38,7 @@ namespace http
     size_t MemorySessionStorage::sweepExpired(uint64_t now_ms)
     {
         // 清理期间加锁，防止迭代器被并发修改破坏。
-        Mutex::Lock lock(m_mutex);
+        sylar::Mutex::Lock lock(m_mutex);
         // 记录本次清理掉的会话数量。
         size_t count = 0;
         // 遍历内存会话表，逐个判断是否过期。

@@ -1,4 +1,5 @@
 #include "http/session/session_manager.h"
+#include "http/core/http_framework_config.h"
 #include "sylar/fiber/iomanager.h"
 #include "log/logger.h"
 
@@ -178,6 +179,18 @@ void test_session_storage_injection() {
     assert(!storage->load(session->getId()));
 }
 
+void test_default_inactivity_timeout_from_config() {
+    uint64_t old_timeout = http::HttpFrameworkConfig::GetSessionInactivityTimeoutMs();
+    http::HttpFrameworkConfig::SetSessionInactivityTimeoutMs(4321);
+
+    http::SessionManager::ptr manager(new http::SessionManager());
+    http::Session::ptr session = manager->create();
+    assert(session);
+    assert(session->getMaxInactiveMs() == 4321);
+
+    http::HttpFrameworkConfig::SetSessionInactivityTimeoutMs(old_timeout);
+}
+
 // 测试主函数：顺序执行所有 SessionManager 相关用例。
 int main() {
     // 运行 create/get 基础测试。
@@ -192,6 +205,7 @@ int main() {
     test_concurrent_access();
     // 运行 SessionStorage 注入测试。
     test_session_storage_injection();
+    test_default_inactivity_timeout_from_config();
     // 打印测试通过日志。
     BASE_LOG_INFO(g_logger) << "test_session_manager passed";
     // 返回 0 表示程序正常退出。

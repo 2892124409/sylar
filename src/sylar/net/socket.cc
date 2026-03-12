@@ -228,9 +228,20 @@ namespace sylar
         int client_sock = ::accept(m_sock, (sockaddr *)&addr, &len);
         if (client_sock < 0)
         {
-            BASE_LOG_ERROR(g_logger) << "accept sock=" << m_sock
-                                      << " errno=" << errno
-                                      << " errstr=" << strerror(errno);
+            if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK)
+            {
+                // 停服关闭监听 fd 时，阻塞中的 accept 会以这些 errno 唤醒。
+                // 这种情况由上层 accept loop 正常收尾，不需要错误级别噪声。
+                BASE_LOG_DEBUG(g_logger) << "accept sock=" << m_sock
+                                          << " errno=" << errno
+                                          << " errstr=" << strerror(errno);
+            }
+            else
+            {
+                BASE_LOG_ERROR(g_logger) << "accept sock=" << m_sock
+                                          << " errno=" << errno
+                                          << " errstr=" << strerror(errno);
+            }
             return nullptr;
         }
         Socket::ptr client(new Socket(m_family, m_type, m_protocol));

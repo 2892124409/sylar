@@ -550,4 +550,24 @@ namespace base
 
 }
 
+namespace sylar
+{
+
+    using base::Config;
+
+    template <class T, class FromStr = base::LexicalCast<std::string, T>, class ToStr = base::LexicalCast<T, std::string>>
+    using ConfigVar = base::ConfigVar<T, FromStr, ToStr>;
+
+}
+
+namespace http
+{
+
+    using base::Config;
+
+    template <class T, class FromStr = base::LexicalCast<std::string, T>, class ToStr = base::LexicalCast<T, std::string>>
+    using ConfigVar = base::ConfigVar<T, FromStr, ToStr>;
+
+}
+
 #endif

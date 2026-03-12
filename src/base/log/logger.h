@@ -197,6 +197,21 @@ namespace base
 
 } // namespace base
 
+namespace sylar
+{
+
+    using base::FileLogAppender;
+    using base::LogAppender;
+    using base::LogEvent;
+    using base::LogEventWrap;
+    using base::LogFormatter;
+    using base::Logger;
+    using base::LoggerMgr;
+    using base::LogLevel;
+    using base::StdoutLogAppender;
+
+} // namespace sylar
+
 /**
  * @brief 使用流式方式将日志级别level的日志写入到logger
  * @details 核心点：创建临时LogEventWrap对象，行结束时触发析构执行log

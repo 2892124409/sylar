@@ -41,7 +41,7 @@ namespace http
          * - 成功：返回 HttpRequest
          * - 失败/断连/解析错误：返回空指针
          */
-        HttpRequest::ptr recvRequest(SocketStream &stream);
+        HttpRequest::ptr recvRequest(sylar::SocketStream &stream);
 
         /// 当前解析器是否处于错误状态。
         bool hasError() const { return m_parser.hasError(); }

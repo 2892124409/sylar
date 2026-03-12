@@ -1,4 +1,5 @@
 #include "http/core/http_context.h"
+#include "http/core/http_framework_config.h"
 #include "log/logger.h"
 
 #include <algorithm>
@@ -16,19 +17,26 @@ namespace
     {
     public:
         FakeSocketStream(const std::vector<std::string> &chunks)
-            : sylar::SocketStream(sylar::Socket::ptr(), false), m_chunks(chunks), m_index(0)
+            : sylar::SocketStream(sylar::Socket::ptr(), false), m_chunks(chunks), m_index(0), m_offset(0), m_readCount(0)
         {
         }
 
         virtual int read(void *buffer, size_t length) override
         {
+            ++m_readCount;
             if (m_index >= m_chunks.size())
             {
                 return 0;
             }
-            const std::string &chunk = m_chunks[m_index++];
-            size_t size = std::min(length, chunk.size());
-            std::memcpy(buffer, chunk.data(), size);
+            const std::string &chunk = m_chunks[m_index];
+            size_t size = std::min(length, chunk.size() - m_offset);
+            std::memcpy(buffer, chunk.data() + m_offset, size);
+            m_offset += size;
+            if (m_offset == chunk.size())
+            {
+                ++m_index;
+                m_offset = 0;
+            }
             return static_cast<int>(size);
         }
 
@@ -51,9 +59,16 @@ namespace
         {
         }
 
+        size_t getReadCount() const
+        {
+            return m_readCount;
+        }
+
     private:
         std::vector<std::string> m_chunks;
         size_t m_index;
+        size_t m_offset;
+        size_t m_readCount;
     };
 
 } // namespace
@@ -139,12 +154,31 @@ void test_request_too_large_error()
     http::HttpRequestParser::SetMaxBodySize(old_body);
 }
 
+void test_configurable_socket_read_buffer_size()
+{
+    size_t old_buffer_size = http::HttpFrameworkConfig::GetSocketReadBufferSize();
+    http::HttpFrameworkConfig::SetSocketReadBufferSize(4);
+
+    http::HttpContext context;
+    std::vector<std::string> chunks;
+    chunks.push_back("GET /tiny HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    FakeSocketStream stream(chunks);
+
+    http::HttpRequest::ptr request = context.recvRequest(stream);
+    assert(request);
+    assert(request->getPath() == "/tiny");
+    assert(stream.getReadCount() > 1);
+
+    http::HttpFrameworkConfig::SetSocketReadBufferSize(old_buffer_size);
+}
+
 int main()
 {
     test_half_packet_request();
     test_pipelined_requests();
     test_invalid_request_error();
     test_request_too_large_error();
+    test_configurable_socket_read_buffer_size();
     BASE_LOG_INFO(g_logger) << "test_http_context passed";
     return 0;
 }

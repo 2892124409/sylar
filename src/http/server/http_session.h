@@ -32,7 +32,7 @@ namespace http
          * @param sock 已建立的 TCP 连接
          * @param owner 是否由当前对象负责关闭 socket
          */
-        HttpSession(Socket::ptr sock, bool owner = true);
+        HttpSession(sylar::Socket::ptr sock, bool owner = true);
 
         /**
          * @brief 接收并解析一条 HTTP 请求

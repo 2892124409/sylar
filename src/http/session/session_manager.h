@@ -34,10 +34,16 @@ namespace http
         typedef std::shared_ptr<SessionManager> ptr;
 
         /**
-         * @param max_inactive_ms Session 最大非活跃时间，默认 30 分钟
+         * @brief 使用框架默认配置构造 SessionManager
+         * @param storage Session 存储后端；为空时退回内存存储
          */
-        SessionManager(uint64_t max_inactive_ms = 30 * 60 * 1000,
-                       SessionStorage::ptr storage = SessionStorage::ptr(new MemorySessionStorage()));
+        explicit SessionManager(SessionStorage::ptr storage = SessionStorage::ptr(new MemorySessionStorage()));
+
+        /**
+         * @param max_inactive_ms Session 最大非活跃时间；传 0 时回退到框架默认值
+         * @param storage Session 存储后端；为空时退回内存存储
+         */
+        SessionManager(uint64_t max_inactive_ms, SessionStorage::ptr storage = SessionStorage::ptr(new MemorySessionStorage()));
 
         /// 创建一个全新的 Session
         Session::ptr create();
@@ -81,7 +87,7 @@ namespace http
 
     private:
         /// 并发保护锁：保护会话表和自增 ID 的线程安全
-        Mutex m_mutex;
+        sylar::Mutex m_mutex;
         /// 会话最大非活跃时长（毫秒），新建 Session 会继承该配置
         uint64_t m_maxInactiveMs;
         /// 会话 ID 自增序号（与时间戳组合生成 SID）

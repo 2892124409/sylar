@@ -3,8 +3,8 @@
 namespace http
 {
 
-    HttpSession::HttpSession(Socket::ptr sock, bool owner)
-        : SocketStream(sock, owner)
+    HttpSession::HttpSession(sylar::Socket::ptr sock, bool owner)
+        : sylar::SocketStream(sock, owner)
     {
     }
 
