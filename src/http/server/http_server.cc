@@ -143,7 +143,7 @@ namespace http
         uint32_t max_connections = HttpFrameworkConfig::GetMaxConnections();
         if (max_connections > 0 && active_guard.current() > static_cast<size_t>(max_connections))
         {
-            HttpSession::ptr rejected_session(new HttpSession(client));
+            HttpSession::ptr rejected_session = MakeHttpPooledShared<HttpSession>(client);
             HttpResponse::ptr response = MakeHttpPooledShared<HttpResponse>();
             response->setKeepAlive(false);
             ApplyErrorResponse(response, HttpStatus::SERVICE_UNAVAILABLE, "Service Unavailable", "too many active connections");
@@ -154,7 +154,7 @@ namespace http
             return;
         }
 
-        HttpSession::ptr session(new HttpSession(client));
+        HttpSession::ptr session = MakeHttpPooledShared<HttpSession>(client);
         size_t request_count = 0;
 
         // keep-alive 场景下，一个连接可承载多次请求，因此循环处理直到需要断开。

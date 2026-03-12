@@ -54,10 +54,25 @@ static void test_http_pooled_shared_creation()
     assert(http_session);
 }
 
+static void test_http_session_reuse_via_shared_ptr_deleter()
+{
+    void *first_address = nullptr;
+    {
+        http::HttpSession::ptr first = http::MakeHttpPooledShared<http::HttpSession>(sylar::Socket::ptr());
+        assert(first);
+        first_address = first.get();
+    }
+
+    http::HttpSession::ptr second = http::MakeHttpPooledShared<http::HttpSession>(sylar::Socket::ptr());
+    assert(second);
+    assert(second.get() == first_address);
+}
+
 int main()
 {
     test_hash_bucket_append_and_fallback_free();
     test_http_pooled_shared_creation();
+    test_http_session_reuse_via_shared_ptr_deleter();
 
     std::cout << "test_memory_pool passed" << std::endl;
     return 0;
