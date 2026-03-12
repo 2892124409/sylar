@@ -1,18 +1,30 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.10)
 
-project(sylar)
+project(sylar LANGUAGES CXX)
+
+include(CTest)
 
 set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O0 -g -Wall -rdynamic -fPIC")
+# 默认未指定构建类型时使用 Debug。
+# 如果要走 Release，建议使用独立构建目录，避免和 Debug 共用缓存：
+#   cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build-release -j
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
 
-# 包含项目根目录与源码根目录
-include_directories(.)
-include_directories(src)
-include_directories(src/base)
+set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 
-# 所有的核心模块源文件
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(yaml-cpp REQUIRED)
+
+set(SYLAR_OUTPUT_BIN_DIR "${PROJECT_SOURCE_DIR}/bin")
+set(SYLAR_OUTPUT_LIB_DIR "${PROJECT_SOURCE_DIR}/lib")
+
 set(SYLAR_SOURCES
     src/base/log/log_level.cc
     src/base/log/log_formatter.cc
@@ -62,132 +74,109 @@ set(SYLAR_SOURCES
     src/http/stream/sse.cc
 )
 
-# 生成共享库 libsylar.so
+set(SYLAR_PUBLIC_LINK_LIBRARIES Threads::Threads)
+if(TARGET yaml-cpp::yaml-cpp)
+    list(APPEND SYLAR_PUBLIC_LINK_LIBRARIES yaml-cpp::yaml-cpp)
+elseif(TARGET yaml-cpp)
+    list(APPEND SYLAR_PUBLIC_LINK_LIBRARIES yaml-cpp)
+elseif(YAML_CPP_LIBRARIES)
+    list(APPEND SYLAR_PUBLIC_LINK_LIBRARIES ${YAML_CPP_LIBRARIES})
+else()
+    message(FATAL_ERROR "yaml-cpp was found, but no usable target or library variable was exported")
+endif()
+
+set(SYLAR_PRIVATE_LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
+if(CMAKE_DL_LIBS)
+    list(APPEND SYLAR_PRIVATE_LINK_LIBRARIES ${CMAKE_DL_LIBS})
+endif()
+
 add_library(sylar SHARED ${SYLAR_SOURCES})
 
-# 链接库
-target_link_libraries(sylar yaml-cpp pthread dl ssl crypto)
+target_include_directories(sylar
+    PUBLIC
+        "${PROJECT_SOURCE_DIR}"
+        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/base"
+)
 
-# 定义输出路径
-set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
-set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
+target_link_libraries(sylar
+    PUBLIC
+        ${SYLAR_PUBLIC_LINK_LIBRARIES}
+    PRIVATE
+        ${SYLAR_PRIVATE_LINK_LIBRARIES}
+)
 
-# 编译测试程序
-add_executable(test_log tests/test_log.cc)
-target_link_libraries(test_log sylar)
+set_target_properties(sylar PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    LIBRARY_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_LIB_DIR}"
+    ARCHIVE_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_LIB_DIR}"
+)
 
-add_executable(test_config tests/test_config.cc)
-target_link_libraries(test_config sylar)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(sylar PRIVATE -Wall)
+endif()
 
-add_executable(test_thread tests/test_thread.cc)
-target_link_libraries(test_thread sylar)
+function(add_sylar_test target_name)
+    add_executable(${target_name} "tests/${target_name}.cc")
+    target_link_libraries(${target_name} PRIVATE sylar)
 
-add_executable(test_fiber tests/test_fiber.cc)
-target_link_libraries(test_fiber sylar)
+    set_target_properties(${target_name} PROPERTIES
+        ENABLE_EXPORTS ON
+        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
+    )
 
-add_executable(test_scheduler tests/test_scheduler.cc)
-target_link_libraries(test_scheduler sylar)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target_name} PRIVATE -Wall)
+    endif()
 
-add_executable(test_fiber_pool tests/test_fiber_pool.cc)
-target_link_libraries(test_fiber_pool sylar)
+    add_test(NAME ${target_name} COMMAND ${target_name})
+endfunction()
 
-add_executable(test_iomanager tests/test_iomanager.cc)
+if(BUILD_TESTING)
+    set(SYLAR_TESTS
+        test_log
+        test_config
+        test_thread
+        test_fiber
+        test_scheduler
+        test_fiber_pool
+        test_iomanager
+        test_timer
+        test_hook
+        test_endian
+        test_address
+        test_socket
+        test_bytearray
+        test_stream
+        test_tcp_server
+        test_udp_server
+        test_server_mode_bench
+        test_http_parser
+        test_http_context
+        test_http_router
+        test_http_server
+        test_http_ssl_server
+        test_cors_middleware
+        test_http_dispatch
+        test_http_framework_config
+        test_memory_pool
+        test_session_manager
+        test_sse_writer
+        test_sse_server
+        test_shared_stack_helpers
+        test_shared_stack_scheduler
+        test_shared_stack_scheduler_mt
+        test_shared_stack_stress
+        test_shared_stack_guard
+        test_shared_stack_lifecycle
+        test_shared_stack_longrun
+        test_shared_stack_workeronly
+        test_bytearray_pool_perf
+    )
 
-target_link_libraries(test_iomanager sylar)
-
-
-
-add_executable(test_timer tests/test_timer.cc)
-
-target_link_libraries(test_timer sylar)
-
-add_executable(test_hook tests/test_hook.cc)
-
-target_link_libraries(test_hook sylar)
-
-add_executable(test_endian tests/test_endian.cc)
-target_link_libraries(test_endian sylar)
-
-add_executable(test_address tests/test_address.cc)
-target_link_libraries(test_address sylar)
-
-add_executable(test_socket tests/test_socket.cc)
-target_link_libraries(test_socket sylar)
-
-add_executable(test_bytearray tests/test_bytearray.cc)
-target_link_libraries(test_bytearray sylar)
-
-add_executable(test_stream tests/test_stream.cc)
-target_link_libraries(test_stream sylar)
-
-add_executable(test_tcp_server tests/test_tcp_server.cc)
-target_link_libraries(test_tcp_server sylar)
-
-add_executable(test_udp_server tests/test_udp_server.cc)
-target_link_libraries(test_udp_server sylar)
-
-add_executable(test_server_mode_bench tests/test_server_mode_bench.cc)
-target_link_libraries(test_server_mode_bench sylar)
-
-add_executable(test_http_parser tests/test_http_parser.cc)
-target_link_libraries(test_http_parser sylar)
-
-add_executable(test_http_context tests/test_http_context.cc)
-target_link_libraries(test_http_context sylar)
-
-add_executable(test_http_router tests/test_http_router.cc)
-target_link_libraries(test_http_router sylar)
-
-add_executable(test_http_server tests/test_http_server.cc)
-target_link_libraries(test_http_server sylar)
-
-add_executable(test_http_ssl_server tests/test_http_ssl_server.cc)
-target_link_libraries(test_http_ssl_server sylar)
-
-add_executable(test_cors_middleware tests/test_cors_middleware.cc)
-target_link_libraries(test_cors_middleware sylar)
-
-add_executable(test_http_dispatch tests/test_http_dispatch.cc)
-target_link_libraries(test_http_dispatch sylar)
-
-add_executable(test_http_framework_config tests/test_http_framework_config.cc)
-target_link_libraries(test_http_framework_config sylar)
-
-add_executable(test_memory_pool tests/test_memory_pool.cc)
-target_link_libraries(test_memory_pool sylar)
-
-add_executable(test_session_manager tests/test_session_manager.cc)
-target_link_libraries(test_session_manager sylar)
-
-add_executable(test_sse_writer tests/test_sse_writer.cc)
-target_link_libraries(test_sse_writer sylar)
-
-add_executable(test_sse_server tests/test_sse_server.cc)
-target_link_libraries(test_sse_server sylar)
-
-add_executable(test_shared_stack_helpers tests/test_shared_stack_helpers.cc)
-target_link_libraries(test_shared_stack_helpers sylar)
-
-add_executable(test_shared_stack_scheduler tests/test_shared_stack_scheduler.cc)
-target_link_libraries(test_shared_stack_scheduler sylar)
-
-add_executable(test_shared_stack_scheduler_mt tests/test_shared_stack_scheduler_mt.cc)
-target_link_libraries(test_shared_stack_scheduler_mt sylar)
-
-add_executable(test_shared_stack_stress tests/test_shared_stack_stress.cc)
-target_link_libraries(test_shared_stack_stress sylar)
-
-add_executable(test_shared_stack_guard tests/test_shared_stack_guard.cc)
-target_link_libraries(test_shared_stack_guard sylar)
-
-add_executable(test_shared_stack_lifecycle tests/test_shared_stack_lifecycle.cc)
-target_link_libraries(test_shared_stack_lifecycle sylar)
-
-add_executable(test_shared_stack_longrun tests/test_shared_stack_longrun.cc)
-target_link_libraries(test_shared_stack_longrun sylar)
-
-add_executable(test_shared_stack_workeronly tests/test_shared_stack_workeronly.cc)
-target_link_libraries(test_shared_stack_workeronly sylar)
-
-add_executable(test_bytearray_pool_perf tests/test_bytearray_pool_perf.cc)
-target_link_libraries(test_bytearray_pool_perf sylar)
+    foreach(test_name IN LISTS SYLAR_TESTS)
+        add_sylar_test(${test_name})
+    endforeach()
+endif()
