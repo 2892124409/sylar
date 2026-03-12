@@ -2,6 +2,7 @@
 build/
 bin/
 lib/
+build-release/
 
 # 运行时产生的日志
 *.log

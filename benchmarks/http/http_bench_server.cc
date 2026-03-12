@@ -1,6 +1,7 @@
 #include "http/server/http_server.h"
 #include "http/core/http_error.h"
 #include "http/core/http_framework_config.h"
+#include "sylar/fiber/fiber_framework_config.h"
 #include "log/logger.h"
 #include "sylar/fiber/hook.h"
 #include "sylar/net/address.h"
@@ -28,6 +29,9 @@ struct Options
     uint32_t max_connections = 0;
     uint64_t keepalive_timeout_ms = 5000;
     uint32_t keepalive_max_requests = 0;
+    uint32_t shared_stack = 0;
+    uint32_t fiber_pool = 0;
+    uint32_t use_caller = 0;
 };
 
 volatile std::sig_atomic_t g_stop_requested = 0;
@@ -49,6 +53,9 @@ void PrintUsage(const char* argv0)
         << "  --max-connections <n>            Max concurrent connections, 0=unlimited (default: 0)\n"
         << "  --keepalive-timeout-ms <ms>      Keep-alive idle timeout in ms (default: 5000)\n"
         << "  --keepalive-max-requests <n>     Max requests per keep-alive connection, 0=unlimited (default: 0)\n"
+        << "  --shared-stack <0|1>             Enable shared stack (default: 0)\n"
+        << "  --fiber-pool <0|1>               Enable fiber pool (default: 0)\n"
+        << "  --use-caller <0|1>               Use caller thread for IO worker (default: 0)\n"
         << "  --help                           Show this help\n";
 }
 
@@ -182,6 +189,20 @@ bool ParseArgs(int argc, char** argv, Options& options)
             continue;
         }
 
+        
+        if (ReadOptionValue(arg, i, argc, argv, "--shared-stack", value)) {
+            if (!ParseUint32(value, options.shared_stack)) return false;
+            continue;
+        }
+        if (ReadOptionValue(arg, i, argc, argv, "--fiber-pool", value)) {
+            if (!ParseUint32(value, options.fiber_pool)) return false;
+            continue;
+        }
+        if (ReadOptionValue(arg, i, argc, argv, "--use-caller", value)) {
+            if (!ParseUint32(value, options.use_caller)) return false;
+            continue;
+        }
+
         std::cerr << "Unknown argument: " << arg << std::endl;
         PrintUsage(argv[0]);
         return false;
@@ -244,6 +265,37 @@ void RegisterRoutes(const http::HttpServer::ptr& server)
         return 0;
     });
 
+    server->getServletDispatch()->addServlet("/api/user/profile", [](http::HttpRequest::ptr,
+                                                                          http::HttpResponse::ptr rsp,
+                                                                          http::HttpSession::ptr) {
+        usleep(20 * 1000); // simulate 20ms DB latency
+        rsp->setHeader("Content-Type", "application/json");
+        rsp->setBody("{\"code\":0, \"msg\":\"ok\", \"data\":{\"id\":123, \"name\":\"sylar\"}}");
+        return 0;
+    });
+
+    server->getServletDispatch()->addServlet("/api/data/upload", [](http::HttpRequest::ptr req,
+                                                                    http::HttpResponse::ptr rsp,
+                                                                    http::HttpSession::ptr) {
+        // dummy payload check
+        if (req->getBody().size() < 10) {
+            http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Bad Request", "payload too small");
+            return 0;
+        }
+        rsp->setHeader("Content-Type", "application/json");
+        rsp->setBody("{\"code\":0, \"msg\":\"upload success\"}");
+        return 0;
+    });
+
+    server->getServletDispatch()->addServlet("/api/file/download", [](http::HttpRequest::ptr,
+                                                                      http::HttpResponse::ptr rsp,
+                                                                      http::HttpSession::ptr) {
+        std::string large_payload(1024 * 1024, 'A'); // 1MB payload
+        rsp->setHeader("Content-Type", "application/octet-stream");
+        rsp->setBody(large_payload);
+        return 0;
+    });
+
     server->getServletDispatch()->addParamServlet("/sleep/:ms", [](http::HttpRequest::ptr req,
                                                                    http::HttpResponse::ptr rsp,
                                                                    http::HttpSession::ptr) {
@@ -287,7 +339,24 @@ int main(int argc, char** argv)
     http::HttpFrameworkConfig::SetKeepAliveTimeoutMs(options.keepalive_timeout_ms);
     http::HttpFrameworkConfig::SetKeepAliveMaxRequests(options.keepalive_max_requests);
 
-    http::HttpServer::ptr server = http::HttpServer::CreateWithConfig();
+    sylar::FiberFrameworkConfig::SetFiberUseSharedStack(options.shared_stack != 0);
+    sylar::FiberFrameworkConfig::SetFiberPoolEnabled(options.fiber_pool != 0);
+    sylar::FiberFrameworkConfig::SetIOManagerUseCaller(options.use_caller != 0);
+
+    sylar::IOManager::ptr io_worker;
+    sylar::IOManager::ptr accept_worker;
+
+    if (options.use_caller) {
+        // 单 IOM 架构 (Single Reactor)：总工作线程为 io_threads (包含主线程)
+        io_worker.reset(new sylar::IOManager(options.io_threads, true, "sylar-http-worker"));
+        accept_worker = io_worker;
+    } else {
+        // 双 IOM 架构 (Main-Sub Reactor)：总工作线程拆分为 1 个 Accept 和 N-1 个 IO
+        uint32_t bg_io_threads = options.io_threads > 1 ? options.io_threads - 1 : 1;
+        io_worker.reset(new sylar::IOManager(bg_io_threads, false, "sylar-http-io"));
+        accept_worker.reset(new sylar::IOManager(1, false, "sylar-http-accept"));
+    }
+    http::HttpServer::ptr server(new http::HttpServer(io_worker.get(), accept_worker.get()));
     RegisterRoutes(server);
 
     std::vector<sylar::Address::ptr> addrs;
@@ -306,15 +375,33 @@ int main(int argc, char** argv)
               << " max_connections=" << options.max_connections
               << " keepalive_timeout_ms=" << options.keepalive_timeout_ms
               << " keepalive_max_requests=" << options.keepalive_max_requests
+              << " shared_stack=" << options.shared_stack
+              << " fiber_pool=" << options.fiber_pool
+              << " use_caller=" << options.use_caller
               << std::endl;
 
-    while (!g_stop_requested)
-    {
-        usleep(200 * 1000);
+    if (options.use_caller) {
+        sylar::Timer::ptr stop_timer;
+        stop_timer = io_worker->addTimer(500, [&]() {
+            if (g_stop_requested) {
+                std::cout << "http_bench_server (caller mode) shutting down" << std::endl;
+                server->stop();
+                if (accept_worker != io_worker) {
+                    accept_worker->stop();
+                }
+                if (stop_timer) {
+                    stop_timer->cancel();
+                }
+            }
+        }, true);
+        io_worker->stop(); 
+    } else {
+        while (!g_stop_requested) {
+            usleep(200 * 1000);
+        }
+        std::cout << "http_bench_server shutting down" << std::endl;
+        server->stop();
     }
-
-    std::cout << "http_bench_server shutting down" << std::endl;
-    server->stop();
     usleep(200 * 1000);
     return 0;
 }
