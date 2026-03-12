@@ -13,6 +13,7 @@ int main() {
     size_t old_header = http::HttpFrameworkConfig::GetMaxHeaderSize();
     size_t old_body = http::HttpFrameworkConfig::GetMaxBodySize();
     uint64_t old_connection_timeout = http::HttpFrameworkConfig::GetConnectionTimeoutMs();
+    bool old_session_enabled = http::HttpFrameworkConfig::GetSessionEnabled();
     uint64_t old_session_inactivity = http::HttpFrameworkConfig::GetSessionInactivityTimeoutMs();
     uint64_t old_sweep = http::HttpFrameworkConfig::GetSessionSweepIntervalMs();
     uint64_t old_heartbeat = http::HttpFrameworkConfig::GetSSEHeartbeatIntervalMs();
@@ -27,6 +28,7 @@ int main() {
     http::HttpFrameworkConfig::SetMaxHeaderSize(4096);
     http::HttpFrameworkConfig::SetMaxBodySize(2048);
     http::HttpFrameworkConfig::SetConnectionTimeoutMs(4321);
+    http::HttpFrameworkConfig::SetSessionEnabled(false);
     http::HttpFrameworkConfig::SetSessionInactivityTimeoutMs(6789);
     http::HttpFrameworkConfig::SetSessionSweepIntervalMs(5000);
     http::HttpFrameworkConfig::SetSSEHeartbeatIntervalMs(3000);
@@ -41,6 +43,7 @@ int main() {
     assert(http::HttpRequestParser::GetMaxHeaderSize() == 4096);
     assert(http::HttpRequestParser::GetMaxBodySize() == 2048);
     assert(http::HttpFrameworkConfig::GetConnectionTimeoutMs() == 4321);
+    assert(!http::HttpFrameworkConfig::GetSessionEnabled());
     assert(http::HttpFrameworkConfig::GetSessionInactivityTimeoutMs() == 6789);
     assert(http::HttpFrameworkConfig::GetSessionSweepIntervalMs() == 5000);
     assert(http::HttpFrameworkConfig::GetSSEHeartbeatIntervalMs() == 3000);
@@ -88,6 +91,7 @@ int main() {
     http::HttpFrameworkConfig::SetMaxHeaderSize(old_header);
     http::HttpFrameworkConfig::SetMaxBodySize(old_body);
     http::HttpFrameworkConfig::SetConnectionTimeoutMs(old_connection_timeout);
+    http::HttpFrameworkConfig::SetSessionEnabled(old_session_enabled);
     http::HttpFrameworkConfig::SetSessionInactivityTimeoutMs(old_session_inactivity);
     http::HttpFrameworkConfig::SetSessionSweepIntervalMs(old_sweep);
     http::HttpFrameworkConfig::SetSSEHeartbeatIntervalMs(old_heartbeat);

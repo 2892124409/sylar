@@ -7,6 +7,18 @@ namespace base
 {
     namespace
     {
+        static size_t GetSlotAlignment()
+        {
+            return alignof(std::max_align_t);
+        }
+
+        static int AlignSlotSize(int slotSize)
+        {
+            const size_t alignment = GetSlotAlignment();
+            const size_t aligned = (static_cast<size_t>(slotSize) + alignment - 1) / alignment * alignment;
+            return static_cast<int>(aligned);
+        }
+
         static std::vector<int> NormalizeSlotSizes(std::initializer_list<int> slotSizes)
         {
             std::vector<int> normalized(slotSizes.begin(), slotSizes.end());
@@ -83,10 +95,14 @@ namespace base
     {
         assert(slotSize > 0 && "slotSize must be positive");
 
+        // 槽位步进必须至少按 max_align_t 对齐，否则对象本体可能以未对齐地址构造，
+        // 在优化构建下会触发未定义行为甚至直接崩溃。
+        slotSize = AlignSlotSize(slotSize);
+
         // 保证一个 block 至少能容纳：块头 + 最坏对齐填充 + 1 个槽位。
         // 否则像 slotSize=4096 且 BlockSize_=4096 时会出现越界风险。
-        // 根据内存对齐原则，slot0的起始地址必须是自身内存大小的整数倍
-        const int minBlockBytes = sizeof(Node *) + (slotSize - 1) + slotSize;
+        // 这里只需要保证到机器最大自然对齐粒度即可，不需要按对象字节数本身对齐。
+        const int minBlockBytes = static_cast<int>(sizeof(Node *)) + static_cast<int>(GetSlotAlignment() - 1) + slotSize;
 
         if (BlockSize_ < minBlockBytes)
         {
@@ -172,7 +188,7 @@ namespace base
 
         // 预留头部指针空间后，计算对齐并定位第一个可用槽位。
         char *body = static_cast<char *>(newBlock) + sizeof(Node *);
-        size_t paddingSize = padPointer(body, SlotSize_);
+        size_t paddingSize = padPointer(body, GetSlotAlignment());
         curSlot_ = reinterpret_cast<Node *>(body + paddingSize);
 
         // lastSlot_ 之后将无法再放下一个完整槽位，因此需要扩容。

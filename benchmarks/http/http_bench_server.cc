@@ -16,6 +16,7 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
+#include <yaml-cpp/yaml.h>
 
 namespace
 {
@@ -29,6 +30,7 @@ struct Options
     uint32_t max_connections = 0;
     uint64_t keepalive_timeout_ms = 5000;
     uint32_t keepalive_max_requests = 0;
+    uint32_t session_enabled = 1;
     uint32_t shared_stack = 0;
     uint32_t fiber_pool = 0;
     uint32_t use_caller = 0;
@@ -53,6 +55,7 @@ void PrintUsage(const char* argv0)
         << "  --max-connections <n>            Max concurrent connections, 0=unlimited (default: 0)\n"
         << "  --keepalive-timeout-ms <ms>      Keep-alive idle timeout in ms (default: 5000)\n"
         << "  --keepalive-max-requests <n>     Max requests per keep-alive connection, 0=unlimited (default: 0)\n"
+        << "  --session-enabled <0|1>          Enable automatic HTTP sessions (default: 1)\n"
         << "  --shared-stack <0|1>             Enable shared stack (default: 0)\n"
         << "  --fiber-pool <0|1>               Enable fiber pool (default: 0)\n"
         << "  --use-caller <0|1>               Use caller thread for IO worker (default: 0)\n"
@@ -188,6 +191,15 @@ bool ParseArgs(int argc, char** argv, Options& options)
             }
             continue;
         }
+        if (ReadOptionValue(arg, i, argc, argv, "--session-enabled", value))
+        {
+            if (!ParseUint32(value, options.session_enabled))
+            {
+                std::cerr << "Invalid --session-enabled value: " << value << std::endl;
+                return false;
+            }
+            continue;
+        }
 
         
         if (ReadOptionValue(arg, i, argc, argv, "--shared-stack", value)) {
@@ -226,6 +238,12 @@ void InstallSignalHandlers()
 {
     std::signal(SIGINT, HandleStopSignal);
     std::signal(SIGTERM, HandleStopSignal);
+}
+
+bool HasRequiredStringField(const YAML::Node& node, const char* key)
+{
+    const YAML::Node field = node[key];
+    return field && field.IsScalar() && !field.as<std::string>().empty();
 }
 
 void RegisterRoutes(const http::HttpServer::ptr& server)
@@ -268,7 +286,7 @@ void RegisterRoutes(const http::HttpServer::ptr& server)
     server->getServletDispatch()->addServlet("/api/user/profile", [](http::HttpRequest::ptr,
                                                                           http::HttpResponse::ptr rsp,
                                                                           http::HttpSession::ptr) {
-        usleep(20 * 1000); // simulate 20ms DB latency
+        usleep(20 * 1000); // simulate hook-friendly upstream wait
         rsp->setHeader("Content-Type", "application/json");
         rsp->setBody("{\"code\":0, \"msg\":\"ok\", \"data\":{\"id\":123, \"name\":\"sylar\"}}");
         return 0;
@@ -277,11 +295,28 @@ void RegisterRoutes(const http::HttpServer::ptr& server)
     server->getServletDispatch()->addServlet("/api/data/upload", [](http::HttpRequest::ptr req,
                                                                     http::HttpResponse::ptr rsp,
                                                                     http::HttpSession::ptr) {
-        // dummy payload check
-        if (req->getBody().size() < 10) {
-            http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Bad Request", "payload too small");
+        if (req->getBody().empty()) {
+            http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Bad Request", "payload missing");
             return 0;
         }
+
+        YAML::Node payload;
+        try
+        {
+            payload = YAML::Load(req->getBody());
+        }
+        catch (const YAML::Exception&)
+        {
+            http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Bad Request", "invalid json payload");
+            return 0;
+        }
+
+        if (!payload.IsMap() || !HasRequiredStringField(payload, "username") || !HasRequiredStringField(payload, "data"))
+        {
+            http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Bad Request", "missing required fields");
+            return 0;
+        }
+
         rsp->setHeader("Content-Type", "application/json");
         rsp->setBody("{\"code\":0, \"msg\":\"upload success\"}");
         return 0;
@@ -290,7 +325,7 @@ void RegisterRoutes(const http::HttpServer::ptr& server)
     server->getServletDispatch()->addServlet("/api/file/download", [](http::HttpRequest::ptr,
                                                                       http::HttpResponse::ptr rsp,
                                                                       http::HttpSession::ptr) {
-        std::string large_payload(1024 * 1024, 'A'); // 1MB payload
+        static const std::string large_payload(1024 * 1024, 'A'); // stable 1MB payload, avoids per-request allocation noise
         rsp->setHeader("Content-Type", "application/octet-stream");
         rsp->setBody(large_payload);
         return 0;
@@ -312,6 +347,16 @@ void RegisterRoutes(const http::HttpServer::ptr& server)
         }
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("slept:" + std::to_string(sleep_ms));
+        return 0;
+    });
+
+    server->getServletDispatch()->addServlet("/__admin/quit", [](http::HttpRequest::ptr,
+                                                                 http::HttpResponse::ptr rsp,
+                                                                 http::HttpSession::ptr) {
+        g_stop_requested = 1;
+        rsp->setHeader("Content-Type", "text/plain");
+        rsp->setKeepAlive(false);
+        rsp->setBody("shutting-down");
         return 0;
     });
 }
@@ -338,6 +383,7 @@ int main(int argc, char** argv)
     http::HttpFrameworkConfig::SetMaxConnections(options.max_connections);
     http::HttpFrameworkConfig::SetKeepAliveTimeoutMs(options.keepalive_timeout_ms);
     http::HttpFrameworkConfig::SetKeepAliveMaxRequests(options.keepalive_max_requests);
+    http::HttpFrameworkConfig::SetSessionEnabled(options.session_enabled != 0);
 
     sylar::FiberFrameworkConfig::SetFiberUseSharedStack(options.shared_stack != 0);
     sylar::FiberFrameworkConfig::SetFiberPoolEnabled(options.fiber_pool != 0);
@@ -351,10 +397,9 @@ int main(int argc, char** argv)
         io_worker.reset(new sylar::IOManager(options.io_threads, true, "sylar-http-worker"));
         accept_worker = io_worker;
     } else {
-        // 双 IOM 架构 (Main-Sub Reactor)：总工作线程拆分为 1 个 Accept 和 N-1 个 IO
-        uint32_t bg_io_threads = options.io_threads > 1 ? options.io_threads - 1 : 1;
-        io_worker.reset(new sylar::IOManager(bg_io_threads, false, "sylar-http-io"));
-        accept_worker.reset(new sylar::IOManager(1, false, "sylar-http-accept"));
+        // 双 IOM 架构 (Main-Sub Reactor)：IO 与 Accept 线程池独立配置。
+        io_worker.reset(new sylar::IOManager(options.io_threads, false, "sylar-http-io"));
+        accept_worker.reset(new sylar::IOManager(options.accept_threads, false, "sylar-http-accept"));
     }
     http::HttpServer::ptr server(new http::HttpServer(io_worker.get(), accept_worker.get()));
     RegisterRoutes(server);
@@ -375,6 +420,7 @@ int main(int argc, char** argv)
               << " max_connections=" << options.max_connections
               << " keepalive_timeout_ms=" << options.keepalive_timeout_ms
               << " keepalive_max_requests=" << options.keepalive_max_requests
+              << " session_enabled=" << options.session_enabled
               << " shared_stack=" << options.shared_stack
               << " fiber_pool=" << options.fiber_pool
               << " use_caller=" << options.use_caller
@@ -401,6 +447,12 @@ int main(int argc, char** argv)
         }
         std::cout << "http_bench_server shutting down" << std::endl;
         server->stop();
+        if (accept_worker) {
+            accept_worker->stop();
+        }
+        if (io_worker && io_worker != accept_worker) {
+            io_worker->stop();
+        }
     }
     usleep(200 * 1000);
     return 0;

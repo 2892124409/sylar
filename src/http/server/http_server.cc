@@ -69,6 +69,26 @@ namespace http
                 response->setHeader("Keep-Alive", header.str());
             }
         }
+
+        class ScopedCleanup
+        {
+        public:
+            explicit ScopedCleanup(const std::function<void()> &fn)
+                : m_fn(fn)
+            {
+            }
+
+            ~ScopedCleanup()
+            {
+                if (m_fn)
+                {
+                    m_fn();
+                }
+            }
+
+        private:
+            std::function<void()> m_fn;
+        };
     } // namespace
 
     HttpServer::HttpServer(sylar::IOManager *io_worker, sylar::IOManager *accept_worker)
@@ -80,7 +100,7 @@ namespace http
         setRecvTimeout(HttpFrameworkConfig::GetConnectionTimeoutMs());
         HttpRequestParser::SetMaxHeaderSize(HttpFrameworkConfig::GetMaxHeaderSize());
         HttpRequestParser::SetMaxBodySize(HttpFrameworkConfig::GetMaxBodySize());
-        if (io_worker)
+        if (HttpFrameworkConfig::GetSessionEnabled() && io_worker)
         {
             m_sessionManager->startSweepTimer(static_cast<sylar::TimerManager *>(io_worker), HttpFrameworkConfig::GetSessionSweepIntervalMs());
         }
@@ -137,6 +157,15 @@ namespace http
                 return;
             }
             client = ssl_client;
+        }
+
+        if (isStop())
+        {
+            if (client)
+            {
+                client->close();
+            }
+            return;
         }
 
         ScopedActiveConnection active_guard(m_activeConnections);
@@ -212,9 +241,12 @@ namespace http
             ++request_count;
 
             // 基于请求中的 SID 获取或创建服务端会话；必要时写回 Set-Cookie。
-            Session::ptr http_session = m_sessionManager->getOrCreate(request, response);
-            // 当前函数暂未直接使用该变量，保留会话创建/续期副作用。
-            (void)http_session;
+            if (HttpFrameworkConfig::GetSessionEnabled())
+            {
+                Session::ptr http_session = m_sessionManager->getOrCreate(request, response);
+                // 当前函数暂未直接使用该变量，保留会话创建/续期副作用。
+                (void)http_session;
+            }
 
             try
             {

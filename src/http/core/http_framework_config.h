@@ -62,6 +62,21 @@ namespace http
         static void SetConnectionTimeoutMs(uint64_t value);
 
         /**
+         * @brief 获取 HTTP 自动 Session 开关
+         * @details
+         * 为 false 时，HttpServer 不再自动读取/创建 Session，也不会写回 SID Cookie。
+         * 重载形式：运行时动态读取型（后续请求立即生效）。
+         */
+        static bool GetSessionEnabled();
+
+        /**
+         * @brief 设置 HTTP 自动 Session 开关
+         * @details
+         * 设置后后续请求是否自动附带 Session 行为立即切换。
+         */
+        static void SetSessionEnabled(bool value);
+
+        /**
          * @brief 获取 Session 最大非活跃时间（毫秒）
          * @details
          * 当前在新建 SessionManager 或显式传 0 时生效。

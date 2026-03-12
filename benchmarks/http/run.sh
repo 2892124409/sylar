@@ -5,6 +5,7 @@ ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 SERVER_BIN="${ROOT_DIR}/bin/http_bench_server"
 MIXED_LUA="${ROOT_DIR}/benchmarks/http/mixed.lua"
 STATUS_LUA="${ROOT_DIR}/benchmarks/http/status_count.lua"
+RESULTS_ROOT="${ROOT_DIR}/benchmarks/http/results"
 
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-18080}
@@ -13,6 +14,7 @@ WRK_CONNECTIONS=${WRK_CONNECTIONS:-64}
 WRK_DURATION=${WRK_DURATION:-15s}
 SERVER_IO_THREADS=${SERVER_IO_THREADS:-4}
 SERVER_ACCEPT_THREADS=${SERVER_ACCEPT_THREADS:-1}
+SERVER_SESSION_ENABLED=${SERVER_SESSION_ENABLED:-0}
 EDGE_MAX_CONN=${EDGE_MAX_CONN:-16}
 EDGE_SLEEP_MS=${EDGE_SLEEP_MS:-2000}
 EDGE_BLOCKED_DURATION=${EDGE_BLOCKED_DURATION:-5s}
@@ -20,6 +22,7 @@ EDGE_HOLD_DURATION=${EDGE_HOLD_DURATION:-10s}
 EDGE_PROBE_DURATION=${EDGE_PROBE_DURATION:-5s}
 EDGE_WARMUP_SEC=${EDGE_WARMUP_SEC:-1}
 SERVER_PID=""
+LOG_INITIALIZED=0
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -40,10 +43,39 @@ ensure_server_bin() {
 
 cleanup() {
   if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
-    kill "${SERVER_PID}" 2>/dev/null || true
+    curl -fsS -m 2 "http://${HOST}:${PORT}/__admin/quit" >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill "${SERVER_PID}" 2>/dev/null || true
+    fi
     wait "${SERVER_PID}" 2>/dev/null || true
   fi
   SERVER_PID=""
+}
+
+init_logging() {
+  local scenario=$1
+  if [[ "${LOG_INITIALIZED}" -eq 1 ]]; then
+    return
+  fi
+
+  local run_date
+  local run_stamp
+  run_date=$(date +%F)
+  run_stamp=$(date +%Y%m%d_%H%M%S)
+  local result_dir="${RESULTS_ROOT}/${run_date}"
+  mkdir -p "${result_dir}"
+
+  RESULT_LOG=${RESULT_LOG:-"${result_dir}/run_${scenario}_${run_stamp}.log"}
+  exec > >(tee "${RESULT_LOG}") 2>&1
+  LOG_INITIALIZED=1
+
+  echo "Log file: ${RESULT_LOG}"
 }
 
 wait_until_ready() {
@@ -68,6 +100,7 @@ start_server() {
     --io-threads "${SERVER_IO_THREADS}" \
     --accept-threads "${SERVER_ACCEPT_THREADS}" \
     --max-connections "${max_connections}" \
+    --session-enabled "${SERVER_SESSION_ENABLED}" \
     --keepalive-timeout-ms 5000 \
     --keepalive-max-requests 0 &
   SERVER_PID=$!
@@ -102,11 +135,13 @@ run_edge_conn_limit() {
 run_edge() {
   start_server 0
   run_edge_blocked
+  cleanup
   run_edge_conn_limit
 }
 
 main() {
   local scenario=${1:-all}
+  init_logging "${scenario}"
   require_cmd wrk
   require_cmd curl
   ensure_server_bin
@@ -127,8 +162,13 @@ main() {
     all)
       start_server 0
       run_throughput
+      cleanup
+      start_server 0
       run_mixed
+      cleanup
+      start_server 0
       run_edge_blocked
+      cleanup
       run_edge_conn_limit
       ;;
     *)

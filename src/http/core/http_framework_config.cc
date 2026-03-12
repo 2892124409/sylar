@@ -45,6 +45,10 @@ namespace http
         static ConfigVar<uint64_t>::ptr g_http_connection_timeout_ms =
             Config::Lookup<uint64_t>("http.connection_timeout_ms", kDefaultHttpConnectionTimeoutMs, "http connection timeout ms");
 
+        // 重载形式：运行时动态读取型（后续请求是否自动创建 Session 立即生效）
+        static ConfigVar<bool>::ptr g_http_session_enabled =
+            Config::Lookup<bool>("http.session_enabled", true, "http auto session enabled");
+
         // 重载形式：新对象生效型（新建 SessionManager 时读取）
         static ConfigVar<uint64_t>::ptr g_http_session_inactivity_timeout_ms =
             Config::Lookup<uint64_t>("http.session_inactivity_timeout_ms", kDefaultHttpSessionInactivityTimeoutMs,
@@ -145,6 +149,16 @@ namespace http
     void HttpFrameworkConfig::SetConnectionTimeoutMs(uint64_t value)
     {
         g_http_connection_timeout_ms->setValue(NormalizeUint64OrDefault(value, kDefaultHttpConnectionTimeoutMs));
+    }
+
+    bool HttpFrameworkConfig::GetSessionEnabled()
+    {
+        return g_http_session_enabled->getValue();
+    }
+
+    void HttpFrameworkConfig::SetSessionEnabled(bool value)
+    {
+        g_http_session_enabled->setValue(value);
     }
 
     uint64_t HttpFrameworkConfig::GetSessionInactivityTimeoutMs()

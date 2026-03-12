@@ -3,11 +3,19 @@ set -euo pipefail
 
 ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 SERVER_BIN="${ROOT_DIR}/bin/http_bench_server"
-POST_LUA="${ROOT_DIR}/benchmarks/http/post.lua"
+POST_STATUS_LUA="${ROOT_DIR}/benchmarks/http/post_status.lua"
+STATUS_LUA="${ROOT_DIR}/benchmarks/http/status_count.lua"
+RESULTS_ROOT="${ROOT_DIR}/benchmarks/http/results"
 
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-18080}
+WRK_THREADS=${WRK_THREADS:-4}
+WRK_DURATION=${WRK_DURATION:-10s}
+SERVER_IO_THREADS=${SERVER_IO_THREADS:-4}
+SERVER_ACCEPT_THREADS=${SERVER_ACCEPT_THREADS:-1}
+SERVER_SESSION_ENABLED=${SERVER_SESSION_ENABLED:-0}
 SERVER_PID=""
+LOG_INITIALIZED=0
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -27,10 +35,38 @@ ensure_server_bin() {
 
 cleanup() {
   if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
-    kill "${SERVER_PID}" 2>/dev/null || true
+    curl -fsS -m 2 "http://${HOST}:${PORT}/__admin/quit" >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill "${SERVER_PID}" 2>/dev/null || true
+    fi
     wait "${SERVER_PID}" 2>/dev/null || true
   fi
   SERVER_PID=""
+}
+
+init_logging() {
+  if [[ "${LOG_INITIALIZED}" -eq 1 ]]; then
+    return
+  fi
+
+  local run_date
+  local run_stamp
+  run_date=$(date +%F)
+  run_stamp=$(date +%Y%m%d_%H%M%S)
+  local result_dir="${RESULTS_ROOT}/${run_date}"
+  mkdir -p "${result_dir}"
+
+  RESULT_LOG=${RESULT_LOG:-"${result_dir}/matrix_${run_stamp}.log"}
+  exec > >(tee "${RESULT_LOG}") 2>&1
+  LOG_INITIALIZED=1
+
+  echo "Log file: ${RESULT_LOG}"
 }
 
 wait_until_ready() {
@@ -54,13 +90,28 @@ start_server() {
   "${SERVER_BIN}" \
     --host "${HOST}" \
     --port "${PORT}" \
-    --io-threads 4 \
-    --accept-threads 1 \
+    --io-threads "${SERVER_IO_THREADS}" \
+    --accept-threads "${SERVER_ACCEPT_THREADS}" \
+    --session-enabled "${SERVER_SESSION_ENABLED}" \
     --shared-stack "${ss}" \
     --fiber-pool "${fp}" \
     --use-caller "${uc}" &
   SERVER_PID=$!
   wait_until_ready
+}
+
+run_bench_case() {
+  local ss=$1
+  local fp=$2
+  local uc=$3
+  local label=$4
+  shift 4
+
+  echo ""
+  echo ">>> ${label}"
+  start_server "${ss}" "${fp}" "${uc}"
+  wrk --latency "$@"
+  cleanup
 }
 
 run_matrix() {
@@ -76,30 +127,28 @@ run_matrix() {
         echo "[CONFIG] shared_stack=${ss} | fiber_pool=${fp} | use_caller=${uc}"
         echo "----------------------------------------------------------"
         
-        start_server "${ss}" "${fp}" "${uc}"
+        run_bench_case "${ss}" "${fp}" "${uc}" \
+          "Baseline: /ping (exact route hot path, C=500, T=${WRK_THREADS}, ${WRK_DURATION})" \
+          -t"${WRK_THREADS}" -c500 -d"${WRK_DURATION}" -s "${STATUS_LUA}" "http://${HOST}:${PORT}/ping"
 
-        echo ">>> Baseline: /ping (纯 CPU 路由, C=500, T=4, 10s)"
-        wrk -t4 -c500 -d10s "http://${HOST}:${PORT}/ping" | grep -E "Requests/sec|Latency"
-        
-        echo ""
-        echo ">>> IO Intensive: /api/user/profile (20ms 延时, C=1000, T=4, 10s)"
-        wrk -t4 -c1000 -d10s "http://${HOST}:${PORT}/api/user/profile" | grep -E "Requests/sec|Latency"
+        run_bench_case "${ss}" "${fp}" "${uc}" \
+          "Timer Wait: /api/user/profile (20ms hook timer wait, C=1000, T=${WRK_THREADS}, ${WRK_DURATION})" \
+          -t"${WRK_THREADS}" -c1000 -d"${WRK_DURATION}" -s "${STATUS_LUA}" "http://${HOST}:${PORT}/api/user/profile"
 
-        echo ""
-        echo ">>> POST & Parse: /api/data/upload (JSON POST, C=500, T=4, 10s)"
-        wrk -t4 -c500 -d10s -s "${POST_LUA}" "http://${HOST}:${PORT}/api/data/upload" | grep -E "Requests/sec|Latency"
+        run_bench_case "${ss}" "${fp}" "${uc}" \
+          "POST & JSON Parse: /api/data/upload (JSON parse, C=500, T=${WRK_THREADS}, ${WRK_DURATION})" \
+          -t"${WRK_THREADS}" -c500 -d"${WRK_DURATION}" -s "${POST_STATUS_LUA}" "http://${HOST}:${PORT}/api/data/upload"
 
-        echo ""
-        echo ">>> Large Payload: /api/file/download (1MB 返回, C=50, T=4, 10s)"
-        wrk -t4 -c50 -d10s "http://${HOST}:${PORT}/api/file/download" | grep -E "Requests/sec|Latency"
-
-        cleanup
+        run_bench_case "${ss}" "${fp}" "${uc}" \
+          "Large Payload: /api/file/download (1MB static payload, C=50, T=${WRK_THREADS}, ${WRK_DURATION})" \
+          -t"${WRK_THREADS}" -c50 -d"${WRK_DURATION}" -s "${STATUS_LUA}" "http://${HOST}:${PORT}/api/file/download"
       done
     done
   done
 }
 
 main() {
+  init_logging
   require_cmd wrk
   require_cmd curl
   ensure_server_bin

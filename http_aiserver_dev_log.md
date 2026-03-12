@@ -3233,11 +3233,7 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 ---
 
-## 开发补充记录：HTTP 压测暴露出的响应边界问题
-
-这部分不是新的功能阶段，而是一次很典型的“功能测试看起来正常，但压测一上来就暴露协议语义问题”的补充记录。
-
----
+## 开发补充记录：HTTP 压测驱动的 Bug 发现与修复
 
 ### 1. 这个 bug 是怎么发现的
 这次问题不是先从单元测试里冒出来的，而是先在 HTTP 压测过程中被打出来的。
@@ -3280,12 +3276,9 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 ---
 
-### 2. 导致 bug 的原因
-这次其实串出了两个相关问题。
+### 2. Bug 1：普通 HTTP 响应缺少稳定的报文边界
 
-#### Bug 1：普通 HTTP 响应缺少稳定的报文边界
-
-##### 直接原因
+#### 直接原因
 当时 `HttpSession::sendResponse()` 对普通响应的发送方式是：
 
 1. 先调用 `response->toHeaderString()` 发送响应头
@@ -3299,7 +3292,7 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 于是服务端虽然“确实发出了内容”，但对于需要复用连接、持续解析响应边界的客户端来说，边界是不稳定的。
 
-##### 为什么 `curl` 看起来没事，`wrk` 却挂了
+#### 为什么 `curl` 看起来没事，`wrk` 却挂了
 因为 `curl` 在很多简单场景下可以依赖“连接关闭”来判断响应结束，所以表面上还能读到 body。
 
 但 `wrk` 这种压测客户端会更依赖：
@@ -3315,7 +3308,9 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 换句话说，这不是“服务完全没响应”，而是“服务响应对高并发客户端来说不够规范”。
 
-#### Bug 2：修完主问题后，又暴露了连接上限拒绝路径的问题
+---
+
+### 3. Bug 2：修完主问题后，又暴露了连接上限拒绝路径的问题
 
 把普通响应修到能被 `wrk` 正确解析之后，我又回归跑了 `./bin/test_http_server`。
 
@@ -3325,7 +3320,7 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 但测试有时只能读到 `503 Service Unavailable`，拿不到 body 里的详细错误信息。
 
-##### 根因
+#### 根因
 `HttpServer` 在超过 `max_connections` 时，原来的处理方式接近于：
 
 1. 接到连接
@@ -3347,7 +3342,7 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 ---
 
-### 3. 修复过程
+### 4. 修复过程
 这次修复不是一下就改对，而是分成了两轮定位。
 
 #### 第一步：先确认问题不是路由或业务 handler
@@ -3442,7 +3437,49 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 ---
 
-### 4. 这次问题的收获
+### 5. Bug 3：`Release` 下 `edge/conn-limit` 收尾偶发崩溃
+
+#### 现象
+
+- `edge conn-limit` 表面上是连接上限场景，但实际 `Release` 下复现到的崩溃点主要发生在前一个 `edge blocked` 场景结束、bench server 收尾退出时
+- shell 侧表现为 `benchmarks/http/run.sh` 在 `http_bench_server` 退出阶段报 `Segmentation fault (core dumped)`
+
+#### 根因
+
+1. **底层对象池存在对齐错误**
+   - `src/base/memorypool/memory_pool.cpp`
+   - 原实现按“对象大小”做槽位对齐和步进，某些对象尺寸下会把后续槽位放到未对齐地址
+   - `Release` 优化下这属于未定义行为，会把故障随机炸到 HTTP 压测场景
+
+2. **HTTP stop 路径引入了额外竞态**
+   - `src/http/server/http_server.cc`
+   - 为了让 bench server 更快退出，曾在 `HttpServer::stop()` 里跨线程主动关闭活跃 client sockets
+   - `wrk` 场景结束后连接本身已经会自然收尾，这段“主动关连接”反而把停机阶段变成了多线程 close 竞态点
+
+#### 代码修复
+
+- 修复 `MemoryPool` 槽位按 `alignof(std::max_align_t)` 对齐，并把 block 最小尺寸计算同步修正
+- 回退 `HttpServer::stop()` 中跨线程追踪/主动关闭活跃 client 的逻辑，只保留 stop accept + worker 正常收尾
+- 在 `tests/test_memory_pool.cc` 新增对齐回归测试，验证奇数槽位大小下返回地址仍满足最大自然对齐
+
+#### 回归验证
+
+- `cmake --build build-release --target http_bench_server test_http_server test_memory_pool -j8`
+- `./bin/test_memory_pool` 通过
+- `./bin/test_http_server` 通过
+- `SERVER_IO_THREADS=8 SERVER_ACCEPT_THREADS=2 SERVER_SESSION_ENABLED=0 benchmarks/http/run.sh edge`
+  - 连续回归 `10` 轮，无 `Segmentation fault`
+  - `edge blocked` 全部稳定返回 `4xx`
+  - `edge conn-limit` 全部稳定返回 `5xx`
+
+#### 当前结论
+
+- `conn-limit` 场景现在可以继续用于压测和结果留档
+- 如果后续还要继续做 stop 优化，优先沿 worker 内部协作退出去做，不要再从外部线程直接批量 close 活跃 client
+
+---
+
+### 6. 这次问题的收获
 这次 bug 的价值很高，因为它不是那种“一眼能看出来写错”的问题，而是典型的协议细节问题。
 
 #### 收获 1：`curl` 正常不等于 HTTP 语义正确
@@ -3481,8 +3518,8 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 ---
 
-### 5. 一句话总结
-这次压测发现的核心问题，不是“服务器不会回包”，而是“服务器在普通响应和拒绝路径上，没有把 HTTP 报文边界与关闭时机处理到足够严谨”；而真正把问题打出来的，不是单请求功能测试，而是 `wrk` 这种 keep-alive 压测客户端。
+### 7. 一句话总结
+这次压测发现的核心问题，不是“服务器不会回包”，而是“服务器在普通响应和拒绝路径上，没有把 HTTP 报文边界与关闭时机处理到足够严谨”；后续又继续暴露出 `Release` 停机阶段的内存对齐和 close 竞态问题；而真正把问题打出来的，不是单请求功能测试，而是 `wrk` 这种 keep-alive 压测客户端。
 
 ---
 
@@ -3517,3 +3554,75 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 ### 4. 最佳配置建议
 对于高性能 HTTP 服务场景，**推荐配置：独立栈 (SS=0) + 协程池 (FP=1) + 单 IOM 主线程参与调度 (UC=1)**。
+
+---
+
+## 2026-03-13 Release 版压测归档（修正版，以本节为准）
+
+这次记录对应的是完成 benchmark 清理后的正式复测版本，和上面那段“核心架构矩阵压测报告”不是同一轮实验条件。
+
+本次变化包括：
+
+- benchmark 默认关闭自动 Session，避免 `/ping` 一类场景被 `SID` 创建和 `Set-Cookie` 污染
+- `accept_threads` 已修正为真正生效
+- `POST` 场景改为真实 JSON 解析
+- `1MB download` 改为静态 payload，减少每请求分配噪音
+- matrix 脚本改为每个 case 独立起服，避免状态串扰
+
+### 1. 日志归档位置
+
+本次压测原始日志最初写在 `/tmp`，随后已经归档到项目目录：
+
+- `benchmarks/http/results/2026-03-13/base_release_wsl2_8io2accept.log`
+- `benchmarks/http/results/2026-03-13/matrix_release_wsl2_8io2accept.log`
+
+### 2. 压测环境
+
+- **构建方式**：`Release`
+- **系统**：`Linux 6.6.87.2-microsoft-standard-WSL2 x86_64`
+- **CPU 并发**：`16 vCPU`
+- **压测地址**：`127.0.0.1` 回环
+- **服务端参数**：`SERVER_IO_THREADS=8`、`SERVER_ACCEPT_THREADS=2`
+- **HTTP Session**：`SERVER_SESSION_ENABLED=0`
+
+### 3. 基础场景对照
+
+| 场景 | 压测参数 | Requests/sec | 关键结果 |
+| :--- | :--- | ---: | :--- |
+| `throughput /ping` | `t=4 c=256 d=10s` | 99,663.25 | p99=`5.70ms`，`timeout=253` |
+| `mixed` | `t=4 c=256 d=10s` | 93,050.76 | 全部 `2xx` |
+| `edge blocked` | `t=2 c=16 d=5s` | 11,553.49 | 全部 `4xx`，行为符合预期 |
+| `edge conn-limit` | `t=2 c=8 d=5s` | 2,024.03 | 全部 `5xx`，结束时 bench server 出现一次崩溃 |
+
+### 4. 调度矩阵对照表
+
+| shared_stack | fiber_pool | use_caller | `/ping` req/s | `Timer Wait` req/s | `POST JSON` req/s | `1MB 下载` req/s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0 | 0 | 92,930.69 | 45,136.40 | 47,600.25 | 497.39 |
+| 0 | 0 | 1 | 103,880.36 | 44,911.13 | 47,644.89 | 489.64 |
+| 0 | 1 | 0 | 102,131.99 | 44,917.68 | 47,462.43 | 470.23 |
+| 0 | 1 | 1 | 92,896.01 | 44,813.69 | 47,847.46 | 571.07 |
+| 1 | 0 | 0 | 23,107.56 | 4,933.51 | 34,433.53 | 510.72 |
+| 1 | 0 | 1 | 22,881.72 | 4,900.64 | 35,827.57 | 484.79 |
+| 1 | 1 | 0 | 22,350.19 | 4,663.37 | 34,639.12 | 484.45 |
+| 1 | 1 | 1 | 25,641.62 | 4,894.81 | 28,172.62 | 481.03 |
+
+### 5. 当前结论
+
+1. **`shared_stack=0` 明显优于 `shared_stack=1`**  
+   这是本轮数据里最稳定、最明确的结论。无论是 `/ping`、定时等待场景，还是 `POST JSON`，共享栈模式都明显落后。
+
+2. **在 `shared_stack=0` 前提下，`fiber_pool` 和 `use_caller` 的差异远小于共享栈开关本身**  
+   非共享栈四组之间差异存在，但都还在可接受范围内；整体属于“微调优化”，不是决定性因素。
+
+3. **连接上限场景还有稳定性问题**  
+   `edge conn-limit` 的业务语义是对的，`wrk` 也已经稳定打到 `5xx`；但 bench server 在该场景结束后出现过一次 `Segmentation fault`，所以这个分支目前不能算完全压测通过。
+
+### 6. 当前推荐
+
+- 如果目标是继续做 HTTP 框架吞吐压测，优先使用：`shared_stack=0`
+- 若继续细调，可在以下几组内比较：
+  - `shared_stack=0, fiber_pool=0, use_caller=1`
+  - `shared_stack=0, fiber_pool=1, use_caller=0`
+  - `shared_stack=0, fiber_pool=1, use_caller=1`
+- 在修掉 `conn-limit` 崩溃前，不建议把连接上限场景的结果直接作为“稳定性已验证”的结论

@@ -3,6 +3,9 @@ build/
 bin/
 lib/
 build-release/
+build-ubsan/
+build-relwithdebinfo/
+build-asan/
 
 # 运行时产生的日志
 *.log
