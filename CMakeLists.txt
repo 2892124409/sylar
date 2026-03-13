@@ -129,6 +129,66 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(http_bench_server PRIVATE -Wall)
 endif()
 
+option(BUILD_AI_CHAT_SERVER "Build AI chat server application target" OFF)
+
+if(BUILD_AI_CHAT_SERVER)
+    find_package(CURL QUIET)
+    if(NOT CURL_FOUND)
+        message(FATAL_ERROR "BUILD_AI_CHAT_SERVER=ON requires libcurl development files. Install libcurl4-openssl-dev (or equivalent).")
+    endif()
+
+    find_library(MYSQLCLIENT_LIBRARY NAMES mysqlclient)
+    if(NOT MYSQLCLIENT_LIBRARY)
+        message(FATAL_ERROR "BUILD_AI_CHAT_SERVER=ON requires libmysqlclient. Install libmysqlclient-dev (or equivalent).")
+    endif()
+
+    set(AI_CHAT_SERVER_SOURCES
+        src/ai/common/ai_utils.cc
+        src/ai/config/ai_app_config.cc
+        src/ai/http/ai_http_api.cc
+        src/ai/llm/deepseek_client.cc
+        src/ai/service/chat_service.cc
+        src/ai/storage/chat_repository.cc
+        src/ai/storage/async_mysql_writer.cc
+        src/ai/main.cc
+    )
+
+    add_executable(ai_chat_server ${AI_CHAT_SERVER_SOURCES})
+    target_link_libraries(ai_chat_server PRIVATE sylar ${MYSQLCLIENT_LIBRARY})
+
+    if(TARGET CURL::libcurl)
+        target_link_libraries(ai_chat_server PRIVATE CURL::libcurl)
+    else()
+        target_include_directories(ai_chat_server PRIVATE ${CURL_INCLUDE_DIRS})
+        target_link_libraries(ai_chat_server PRIVATE ${CURL_LIBRARIES})
+    endif()
+
+    set_target_properties(ai_chat_server PROPERTIES
+        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
+    )
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(ai_chat_server PRIVATE -Wall)
+    endif()
+
+    add_executable(ai_chat_client
+        src/ai/client/chat_client.cc
+    )
+    if(TARGET CURL::libcurl)
+        target_link_libraries(ai_chat_client PRIVATE CURL::libcurl)
+    else()
+        target_include_directories(ai_chat_client PRIVATE ${CURL_INCLUDE_DIRS})
+        target_link_libraries(ai_chat_client PRIVATE ${CURL_LIBRARIES})
+    endif()
+    set_target_properties(ai_chat_client PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(ai_chat_client PRIVATE -Wall)
+    endif()
+endif()
+
 function(add_sylar_test target_name)
     add_executable(${target_name} "tests/${target_name}.cc")
     target_link_libraries(${target_name} PRIVATE sylar)
@@ -192,4 +252,20 @@ if(BUILD_TESTING)
     foreach(test_name IN LISTS SYLAR_TESTS)
         add_sylar_test(${test_name})
     endforeach()
+
+    add_executable(test_ai_chat_service
+        tests/test_ai_chat_service.cc
+        src/ai/common/ai_utils.cc
+        src/ai/service/chat_service.cc
+    )
+    target_link_libraries(test_ai_chat_service PRIVATE sylar)
+    set_target_properties(test_ai_chat_service PROPERTIES
+        ENABLE_EXPORTS ON
+        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test_ai_chat_service PRIVATE -Wall)
+    endif()
+    add_test(NAME test_ai_chat_service COMMAND test_ai_chat_service)
 endif()

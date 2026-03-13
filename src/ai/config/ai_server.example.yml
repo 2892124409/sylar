@@ -1,0 +1,33 @@
+ai:
+  server:
+    host: 0.0.0.0
+    port: 8080
+    enable_ssl: false
+    ssl_cert_file: ""
+    ssl_key_file: ""
+  deepseek:
+    base_url: https://api.deepseek.com/v1
+    api_key: "YOUR_DEEPSEEK_API_KEY"
+    default_model: deepseek-chat
+    connect_timeout_ms: 3000
+    request_timeout_ms: 120000
+  chat:
+    require_sid: true
+    max_context_messages: 20
+    history_load_limit: 20
+    history_query_limit_max: 200
+    default_temperature: 0.7
+    default_max_tokens: 1024
+    system_prompt: ""
+  mysql:
+    host: 127.0.0.1
+    port: 3306
+    user: ai_chat_user
+    password: "YOUR_DB_PASSWORD"
+    database: ai_chat
+    charset: utf8mb4
+    connect_timeout_seconds: 5
+  persist:
+    queue_capacity: 10000
+    flush_interval_ms: 200
+    batch_size: 128
