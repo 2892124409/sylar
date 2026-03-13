@@ -3523,106 +3523,95 @@ TLS 握手是“连接级”而不是“请求级”动作：
 
 ---
 
-## 2026-03-13 HTTP Server 核心架构矩阵压测报告
+## 2026-03-13 Release 全流程压测归档（当前有效）
 
-### 1. 压测目标与背景
-- **目标**：探究在相同物理线程数（4个工作线程）下，单 IOM 架构与双 IOM 架构、独立栈与共享栈、协程池开关对性能的影响。
-- **环境**：Linux 6.x, CPU 4-Core, Memory 8GB+, `wrk` 压力机。
-- **变量控制**：
-  - **UC=1 (单 IOM)**：1个主线程参与调度 + 3个后台 Worker = 4 线程 (Accept+IO 混合)。
-  - **UC=0 (双 IOM)**：主线程睡眠，1个 Accept 专用后台线程 + 3个 IO 专用后台线程 = 4 线程。
+本节覆盖此前 3526 行之后的旧压测记录，以本轮结果为准。
 
-### 2. 核心压测数据矩阵 (QPS)
-| 架构组合 (SS:共享栈, FP:协程池, UC:Caller) | /ping (Baseline) | IO Intensive (20ms) | POST & Parse | 1MB Download |
-| :--- | :--- | :--- | :--- | :--- |
-| **组合 1: SS=0, FP=0, UC=0 (双 IOM)** | 54,225 | 41,659 | 51,248 | 514 |
-| **组合 2: SS=0, FP=0, UC=1 (单 IOM)** | **59,271** | **43,594** | **57,258** | 499 |
-| **组合 3: SS=0, FP=1, UC=0** | 54,983 | 42,046 | 50,903 | 502 |
-| **组合 4: SS=0, FP=1, UC=1** | 58,842 | 43,501 | 56,837 | 498 |
-| **组合 5: SS=1, FP=0, UC=0** | 41,253 | 13,487 | 10,274 | 506 |
-| **组合 6: SS=1, FP=0, UC=1** | 22,197 | 3,660 | 13,547 | 482 |
-| **组合 7: SS=1, FP=1, UC=0** | 41,218 | 11,035 | 10,161 | 506 |
-| **组合 8: SS=1, FP=1, UC=1** | 22,724 | 4,240 | 13,187 | 518 |
+### 1. 原始日志位置
 
-### 3. 技术结论
-1.  **单 IOM + use_caller (Single Reactor) 胜出**：
-    在 4 线程对齐测试中，开启 `use_caller=1` 后的单 IOM 架构在纯吞吐和 POST 解析上领先双 IOM 架构约 **10%~12%**。这证明了消除“跨线程 Accept 到 IO 的 tickle 唤醒开销”能带来实质性的吞吐提升。
-2.  **共享栈 (Shared Stack) 的局限性**：
-    在 HTTP 高频请求场景下，共享栈频繁的 `memcpy` 导致 QPS 暴跌约 **40%~60%**。尤其是在 `use_caller=1` 时，由于主线程栈与协程池的共享内存块在极高并发下产生了严重的 CPU 缓存颠簸或内存页缺页中断，性能损耗最严重。共享栈仅适用于极海量协程（>10万）且对内存极度敏感的非高频 IO 场景。
-3.  **协程池 (Fiber Pool) 的稳定性**：
-    在独立栈模式下，协程池对纯 QPS 提升不明显，但在 IO 密集型场景（20ms 延时）下能提供更平稳的响应延迟分布。
+本轮完整结果目录：
 
-### 4. 最佳配置建议
-对于高性能 HTTP 服务场景，**推荐配置：独立栈 (SS=0) + 协程池 (FP=1) + 单 IOM 主线程参与调度 (UC=1)**。
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350`
 
----
+核心原始日志文件：
 
-## 2026-03-13 Release 版压测归档（修正版，以本节为准）
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/pipeline.log`
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/phase1/edge_run_*.log`
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/phase1/throughput_run_*.log`
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/phase2_baseline.log`
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/phase2_matrix.log`
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/phase3/*.log`
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/summary.json`
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/summary.md`
 
-这次记录对应的是完成 benchmark 清理后的正式复测版本，和上面那段“核心架构矩阵压测报告”不是同一轮实验条件。
+补充：Phase2 的 32 次明细表已额外导出：
 
-本次变化包括：
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/phase2_matrix_32_results.md`
+- `benchmarks/http/results/2026-03-13/release_full_pipeline_stack1m_shared1m_194350/phase2_matrix_32_results.csv`
 
-- benchmark 默认关闭自动 Session，避免 `/ping` 一类场景被 `SID` 创建和 `Set-Cookie` 污染
-- `accept_threads` 已修正为真正生效
-- `POST` 场景改为真实 JSON 解析
-- `1MB download` 改为静态 payload，减少每请求分配噪音
-- matrix 脚本改为每个 case 独立起服，避免状态串扰
+### 2. 本轮参数（Phase1-3）
 
-### 1. 日志归档位置
+- 构建：`Release`
+- 地址：`127.0.0.1:18080`
+- 服务线程：`io_threads=8`，`accept_threads=2`
+- Session：`session_enabled=0`
+- Fiber 独立栈：`fiber_stack_size=1048576 (1MB)`
+- Fiber 共享栈默认：`fiber.shared_stack_size=1048576 (1MB)`（框架默认值已更新）
 
-本次压测原始日志最初写在 `/tmp`，随后已经归档到项目目录：
+Phase1：
 
-- `benchmarks/http/results/2026-03-13/base_release_wsl2_8io2accept.log`
-- `benchmarks/http/results/2026-03-13/matrix_release_wsl2_8io2accept.log`
+- `edge` 回归 `10` 轮（`blocked + conn-limit`）
+- `throughput` 回归 `3` 轮（`t=4 c=256 d=60s`）
+- `run.sh` 默认配置生效：`shared_stack=0`，`fiber_pool=0`，`use_caller=0`
 
-### 2. 压测环境
+Phase2：
 
-- **构建方式**：`Release`
-- **系统**：`Linux 6.6.87.2-microsoft-standard-WSL2 x86_64`
-- **CPU 并发**：`16 vCPU`
-- **压测地址**：`127.0.0.1` 回环
-- **服务端参数**：`SERVER_IO_THREADS=8`、`SERVER_ACCEPT_THREADS=2`
-- **HTTP Session**：`SERVER_SESSION_ENABLED=0`
+- baseline：`t=4 c=256 d=10s`，场景 `throughput/mixed/edge blocked/edge conn-limit`
+- matrix：`SS/FP/UC` 的 `2x2x2=8` 组配置，每组 4 个 case（共 32 次）
 
-### 3. 基础场景对照
+Phase3：
 
-| 场景 | 压测参数 | Requests/sec | 关键结果 |
-| :--- | :--- | ---: | :--- |
-| `throughput /ping` | `t=4 c=256 d=10s` | 99,663.25 | p99=`5.70ms`，`timeout=253` |
-| `mixed` | `t=4 c=256 d=10s` | 93,050.76 | 全部 `2xx` |
-| `edge blocked` | `t=2 c=16 d=5s` | 11,553.49 | 全部 `4xx`，行为符合预期 |
-| `edge conn-limit` | `t=2 c=8 d=5s` | 2,024.03 | 全部 `5xx`，结束时 bench server 出现一次崩溃 |
+- 固定配置：`shared_stack=0`，`fiber_pool=1`，`use_caller=1`
+- 统一参数：`t=4 d=15s`
+- 连接数扫参：
+  - `ping`: `64 128 256 512 1024`
+  - `profile`: `64 128 256 512`
+  - `upload`: `64 128 256 512`
+  - `download`: `20 50 100 200`
 
-### 4. 调度矩阵对照表
+### 3. 本轮结果摘要
 
-| shared_stack | fiber_pool | use_caller | `/ping` req/s | `Timer Wait` req/s | `POST JSON` req/s | `1MB 下载` req/s |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 0 | 0 | 92,930.69 | 45,136.40 | 47,600.25 | 497.39 |
-| 0 | 0 | 1 | 103,880.36 | 44,911.13 | 47,644.89 | 489.64 |
-| 0 | 1 | 0 | 102,131.99 | 44,917.68 | 47,462.43 | 470.23 |
-| 0 | 1 | 1 | 92,896.01 | 44,813.69 | 47,847.46 | 571.07 |
-| 1 | 0 | 0 | 23,107.56 | 4,933.51 | 34,433.53 | 510.72 |
-| 1 | 0 | 1 | 22,881.72 | 4,900.64 | 35,827.57 | 484.79 |
-| 1 | 1 | 0 | 22,350.19 | 4,663.37 | 34,639.12 | 484.45 |
-| 1 | 1 | 1 | 25,641.62 | 4,894.81 | 28,172.62 | 481.03 |
+#### 3.1 Phase1 稳定性
 
-### 5. 当前结论
+- edge：`10/10 PASS`（无崩溃）
+- throughput：`3/3 PASS`
 
-1. **`shared_stack=0` 明显优于 `shared_stack=1`**  
-   这是本轮数据里最稳定、最明确的结论。无论是 `/ping`、定时等待场景，还是 `POST JSON`，共享栈模式都明显落后。
+#### 3.2 Phase2 基线结果
 
-2. **在 `shared_stack=0` 前提下，`fiber_pool` 和 `use_caller` 的差异远小于共享栈开关本身**  
-   非共享栈四组之间差异存在，但都还在可接受范围内；整体属于“微调优化”，不是决定性因素。
+| 场景 | Requests/sec | p99(ms) | 状态分布 |
+| :--- | ---: | ---: | :--- |
+| throughput | 31,700.70 | 20.83 | 无 4xx/5xx |
+| mixed | 33,526.68 | 19.45 | 全部 2xx |
+| edge blocked | 4,317.00 | 91.33 | 全部 4xx |
+| edge conn-limit | 8,274.56 | 1.37 | 全部 5xx |
 
-3. **连接上限场景还有稳定性问题**  
-   `edge conn-limit` 的业务语义是对的，`wrk` 也已经稳定打到 `5xx`；但 bench server 在该场景结束后出现过一次 `Segmentation fault`，所以这个分支目前不能算完全压测通过。
+#### 3.3 Phase2 调度矩阵（关键结论）
 
-### 6. 当前推荐
+- `/ping` 最优配置：`SS=1, FP=1, UC=1`
+- 对应吞吐：`23,382.87 req/s`
+- 32 次全量明细见 `phase2_matrix_32_results.md/csv`
 
-- 如果目标是继续做 HTTP 框架吞吐压测，优先使用：`shared_stack=0`
-- 若继续细调，可在以下几组内比较：
-  - `shared_stack=0, fiber_pool=0, use_caller=1`
-  - `shared_stack=0, fiber_pool=1, use_caller=0`
-  - `shared_stack=0, fiber_pool=1, use_caller=1`
-- 在修掉 `conn-limit` 崩溃前，不建议把连接上限场景的结果直接作为“稳定性已验证”的结论
+#### 3.4 Phase3 上限探索
+
+| Endpoint | Best Conn | Best Requests/sec | First Timeout | Long-tail Warning |
+| :--- | ---: | ---: | :---: | ---: |
+| ping | 64 | 54,529.98 | - | 128 |
+| profile | 512 | 18,469.80 | - | 512 |
+| upload | 64 | 41,645.35 | - | 256 |
+| download | 100 | 633.27 | - | 50 |
+
+### 4. 当前结论
+
+1. 本轮核心目标“稳定通过压测”已达成：Phase1 edge 与 throughput 全部通过。  
+2. 相比早期高 QPS 但不稳定的版本，本轮属于“稳定性优先”的可归档数据。  
+3. 后续做性能对比时，应固定同一脚本参数与同一代码基线再比较，避免跨版本指标误判。  

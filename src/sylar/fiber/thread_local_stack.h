@@ -34,7 +34,7 @@ namespace sylar
         static size_t GetStackSize()
         {
             size_t configured = ConfiguredStackSize();
-            return configured ? configured : 128 * 1024;
+            return configured ? configured : 1024 * 1024;
         }
 
         static ThreadLocalSharedStack *GetInstance()

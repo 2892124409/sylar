@@ -34,7 +34,7 @@ struct Options
     uint32_t shared_stack = 0;
     uint32_t fiber_pool = 0;
     uint32_t use_caller = 0;
-    uint32_t fiber_stack_size = 256 * 1024;
+    uint32_t fiber_stack_size = 1024 * 1024;
 };
 
 volatile std::sig_atomic_t g_stop_requested = 0;
@@ -59,7 +59,7 @@ void PrintUsage(const char* argv0)
         << "  --session-enabled <0|1>          Enable automatic HTTP sessions (default: 1)\n"
         << "  --shared-stack <0|1>             Enable shared stack (default: 0)\n"
         << "  --fiber-pool <0|1>               Enable fiber pool (default: 0)\n"
-        << "  --fiber-stack-size <bytes>       Fiber stack size in bytes (default: 262144)\n"
+        << "  --fiber-stack-size <bytes>       Fiber stack size in bytes (default: 1048576)\n"
         << "  --use-caller <0|1>               Use caller thread for IO worker (default: 0)\n"
         << "  --help                           Show this help\n";
 }

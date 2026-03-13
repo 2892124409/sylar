@@ -21,7 +21,7 @@ namespace sylar
 
         // 重载形式：新对象生效型（新建 Fiber/FiberPool 时读取）
         static ConfigVar<uint32_t>::ptr g_fiber_stack_size =
-            Config::Lookup<uint32_t>("fiber.stack_size", 128 * 1024, "fiber stack size");
+            Config::Lookup<uint32_t>("fiber.stack_size", 1024 * 1024, "fiber stack size");
 
         // 重载形式：新对象生效型（新建 Fiber/FiberPool 时读取）
         static ConfigVar<bool>::ptr g_fiber_use_shared_stack =
@@ -29,7 +29,7 @@ namespace sylar
 
         // 重载形式：启动参数型（共享栈大小建议启动前确定）
         static ConfigVar<uint32_t>::ptr g_fiber_shared_stack_size =
-            Config::Lookup<uint32_t>("fiber.shared_stack_size", 128 * 1024, "fiber shared stack size");
+            Config::Lookup<uint32_t>("fiber.shared_stack_size", 1024 * 1024, "fiber shared stack size");
 
         // 重载形式：运行时动态读取型（每次 acquire/release 时读取）
         static ConfigVar<bool>::ptr g_fiber_pool_enabled =

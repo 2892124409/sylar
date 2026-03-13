@@ -7,6 +7,7 @@ build-ubsan/
 build-relwithdebinfo/
 build-asan/
 build-relwithdeb/
+benchmarks/http/results
 
 # 运行时产生的日志
 *.log
