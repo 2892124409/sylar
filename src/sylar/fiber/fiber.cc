@@ -168,6 +168,7 @@ namespace sylar
         BASE_ASSERT(m_stack || m_useSharedStack); // 子协程才能 reset
         BASE_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT);
         m_cb = cb;
+        m_boundThread = -1;
 
         if (m_useSharedStack)
         {
@@ -446,6 +447,19 @@ namespace sylar
     void Fiber::resume()
     {
         BASE_ASSERT(m_state != EXEC && m_state != TERM && m_state != EXCEPT);
+
+        if (m_runInScheduler)
+        {
+            const int current_tid = sylar::GetThreadId();
+            if (m_boundThread == -1)
+            {
+                m_boundThread = current_tid;
+            }
+            else
+            {
+                BASE_ASSERT2(m_boundThread == current_tid, "fiber resumed on wrong thread");
+            }
+        }
 
         SetThis(this);
         m_state = EXEC;

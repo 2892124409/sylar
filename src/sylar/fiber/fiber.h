@@ -134,7 +134,12 @@ namespace sylar
         bool isSharedStackContextInited() const { return m_ctxInited; }
 
         /**
-         * @brief 获取共享栈 Fiber 绑定线程
+         * @brief 获取当前 Fiber 绑定的调度线程
+         * @details
+         * 为避免 ucontext 在不同 worker 线程之间迁移带来的未定义行为，
+         * 首次运行到某个 Scheduler 线程上的 Fiber 会绑定到该线程，
+         * 后续 IO/Timer 唤醒与 READY 重排队都应回到同一线程。
+         * 共享栈模式同样复用该绑定信息。
          * @return -1 表示尚未绑定线程
          */
         int getBoundThread() const { return m_boundThread; }

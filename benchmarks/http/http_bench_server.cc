@@ -34,6 +34,7 @@ struct Options
     uint32_t shared_stack = 0;
     uint32_t fiber_pool = 0;
     uint32_t use_caller = 0;
+    uint32_t fiber_stack_size = 256 * 1024;
 };
 
 volatile std::sig_atomic_t g_stop_requested = 0;
@@ -58,6 +59,7 @@ void PrintUsage(const char* argv0)
         << "  --session-enabled <0|1>          Enable automatic HTTP sessions (default: 1)\n"
         << "  --shared-stack <0|1>             Enable shared stack (default: 0)\n"
         << "  --fiber-pool <0|1>               Enable fiber pool (default: 0)\n"
+        << "  --fiber-stack-size <bytes>       Fiber stack size in bytes (default: 262144)\n"
         << "  --use-caller <0|1>               Use caller thread for IO worker (default: 0)\n"
         << "  --help                           Show this help\n";
 }
@@ -208,6 +210,10 @@ bool ParseArgs(int argc, char** argv, Options& options)
         }
         if (ReadOptionValue(arg, i, argc, argv, "--fiber-pool", value)) {
             if (!ParseUint32(value, options.fiber_pool)) return false;
+            continue;
+        }
+        if (ReadOptionValue(arg, i, argc, argv, "--fiber-stack-size", value)) {
+            if (!ParseUint32(value, options.fiber_stack_size) || options.fiber_stack_size < 64 * 1024) return false;
             continue;
         }
         if (ReadOptionValue(arg, i, argc, argv, "--use-caller", value)) {
@@ -387,6 +393,7 @@ int main(int argc, char** argv)
 
     sylar::FiberFrameworkConfig::SetFiberUseSharedStack(options.shared_stack != 0);
     sylar::FiberFrameworkConfig::SetFiberPoolEnabled(options.fiber_pool != 0);
+    sylar::FiberFrameworkConfig::SetFiberStackSize(options.fiber_stack_size);
     sylar::FiberFrameworkConfig::SetIOManagerUseCaller(options.use_caller != 0);
 
     sylar::IOManager::ptr io_worker;
@@ -423,6 +430,7 @@ int main(int argc, char** argv)
               << " session_enabled=" << options.session_enabled
               << " shared_stack=" << options.shared_stack
               << " fiber_pool=" << options.fiber_pool
+              << " fiber_stack_size=" << options.fiber_stack_size
               << " use_caller=" << options.use_caller
               << std::endl;
 

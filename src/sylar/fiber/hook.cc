@@ -290,9 +290,9 @@ extern "C"
         {
             iom->addTimer(seconds * 1000, [iom, fiber]()
                           {
-                              // 对于共享栈协程，需要指定绑定的线程 ID
+                              // Timer 唤醒时优先回到 Fiber 原线程，避免 ucontext 跨线程恢复。
                               int thread = -1;
-                              if (fiber->isSharedStackEnabled() && fiber->getBoundThread() != -1)
+                              if (fiber->getBoundThread() != -1)
                               {
                                   thread = fiber->getBoundThread();
                               }
@@ -318,9 +318,9 @@ extern "C"
         {
             iom->addTimer(usec / 1000, [iom, fiber]()
                           {
-                              // 对于共享栈协程，需要指定绑定的线程 ID
+                              // Timer 唤醒时优先回到 Fiber 原线程，避免 ucontext 跨线程恢复。
                               int thread = -1;
-                              if (fiber->isSharedStackEnabled() && fiber->getBoundThread() != -1)
+                              if (fiber->getBoundThread() != -1)
                               {
                                   thread = fiber->getBoundThread();
                               }
@@ -348,9 +348,9 @@ extern "C"
         {
             iom->addTimer(timeout_ms, [iom, fiber]()
                           {
-                              // 对于共享栈协程，需要指定绑定的线程 ID
+                              // Timer 唤醒时优先回到 Fiber 原线程，避免 ucontext 跨线程恢复。
                               int thread = -1;
-                              if (fiber->isSharedStackEnabled() && fiber->getBoundThread() != -1)
+                              if (fiber->getBoundThread() != -1)
                               {
                                   thread = fiber->getBoundThread();
                               }

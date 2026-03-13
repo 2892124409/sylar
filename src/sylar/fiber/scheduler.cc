@@ -291,7 +291,7 @@ namespace sylar
                 {
                     // 如果协程是主动让出的（Ready 状态），塞回队列下次接着跑
                     int target_thread = -1;
-                    if (ft.fiber->isSharedStackEnabled() && ft.fiber->getBoundThread() != -1)
+                    if (ft.fiber->getBoundThread() != -1)
                     {
                         target_thread = ft.fiber->getBoundThread();
                     }
@@ -348,7 +348,7 @@ namespace sylar
                 if (cb_state == Fiber::READY)
                 {
                     int target_thread = -1;
-                    if (cb_fiber->isSharedStackEnabled() && cb_fiber->getBoundThread() != -1)
+                    if (cb_fiber->getBoundThread() != -1)
                     {
                         target_thread = cb_fiber->getBoundThread();
                     }

@@ -14,6 +14,7 @@ WRK_DURATION=${WRK_DURATION:-10s}
 SERVER_IO_THREADS=${SERVER_IO_THREADS:-4}
 SERVER_ACCEPT_THREADS=${SERVER_ACCEPT_THREADS:-1}
 SERVER_SESSION_ENABLED=${SERVER_SESSION_ENABLED:-0}
+SERVER_FIBER_STACK_SIZE=${SERVER_FIBER_STACK_SIZE:-262144}
 SERVER_PID=""
 LOG_INITIALIZED=0
 
@@ -35,17 +36,9 @@ ensure_server_bin() {
 
 cleanup() {
   if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
-    curl -fsS -m 2 "http://${HOST}:${PORT}/__admin/quit" >/dev/null 2>&1 || true
-    for _ in $(seq 1 30); do
-      if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-        break
-      fi
-      sleep 0.1
-    done
-    if kill -0 "${SERVER_PID}" 2>/dev/null; then
-      kill "${SERVER_PID}" 2>/dev/null || true
-    fi
+    kill -KILL "${SERVER_PID}" 2>/dev/null || true
     wait "${SERVER_PID}" 2>/dev/null || true
+    sleep 0.1
   fi
   SERVER_PID=""
 }
@@ -93,6 +86,7 @@ start_server() {
     --io-threads "${SERVER_IO_THREADS}" \
     --accept-threads "${SERVER_ACCEPT_THREADS}" \
     --session-enabled "${SERVER_SESSION_ENABLED}" \
+    --fiber-stack-size "${SERVER_FIBER_STACK_SIZE}" \
     --shared-stack "${ss}" \
     --fiber-pool "${fp}" \
     --use-caller "${uc}" &
