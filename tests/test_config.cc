@@ -36,10 +36,10 @@ void test_yaml()
     BASE_LOG_INFO(BASE_LOG_ROOT()) << "int_map: " << g_int_map_value_config->toString();
 }
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     // 监听器测试
-    g_int_value_config->addListener([](const int &old_value, const int &new_value)
+    g_int_value_config->addListener([](const int& old_value, const int& new_value)
                                     { BASE_LOG_INFO(BASE_LOG_ROOT()) << "port changed from " << old_value << " to " << new_value; });
 
     test_yaml();

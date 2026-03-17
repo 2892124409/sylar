@@ -4,10 +4,10 @@
  * @author sylar.yin
  * @date 2026-03-06
  */
-#include "sylar/fiber/fiber_pool.h"
-#include "sylar/fiber/scheduler.h"
 #include "config/config.h"
 #include "log/logger.h"
+#include "sylar/fiber/fiber_pool.h"
+#include "sylar/fiber/scheduler.h"
 #include <unistd.h>
 
 static base::Logger::ptr g_logger = BASE_LOG_ROOT();
@@ -22,9 +22,8 @@ void test_basic_pool()
     auto pool = sylar::FiberPool::GetThreadLocal();
 
     // 获取协程
-    auto fiber1 = pool->acquire([]() {
-        BASE_LOG_INFO(g_logger) << "Fiber 1 执行";
-    });
+    auto fiber1 = pool->acquire([]()
+                                { BASE_LOG_INFO(g_logger) << "Fiber 1 执行"; });
 
     BASE_LOG_INFO(g_logger) << "获取fiber1, id=" << fiber1->getId();
 
@@ -36,16 +35,18 @@ void test_basic_pool()
     BASE_LOG_INFO(g_logger) << "归还fiber1";
 
     // 再次获取，应该复用
-    auto fiber2 = pool->acquire([]() {
-        BASE_LOG_INFO(g_logger) << "Fiber 2 执行";
-    });
+    auto fiber2 = pool->acquire([]()
+                                { BASE_LOG_INFO(g_logger) << "Fiber 2 执行"; });
 
     BASE_LOG_INFO(g_logger) << "获取fiber2, id=" << fiber2->getId();
 
     // 检查是否复用了同一个协程对象
-    if (fiber1.get() == fiber2.get()) {
+    if (fiber1.get() == fiber2.get())
+    {
         BASE_LOG_INFO(g_logger) << "✓ 成功复用协程对象";
-    } else {
+    }
+    else
+    {
         BASE_LOG_INFO(g_logger) << "✗ 未复用（可能是新创建）";
     }
 
@@ -55,10 +56,10 @@ void test_basic_pool()
     // 输出统计
     auto stats = pool->getStats();
     BASE_LOG_INFO(g_logger) << "统计: total_alloc=" << stats.total_alloc
-                             << ", pool_hit=" << stats.pool_hit
-                             << ", pool_miss=" << stats.pool_miss
-                             << ", hit_rate=" << stats.hit_rate << "%"
-                             << ", current_pooled=" << stats.current_pooled;
+                            << ", pool_hit=" << stats.pool_hit
+                            << ", pool_miss=" << stats.pool_miss
+                            << ", hit_rate=" << stats.hit_rate << "%"
+                            << ", current_pooled=" << stats.current_pooled;
 }
 
 void test_scheduler_integration()
@@ -69,11 +70,11 @@ void test_scheduler_integration()
     sc.start();
 
     // 投放多个任务
-    for (int i = 0; i < 10; ++i) {
-        sc.schedule([i]() {
-            BASE_LOG_INFO(g_logger) << "任务 " << i << " 执行, fiber_id="
-                                     << sylar::Fiber::GetFiberId();
-        });
+    for (int i = 0; i < 10; ++i)
+    {
+        sc.schedule([i]()
+                    { BASE_LOG_INFO(g_logger) << "任务 " << i << " 执行, fiber_id="
+                                              << sylar::Fiber::GetFiberId(); });
     }
 
     sc.stop();
@@ -109,8 +110,8 @@ void test_different_stack_sizes()
 
     auto stats = pool->getStats();
     BASE_LOG_INFO(g_logger) << "统计: total_alloc=" << stats.total_alloc
-                             << ", pool_hit=" << stats.pool_hit
-                             << ", hit_rate=" << stats.hit_rate << "%";
+                            << ", pool_hit=" << stats.pool_hit
+                            << ", hit_rate=" << stats.hit_rate << "%";
 }
 
 void test_normalized_stack_buckets()
@@ -146,9 +147,9 @@ void test_normalized_stack_buckets()
 
     auto stats = pool->getStats();
     BASE_LOG_INFO(g_logger) << "统计: total_alloc=" << stats.total_alloc
-                             << ", pool_hit=" << stats.pool_hit
-                             << ", pool_miss=" << stats.pool_miss
-                             << ", hit_rate=" << stats.hit_rate << "%";
+                            << ", pool_hit=" << stats.pool_hit
+                            << ", pool_miss=" << stats.pool_miss
+                            << ", hit_rate=" << stats.hit_rate << "%";
 }
 
 void test_configured_default_stack_size()
@@ -204,7 +205,8 @@ void test_shared_stack_pooling_with_config()
     sylar::Scheduler sc(1, true, "test_shared_pool");
     sc.start();
 
-    sc.schedule([&steps]() {
+    sc.schedule([&steps]()
+                {
         ++steps;
         sylar::Fiber::YieldToReady();
         ++steps;
@@ -213,17 +215,16 @@ void test_shared_stack_pooling_with_config()
             sylar::Scheduler::GetThis()->schedule([&steps]() {
                 ++steps;
             });
-        });
-    });
+        }); });
 
     sc.stop();
 
     auto stats = pool->getStats();
     auto shared_stats = sylar::Fiber::GetSharedStackStats();
     BASE_LOG_INFO(g_logger) << "共享栈池统计: total_alloc=" << stats.total_alloc
-                             << ", pool_hit=" << stats.pool_hit
-                             << ", current_pooled=" << stats.current_pooled
-                             << ", shared_pooled=" << stats.shared_pooled;
+                            << ", pool_hit=" << stats.pool_hit
+                            << ", current_pooled=" << stats.current_pooled
+                            << ", shared_pooled=" << stats.shared_pooled;
 
     if (stats.pool_hit > 0 && stats.shared_pooled > 0)
     {
@@ -272,7 +273,8 @@ void test_shared_stack_pooling_worker_only()
     sylar::Scheduler sc(2, false, "test_shared_pool_worker_only");
     sc.start();
 
-    sc.schedule([&]() {
+    sc.schedule([&]()
+                {
         const int tid = sylar::GetThreadId();
         yielded_fiber_first_tid.store(tid);
 
@@ -288,8 +290,7 @@ void test_shared_stack_pooling_worker_only()
 
         sylar::Scheduler::GetThis()->schedule([&]() {
             ++steps;
-        });
-    });
+        }); });
 
     sc.stop();
 
@@ -297,9 +298,9 @@ void test_shared_stack_pooling_worker_only()
     auto stats = pool->getStats();
     auto shared_stats = sylar::Fiber::GetSharedStackStats();
     BASE_LOG_INFO(g_logger) << "worker-only 共享栈池统计: total_alloc=" << stats.total_alloc
-                             << ", pool_hit=" << stats.pool_hit
-                             << ", current_pooled=" << stats.current_pooled
-                             << ", shared_pooled=" << stats.shared_pooled;
+                            << ", pool_hit=" << stats.pool_hit
+                            << ", current_pooled=" << stats.current_pooled
+                            << ", shared_pooled=" << stats.shared_pooled;
 
     if (steps.load() == 3)
     {
@@ -345,24 +346,26 @@ void test_pool_capacity()
     std::vector<sylar::Fiber::ptr> fibers;
 
     // 创建10个协程
-    for (int i = 0; i < 10; ++i) {
-        auto fiber = pool->acquire([i]() {
-            BASE_LOG_INFO(g_logger) << "Fiber " << i;
-        });
+    for (int i = 0; i < 10; ++i)
+    {
+        auto fiber = pool->acquire([i]()
+                                   { BASE_LOG_INFO(g_logger) << "Fiber " << i; });
         fiber->resume();
         fibers.push_back(fiber);
     }
 
     // 归还所有协程
-    for (auto& fiber : fibers) {
+    for (auto& fiber : fibers)
+    {
         pool->release(fiber);
     }
 
     auto stats = pool->getStats();
     BASE_LOG_INFO(g_logger) << "归还10个协程后，池中数量=" << stats.current_pooled
-                             << " (最大限制=5)";
+                            << " (最大限制=5)";
 
-    if (stats.current_pooled <= 5) {
+    if (stats.current_pooled <= 5)
+    {
         BASE_LOG_INFO(g_logger) << "✓ 容量限制生效";
     }
 }

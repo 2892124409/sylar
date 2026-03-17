@@ -6,10 +6,10 @@
 namespace http
 {
 
-    void ApplyErrorResponse(HttpResponse::ptr response,
-                            HttpStatus status,
-                            const std::string &message,
-                            const std::string &details = "");
+void ApplyErrorResponse(HttpResponse::ptr response,
+                        HttpStatus status,
+                        const std::string& message,
+                        const std::string& details = "");
 
 } // namespace http
 

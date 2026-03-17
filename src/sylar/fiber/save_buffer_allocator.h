@@ -5,34 +5,34 @@
 #ifndef __SYLAR_SAVE_BUFFER_ALLOCATOR_H__
 #define __SYLAR_SAVE_BUFFER_ALLOCATOR_H__
 
-#include <cstddef>
 #include "memorypool/memory_pool.h"
+#include <cstddef>
 
 namespace sylar
 {
 
-    class SaveBufferAllocator
+class SaveBufferAllocator
+{
+  public:
+    static void* Alloc(size_t size)
     {
-    public:
-        static void *Alloc(size_t size)
+        if (size == 0)
         {
-            if (size == 0)
-            {
-                return nullptr;
-            }
-            return sylar::HashBucket::useMemory(static_cast<int>(size));
+            return nullptr;
         }
+        return sylar::HashBucket::useMemory(static_cast<int>(size));
+    }
 
-        static void Dealloc(void *ptr, size_t size)
+    static void Dealloc(void* ptr, size_t size)
+    {
+        if (!ptr || size == 0)
         {
-            if (!ptr || size == 0)
-            {
-                return;
-            }
-            sylar::HashBucket::freeMemory(ptr, static_cast<int>(size));
+            return;
         }
-    };
+        sylar::HashBucket::freeMemory(ptr, static_cast<int>(size));
+    }
+};
 
-}
+} // namespace sylar
 
 #endif

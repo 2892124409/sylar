@@ -4,8 +4,8 @@
  * @author sylar.yin (Modified by Gemini Agent)
  * @date 2026-02-08
  */
-#include "sylar/fiber/scheduler.h"
 #include "log/logger.h"
+#include "sylar/fiber/scheduler.h"
 #include <unistd.h>
 
 static base::Logger::ptr g_logger = BASE_LOG_ROOT();
@@ -18,9 +18,9 @@ void test_fiber()
 {
     static int s_count = 5;
     BASE_LOG_INFO(g_logger) << "【协程任务】执行中, fiber_id="
-                             << sylar::Fiber::GetFiberId()
-                             << ", thread_id=" << sylar::GetThreadId()
-                             << ", count=" << s_count;
+                            << sylar::Fiber::GetFiberId()
+                            << ", thread_id=" << sylar::GetThreadId()
+                            << ", count=" << s_count;
 
     /**
      * 模拟耗时或等待逻辑
@@ -34,7 +34,7 @@ void test_fiber()
     }
 }
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     BASE_LOG_INFO(g_logger) << "--- [TEST BEGIN] ---";
 

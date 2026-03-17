@@ -1,7 +1,7 @@
+#include "sylar/base/util.h"
 #include "sylar/fiber/fd_manager.h"
 #include "sylar/fiber/hook.h"
 #include "sylar/fiber/iomanager.h"
-#include "sylar/base/util.h"
 
 #include <assert.h>
 #include <atomic>

@@ -4,10 +4,10 @@
  */
 
 #include "config/config.h"
+#include "log/logger.h"
 #include "sylar/base/util.h"
 #include "sylar/fiber/fiber.h"
 #include "sylar/fiber/scheduler.h"
-#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>
@@ -34,8 +34,8 @@ static void workeronly_job()
 
         int step = g_worker_steps.fetch_add(1) + 1;
         BASE_LOG_INFO(g_logger) << "workeronly_job step=" << step
-                                 << " fiber_id=" << sylar::Fiber::GetFiberId()
-                                 << " thread_id=" << tid;
+                                << " fiber_id=" << sylar::Fiber::GetFiberId()
+                                << " thread_id=" << tid;
 
         if (i < 2)
         {

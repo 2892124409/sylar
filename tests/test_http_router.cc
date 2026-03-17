@@ -1,5 +1,5 @@
-#include "http/router/servlet.h"
 #include "http/router/router.h"
+#include "http/router/servlet.h"
 #include "log/logger.h"
 
 #include <cassert>
@@ -10,14 +10,17 @@ void test_router_match_priority()
 {
     http::Router router;
     router.addGlobServlet("/user/*", http::Servlet::ptr(new http::FunctionServlet(
-                                        [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr) { return 0; },
-                                        "glob")));
+                                         [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr)
+                                         { return 0; },
+                                         "glob")));
     router.addParamServlet("/user/:id", http::Servlet::ptr(new http::FunctionServlet(
-                                         [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr) { return 0; },
-                                         "param")));
+                                            [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr)
+                                            { return 0; },
+                                            "param")));
     router.addServlet("/user/me", http::Servlet::ptr(new http::FunctionServlet(
-                                  [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr) { return 0; },
-                                  "exact")));
+                                      [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr)
+                                      { return 0; },
+                                      "exact")));
 
     http::Router::RouteMatch exact = router.match("/user/me", http::HttpMethod::GET);
     assert(exact.matched());
@@ -32,12 +35,10 @@ void test_router_match_priority()
 void test_router_method_match()
 {
     http::Router router;
-    router.addServlet(http::HttpMethod::GET, "/items", http::Servlet::ptr(new http::FunctionServlet(
-                                                                    [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr) { return 0; },
-                                                                    "get-items")));
-    router.addServlet(http::HttpMethod::POST, "/items", http::Servlet::ptr(new http::FunctionServlet(
-                                                                     [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr) { return 0; },
-                                                                     "post-items")));
+    router.addServlet(http::HttpMethod::GET, "/items", http::Servlet::ptr(new http::FunctionServlet([](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr)
+                                                                                                    { return 0; }, "get-items")));
+    router.addServlet(http::HttpMethod::POST, "/items", http::Servlet::ptr(new http::FunctionServlet([](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr)
+                                                                                                     { return 0; }, "post-items")));
 
     http::Router::RouteMatch get_match = router.match("/items", http::HttpMethod::GET);
     http::Router::RouteMatch post_match = router.match("/items", http::HttpMethod::POST);

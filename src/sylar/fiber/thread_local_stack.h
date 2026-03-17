@@ -11,123 +11,123 @@
 namespace sylar
 {
 
-    class ThreadLocalSharedStack
+class ThreadLocalSharedStack
+{
+  public:
+    static const size_t STACK_COUNT = 1;
+
+    static bool SetStackSize(size_t stack_size)
     {
-    public:
-        static const size_t STACK_COUNT = 1;
-
-        static bool SetStackSize(size_t stack_size)
+        if (stack_size == 0)
         {
-            if (stack_size == 0)
-            {
-                return false;
-            }
-            size_t &configured = ConfiguredStackSize();
-            if (configured != 0 && configured != stack_size)
-            {
-                return false;
-            }
-            configured = stack_size;
-            return true;
-        }
-
-        static size_t GetStackSize()
-        {
-            size_t configured = ConfiguredStackSize();
-            return configured ? configured : 1024 * 1024;
-        }
-
-        static ThreadLocalSharedStack *GetInstance()
-        {
-            static thread_local ThreadLocalSharedStack instance;
-            return &instance;
-        }
-
-        void *acquire()
-        {
-            ensureStacksAllocated();
-            for (size_t i = 0; i < STACK_COUNT; ++i)
-            {
-                if (!m_inUse[i])
-                {
-                    m_inUse[i] = true;
-                    return m_stacks[i];
-                }
-            }
-            return nullptr;
-        }
-
-        void release(void *stack)
-        {
-            if (!stack)
-            {
-                return;
-            }
-            for (size_t i = 0; i < STACK_COUNT; ++i)
-            {
-                if (m_stacks[i] == stack)
-                {
-                    m_inUse[i] = false;
-                    return;
-                }
-            }
-        }
-
-        bool hasIdleStack() const
-        {
-            for (size_t i = 0; i < STACK_COUNT; ++i)
-            {
-                if (!m_inUse[i])
-                {
-                    return true;
-                }
-            }
             return false;
         }
-
-    private:
-        ThreadLocalSharedStack()
+        size_t& configured = ConfiguredStackSize();
+        if (configured != 0 && configured != stack_size)
         {
-            for (size_t i = 0; i < STACK_COUNT; ++i)
+            return false;
+        }
+        configured = stack_size;
+        return true;
+    }
+
+    static size_t GetStackSize()
+    {
+        size_t configured = ConfiguredStackSize();
+        return configured ? configured : 1024 * 1024;
+    }
+
+    static ThreadLocalSharedStack* GetInstance()
+    {
+        static thread_local ThreadLocalSharedStack instance;
+        return &instance;
+    }
+
+    void* acquire()
+    {
+        ensureStacksAllocated();
+        for (size_t i = 0; i < STACK_COUNT; ++i)
+        {
+            if (!m_inUse[i])
             {
-                m_stacks[i] = nullptr;
+                m_inUse[i] = true;
+                return m_stacks[i];
+            }
+        }
+        return nullptr;
+    }
+
+    void release(void* stack)
+    {
+        if (!stack)
+        {
+            return;
+        }
+        for (size_t i = 0; i < STACK_COUNT; ++i)
+        {
+            if (m_stacks[i] == stack)
+            {
                 m_inUse[i] = false;
+                return;
             }
         }
+    }
 
-        ~ThreadLocalSharedStack()
+    bool hasIdleStack() const
+    {
+        for (size_t i = 0; i < STACK_COUNT; ++i)
         {
-            for (size_t i = 0; i < STACK_COUNT; ++i)
+            if (!m_inUse[i])
             {
-                if (m_stacks[i])
-                {
-                    std::free(m_stacks[i]);
-                }
+                return true;
             }
         }
+        return false;
+    }
 
-        void ensureStacksAllocated()
+  private:
+    ThreadLocalSharedStack()
+    {
+        for (size_t i = 0; i < STACK_COUNT; ++i)
         {
-            for (size_t i = 0; i < STACK_COUNT; ++i)
+            m_stacks[i] = nullptr;
+            m_inUse[i] = false;
+        }
+    }
+
+    ~ThreadLocalSharedStack()
+    {
+        for (size_t i = 0; i < STACK_COUNT; ++i)
+        {
+            if (m_stacks[i])
             {
-                if (!m_stacks[i])
-                {
-                    m_stacks[i] = std::malloc(GetStackSize());
-                }
+                std::free(m_stacks[i]);
             }
         }
+    }
 
-        static size_t &ConfiguredStackSize()
+    void ensureStacksAllocated()
+    {
+        for (size_t i = 0; i < STACK_COUNT; ++i)
         {
-            static size_t s_stack_size = 0;
-            return s_stack_size;
+            if (!m_stacks[i])
+            {
+                m_stacks[i] = std::malloc(GetStackSize());
+            }
         }
+    }
 
-    private:
-        void *m_stacks[STACK_COUNT];
-        bool m_inUse[STACK_COUNT];
-    };
+    static size_t& ConfiguredStackSize()
+    {
+        static size_t s_stack_size = 0;
+        return s_stack_size;
+    }
 
-}
+  private:
+    void* m_stacks[STACK_COUNT];
+    bool m_inUse[STACK_COUNT];
+};
+
+} // namespace sylar
 
 #endif

@@ -1,16 +1,16 @@
-#include "http/server/http_server.h"
 #include "http/core/http_error.h"
 #include "http/core/http_framework_config.h"
 #include "http/core/http_parser.h"
+#include "http/server/http_server.h"
+#include "log/logger.h"
+#include "sylar/fiber/hook.h"
 #include "sylar/net/address.h"
 #include "sylar/net/socket.h"
 #include "sylar/net/socket_stream.h"
-#include "sylar/fiber/hook.h"
-#include "log/logger.h"
 
 #include <cassert>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
@@ -21,160 +21,160 @@ static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 namespace
 {
-    class ScopedHookState
+class ScopedHookState
+{
+  public:
+    explicit ScopedHookState(bool enabled)
+        : m_old(sylar::is_hook_enable())
     {
-    public:
-        explicit ScopedHookState(bool enabled)
-            : m_old(sylar::is_hook_enable())
+        sylar::set_hook_enable(enabled);
+    }
+
+    ~ScopedHookState()
+    {
+        sylar::set_hook_enable(m_old);
+    }
+
+  private:
+    bool m_old;
+};
+
+size_t ParseContentLength(const std::string& response)
+{
+    size_t header_end = response.find("\r\n\r\n");
+    if (header_end == std::string::npos)
+    {
+        return 0;
+    }
+
+    size_t pos = response.find("content-length:");
+    if (pos == std::string::npos || pos > header_end)
+    {
+        return 0;
+    }
+
+    pos += std::string("content-length:").size();
+    while (pos < header_end && response[pos] == ' ')
+    {
+        ++pos;
+    }
+
+    size_t line_end = response.find("\r\n", pos);
+    std::string length_text = response.substr(pos, line_end == std::string::npos ? header_end - pos : line_end - pos);
+    return static_cast<size_t>(std::strtoul(length_text.c_str(), nullptr, 10));
+}
+
+std::string ReadHttpResponse(sylar::SocketStream& stream)
+{
+    std::string response;
+    char buf[1024] = {0};
+    size_t header_end = std::string::npos;
+    size_t content_length = 0;
+
+    while (true)
+    {
+        if (header_end != std::string::npos &&
+            response.size() >= header_end + 4 + content_length)
         {
-            sylar::set_hook_enable(enabled);
+            break;
         }
 
-        ~ScopedHookState()
+        int rt = stream.read(buf, sizeof(buf));
+        if (rt <= 0)
         {
-            sylar::set_hook_enable(m_old);
+            break;
         }
 
-    private:
-        bool m_old;
-    };
-
-    size_t ParseContentLength(const std::string &response)
-    {
-        size_t header_end = response.find("\r\n\r\n");
+        response.append(buf, rt);
         if (header_end == std::string::npos)
         {
-            return 0;
+            header_end = response.find("\r\n\r\n");
+            if (header_end != std::string::npos)
+            {
+                content_length = ParseContentLength(response);
+            }
         }
-
-        size_t pos = response.find("content-length:");
-        if (pos == std::string::npos || pos > header_end)
-        {
-            return 0;
-        }
-
-        pos += std::string("content-length:").size();
-        while (pos < header_end && response[pos] == ' ')
-        {
-            ++pos;
-        }
-
-        size_t line_end = response.find("\r\n", pos);
-        std::string length_text = response.substr(pos, line_end == std::string::npos ? header_end - pos : line_end - pos);
-        return static_cast<size_t>(std::strtoul(length_text.c_str(), nullptr, 10));
     }
 
-    std::string ReadHttpResponse(sylar::SocketStream &stream)
+    return response;
+}
+
+sylar::Socket::ptr ConnectTo(uint16_t port, int64_t recv_timeout_ms = 2000,
+                             size_t attempts = 20, useconds_t retry_interval_us = 100 * 1000)
+{
+    sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:" + std::to_string(port));
+    assert(addr);
+
+    for (size_t i = 0; i < attempts; ++i)
     {
-        std::string response;
-        char buf[1024] = {0};
-        size_t header_end = std::string::npos;
-        size_t content_length = 0;
-
-        while (true)
+        sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
+        sock->setRecvTimeout(recv_timeout_ms);
+        if (sock->connect(addr))
         {
-            if (header_end != std::string::npos &&
-                response.size() >= header_end + 4 + content_length)
-            {
-                break;
-            }
-
-            int rt = stream.read(buf, sizeof(buf));
-            if (rt <= 0)
-            {
-                break;
-            }
-
-            response.append(buf, rt);
-            if (header_end == std::string::npos)
-            {
-                header_end = response.find("\r\n\r\n");
-                if (header_end != std::string::npos)
-                {
-                    content_length = ParseContentLength(response);
-                }
-            }
+            return sock;
         }
-
-        return response;
-    }
-
-    sylar::Socket::ptr ConnectTo(uint16_t port, int64_t recv_timeout_ms = 2000,
-                                 size_t attempts = 20, useconds_t retry_interval_us = 100 * 1000)
-    {
-        sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:" + std::to_string(port));
-        assert(addr);
-
-        for (size_t i = 0; i < attempts; ++i)
+        sock->close();
+        if (i + 1 < attempts)
         {
-            sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
-            sock->setRecvTimeout(recv_timeout_ms);
-            if (sock->connect(addr))
-            {
-                return sock;
-            }
-            sock->close();
-            if (i + 1 < attempts)
-            {
-                usleep(retry_interval_us);
-            }
+            usleep(retry_interval_us);
         }
-
-        assert(false && "ConnectTo exhausted retries");
-        return sylar::Socket::ptr();
     }
 
-    sylar::Socket::ptr ConnectToEventuallyNoHook(uint16_t port, int64_t recv_timeout_ms = 2000,
-                                                 size_t attempts = 20, useconds_t retry_interval_us = 100 * 1000)
-    {
-        ScopedHookState hook_guard(false);
-        sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:" + std::to_string(port));
-        assert(addr);
+    assert(false && "ConnectTo exhausted retries");
+    return sylar::Socket::ptr();
+}
 
-        for (size_t i = 0; i < attempts; ++i)
+sylar::Socket::ptr ConnectToEventuallyNoHook(uint16_t port, int64_t recv_timeout_ms = 2000,
+                                             size_t attempts = 20, useconds_t retry_interval_us = 100 * 1000)
+{
+    ScopedHookState hook_guard(false);
+    sylar::Address::ptr addr = sylar::Address::LookupAny("127.0.0.1:" + std::to_string(port));
+    assert(addr);
+
+    for (size_t i = 0; i < attempts; ++i)
+    {
+        sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
+        sock->setRecvTimeout(recv_timeout_ms);
+        if (sock->connect(addr))
         {
-            sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
-            sock->setRecvTimeout(recv_timeout_ms);
-            if (sock->connect(addr))
-            {
-                return sock;
-            }
-            sock->close();
-            if (i + 1 < attempts)
-            {
-                ::usleep(retry_interval_us);
-            }
+            return sock;
         }
-
-        assert(false && "ConnectToEventuallyNoHook exhausted retries");
-        return sylar::Socket::ptr();
+        sock->close();
+        if (i + 1 < attempts)
+        {
+            ::usleep(retry_interval_us);
+        }
     }
 
-    uint16_t AllocatePort()
-    {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        assert(fd >= 0);
+    assert(false && "ConnectToEventuallyNoHook exhausted retries");
+    return sylar::Socket::ptr();
+}
 
-        sockaddr_in addr;
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = 0;
+uint16_t AllocatePort()
+{
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(fd >= 0);
 
-        assert(::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0);
+    sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
 
-        socklen_t len = sizeof(addr);
-        assert(::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) == 0);
+    assert(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
 
-        uint16_t port = ntohs(addr.sin_port);
-        ::close(fd);
-        return port;
-    }
+    socklen_t len = sizeof(addr);
+    assert(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
 
-    void SendRequest(sylar::SocketStream &stream, const std::string &request)
-    {
-        assert(stream.writeFixSize(request.c_str(), request.size()) == static_cast<int>(request.size()));
-    }
+    uint16_t port = ntohs(addr.sin_port);
+    ::close(fd);
+    return port;
+}
+
+void SendRequest(sylar::SocketStream& stream, const std::string& request)
+{
+    assert(stream.writeFixSize(request.c_str(), request.size()) == static_cast<int>(request.size()));
+}
 
 } // namespace
 
@@ -202,41 +202,40 @@ int main()
         http::HttpFrameworkConfig::SetConnectionTimeoutMs(old_connection_timeout);
 
         server->getServletDispatch()->addServlet("/ping", [](http::HttpRequest::ptr,
-                                                            http::HttpResponse::ptr rsp,
-                                                            http::HttpSession::ptr) {
+                                                             http::HttpResponse::ptr rsp,
+                                                             http::HttpSession::ptr)
+                                                 {
             rsp->setHeader("Content-Type", "text/plain");
             rsp->setBody("pong");
-            return 0;
-        });
+            return 0; });
         server->getServletDispatch()->addServlet("/user/me", [](http::HttpRequest::ptr,
-                                                               http::HttpResponse::ptr rsp,
-                                                               http::HttpSession::ptr) {
+                                                                http::HttpResponse::ptr rsp,
+                                                                http::HttpSession::ptr)
+                                                 {
             rsp->setBody("exact-user");
-            return 0;
-        });
+            return 0; });
         server->getServletDispatch()->addParamServlet("/user/:id", [](http::HttpRequest::ptr req,
                                                                       http::HttpResponse::ptr rsp,
-                                                                      http::HttpSession::ptr) {
+                                                                      http::HttpSession::ptr)
+                                                      {
             rsp->setHeader("Content-Type", "text/plain");
             rsp->setBody("user:" + req->getRouteParam("id"));
-            return 0;
-        });
+            return 0; });
         server->getServletDispatch()->addPreInterceptor([](http::HttpRequest::ptr req,
-                                                          http::HttpResponse::ptr rsp,
-                                                          http::HttpSession::ptr) {
+                                                           http::HttpResponse::ptr rsp,
+                                                           http::HttpSession::ptr)
+                                                        {
             rsp->setHeader("X-Pre", "1");
             if (req->getPath() == "/blocked")
             {
                 http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Blocked", "blocked by pre interceptor");
                 return false;
             }
-            return true;
-        });
+            return true; });
         server->getServletDispatch()->addPostInterceptor([](http::HttpRequest::ptr,
-                                                           http::HttpResponse::ptr rsp,
-                                                           http::HttpSession::ptr) {
-            rsp->setHeader("X-Post", "1");
-        });
+                                                            http::HttpResponse::ptr rsp,
+                                                            http::HttpSession::ptr)
+                                                         { rsp->setHeader("X-Post", "1"); });
 
         std::vector<sylar::Address::ptr> addrs;
         std::vector<sylar::Address::ptr> fails;
@@ -244,7 +243,8 @@ int main()
         assert(server->bind(addrs, fails));
         assert(server->start());
 
-        iom.schedule([http_port]() {
+        iom.schedule([http_port]()
+                     {
             sleep(1);
             sylar::Socket::ptr sock = ConnectTo(http_port);
             sylar::SocketStream stream(sock);
@@ -254,30 +254,30 @@ int main()
             assert(rsp.find("pong") != std::string::npos);
             assert(rsp.find("x-pre: 1") != std::string::npos);
             assert(rsp.find("x-post: 1") != std::string::npos);
-            stream.close();
-        });
+            stream.close(); });
 
-        iom.schedule([http_port]() {
+        iom.schedule([http_port]()
+                     {
             sleep(2);
             sylar::Socket::ptr sock = ConnectTo(http_port);
             sylar::SocketStream stream(sock);
             SendRequest(stream, "GET /user/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
             std::string rsp = ReadHttpResponse(stream);
             assert(rsp.find("user:42") != std::string::npos);
-            stream.close();
-        });
+            stream.close(); });
 
-        iom.schedule([http_port]() {
+        iom.schedule([http_port]()
+                     {
             sleep(3);
             sylar::Socket::ptr sock = ConnectTo(http_port);
             sylar::SocketStream stream(sock);
             SendRequest(stream, "GET /user/me HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
             std::string rsp = ReadHttpResponse(stream);
             assert(rsp.find("exact-user") != std::string::npos);
-            stream.close();
-        });
+            stream.close(); });
 
-        iom.schedule([http_port]() {
+        iom.schedule([http_port]()
+                     {
             sleep(4);
             sylar::Socket::ptr sock = ConnectTo(http_port);
             sylar::SocketStream stream(sock);
@@ -286,20 +286,20 @@ int main()
             assert(rsp.find("\"code\":400") != std::string::npos);
             assert(rsp.find("blocked by pre interceptor") != std::string::npos);
             assert(rsp.find("x-post: 1") != std::string::npos);
-            stream.close();
-        });
+            stream.close(); });
 
-        iom.schedule([http_port]() {
+        iom.schedule([http_port]()
+                     {
             sleep(5);
             sylar::Socket::ptr sock = ConnectTo(http_port);
             sylar::SocketStream stream(sock);
             SendRequest(stream, "GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
             std::string rsp = ReadHttpResponse(stream);
             assert(rsp.find("\"code\":404") != std::string::npos);
-            stream.close();
-        });
+            stream.close(); });
 
-        iom.schedule([http_port]() {
+        iom.schedule([http_port]()
+                     {
             sleep(6);
             size_t old_header = http::HttpRequestParser::GetMaxHeaderSize();
             http::HttpRequestParser::SetMaxHeaderSize(32);
@@ -311,10 +311,10 @@ int main()
             assert(rsp.find("\"code\":413") != std::string::npos);
             stream.close();
 
-            http::HttpRequestParser::SetMaxHeaderSize(old_header);
-        });
+            http::HttpRequestParser::SetMaxHeaderSize(old_header); });
 
-        iom.schedule([server, http_port, old_keepalive_timeout, old_keepalive_max_requests, old_max_connections]() {
+        iom.schedule([server, http_port, old_keepalive_timeout, old_keepalive_max_requests, old_max_connections]()
+                     {
             sleep(7);
 
             http::HttpFrameworkConfig::SetMaxConnections(1);
@@ -380,8 +380,7 @@ int main()
             http::HttpFrameworkConfig::SetKeepAliveTimeoutMs(old_keepalive_timeout);
             http::HttpFrameworkConfig::SetKeepAliveMaxRequests(old_keepalive_max_requests);
             http::HttpFrameworkConfig::SetMaxConnections(old_max_connections);
-            server->stop();
-        });
+            server->stop(); });
     }
 
     http::HttpFrameworkConfig::SetIOWorkerThreads(1);
@@ -389,12 +388,12 @@ int main()
     {
         http::HttpServer::ptr config_server = http::HttpServer::CreateWithConfig();
         config_server->getServletDispatch()->addServlet("/config", [](http::HttpRequest::ptr,
-                                                                     http::HttpResponse::ptr rsp,
-                                                                     http::HttpSession::ptr) {
+                                                                      http::HttpResponse::ptr rsp,
+                                                                      http::HttpSession::ptr)
+                                                        {
             rsp->setHeader("Content-Type", "text/plain");
             rsp->setBody("config-workers");
-            return 0;
-        });
+            return 0; });
 
         std::vector<sylar::Address::ptr> addrs;
         std::vector<sylar::Address::ptr> fails;

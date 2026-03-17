@@ -3,10 +3,10 @@
  * @brief ByteArray 模块测试程序
  */
 
-#include "sylar/net/bytearray.h"
 #include "log/logger.h"
-#include <iostream>
+#include "sylar/net/bytearray.h"
 #include <cassert>
+#include <iostream>
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
@@ -353,9 +353,9 @@ void test_iovec()
 
     // 验证数据
     std::string result;
-    for (auto &iov : buffers)
+    for (auto& iov : buffers)
     {
-        result.append((char *)iov.iov_base, iov.iov_len);
+        result.append((char*)iov.iov_base, iov.iov_len);
     }
     assert(result == data);
 
@@ -366,7 +366,7 @@ void test_iovec()
 // 主函数
 // ============================================================================
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     std::cout << "========================================" << std::endl;
     std::cout << "        ByteArray 模块测试程序" << std::endl;

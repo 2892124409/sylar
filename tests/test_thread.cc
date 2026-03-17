@@ -4,9 +4,9 @@
  * @author sylar.yin (Modified by Gemini Agent)
  * @date 2026-02-07
  */
-#include "sylar/concurrency/thread.h"
-#include "sylar/concurrency/mutex/mutex.h"
 #include "log/logger.h"
+#include "sylar/concurrency/mutex/mutex.h"
+#include "sylar/concurrency/thread.h"
 #include <vector>
 
 int count = 0;
@@ -15,9 +15,9 @@ sylar::Mutex s_mutex;
 void func1()
 {
     BASE_LOG_INFO(BASE_LOG_ROOT()) << "thread name: " << sylar::Thread::GetName()
-                                     << " this.name: " << sylar::Thread::GetThis()->getName()
-                                     << " id: " << sylar::GetThreadId()
-                                     << " this.id: " << sylar::Thread::GetThis()->getId();
+                                   << " this.name: " << sylar::Thread::GetThis()->getName()
+                                   << " id: " << sylar::GetThreadId()
+                                   << " this.id: " << sylar::Thread::GetThis()->getId();
 
     for (int i = 0; i < 1000000; ++i)
     {
@@ -42,7 +42,7 @@ void func3()
     }
 }
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     BASE_LOG_INFO(BASE_LOG_ROOT()) << "thread test begin";
 

@@ -17,11 +17,11 @@ void test_simple_cors_request()
     config.setExposeHeaders("X-Trace-Id");
     dispatch->addMiddleware(http::Middleware::ptr(new http::cors::CorsMiddleware(config)));
     dispatch->addServlet("/ping", [](http::HttpRequest::ptr,
-                                      http::HttpResponse::ptr rsp,
-                                      http::HttpSession::ptr) {
+                                     http::HttpResponse::ptr rsp,
+                                     http::HttpSession::ptr)
+                         {
         rsp->setBody("pong");
-        return 0;
-    });
+        return 0; });
 
     http::HttpRequest::ptr req(new http::HttpRequest());
     http::HttpResponse::ptr rsp(new http::HttpResponse());
@@ -42,11 +42,11 @@ void test_cors_preflight_short_circuit()
     http::cors::CorsConfig config;
     dispatch->addMiddleware(http::Middleware::ptr(new http::cors::CorsMiddleware(config)));
     dispatch->addServlet("/ping", [](http::HttpRequest::ptr,
-                                      http::HttpResponse::ptr rsp,
-                                      http::HttpSession::ptr) {
+                                     http::HttpResponse::ptr rsp,
+                                     http::HttpSession::ptr)
+                         {
         rsp->setBody("should-not-run");
-        return 0;
-    });
+        return 0; });
 
     http::HttpRequest::ptr req(new http::HttpRequest());
     http::HttpResponse::ptr rsp(new http::HttpResponse());

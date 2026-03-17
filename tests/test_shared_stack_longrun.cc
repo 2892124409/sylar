@@ -4,9 +4,9 @@
  */
 
 #include "config/config.h"
+#include "log/logger.h"
 #include "sylar/fiber/fiber.h"
 #include "sylar/fiber/scheduler.h"
-#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>
@@ -24,7 +24,7 @@ static void longrun_job()
         if ((step % 200) == 0)
         {
             BASE_LOG_INFO(g_logger) << "shared_stack_longrun step=" << step
-                                     << " fiber_id=" << sylar::Fiber::GetFiberId();
+                                    << " fiber_id=" << sylar::Fiber::GetFiberId();
         }
         if (i < kRounds - 1)
         {

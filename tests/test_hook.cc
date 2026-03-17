@@ -7,19 +7,19 @@
  */
 
 #include "log/logger.h"
-#include "sylar/fiber/iomanager.h"
-#include "sylar/fiber/fiber.h"
 #include "sylar/fiber/fd_manager.h"
+#include "sylar/fiber/fiber.h"
 #include "sylar/fiber/hook.h"
-#include <cassert>
+#include "sylar/fiber/iomanager.h"
 #include <atomic>
-#include <memory>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <string.h>
+#include <cassert>
 #include <errno.h>
+#include <fcntl.h>
+#include <memory>
+#include <string.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
+#include <unistd.h>
 
 static base::Logger::ptr g_logger = BASE_LOG_ROOT();
 
@@ -79,7 +79,7 @@ void test_sleep()
 {
     BASE_LOG_INFO(g_logger) << "========== 测试2: 睡眠函数Hook测试 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
+    sylar::IOManager* iom = sylar::IOManager::GetThis();
 
     // 测试 sleep - 这个sleep会被hook，不阻塞线程
     iom->schedule([]()
@@ -107,7 +107,7 @@ void test_pipe_io()
 {
     BASE_LOG_INFO(g_logger) << "========== 测试3: Pipe读写Hook测试 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
+    sylar::IOManager* iom = sylar::IOManager::GetThis();
 
     // 创建pipe
     if (pipe(g_pipefd) < 0)
@@ -160,7 +160,7 @@ void test_iov()
 {
     BASE_LOG_INFO(g_logger) << "========== 测试4: readv/writev测试 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
+    sylar::IOManager* iom = sylar::IOManager::GetThis();
 
     // 创建新pipe
     if (pipe(g_pipefd) < 0)
@@ -281,7 +281,7 @@ void test_setsockopt_timeout()
 {
     BASE_LOG_INFO(g_logger) << "========== 测试6: setsockopt超时测试 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
+    sylar::IOManager* iom = sylar::IOManager::GetThis();
 
     // 创建新pipe
     if (pipe(g_pipefd) < 0)
@@ -337,7 +337,7 @@ void test_socket_timeout_resume_once()
 {
     BASE_LOG_INFO(g_logger) << "========== 测试7: socket超时只恢复一次 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
+    sylar::IOManager* iom = sylar::IOManager::GetThis();
 
     int sock_pair[2] = {-1, -1};
     int rt = ::socketpair(AF_UNIX, SOCK_STREAM, 0, sock_pair);
@@ -388,7 +388,7 @@ void test_socket_timeout_resume_once()
 
 // ==================== 主函数 ====================
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     BASE_LOG_INFO(g_logger) << "";
     BASE_LOG_INFO(g_logger) << "========================================";
@@ -419,11 +419,11 @@ int main(int argc, char **argv)
     }
 
     // 运行测试2-7
-    iom.schedule(test_sleep);              // 测试2: 睡眠函数Hook
-    iom.schedule(test_pipe_io);            // 测试3: Pipe读写Hook
-    iom.schedule(test_iov);                // 测试4: readv/writev
-    iom.schedule(test_fcntl_nonblock);     // 测试5: fcntl非阻塞
-    iom.schedule(test_setsockopt_timeout); // 测试6: setsockopt超时
+    iom.schedule(test_sleep);                      // 测试2: 睡眠函数Hook
+    iom.schedule(test_pipe_io);                    // 测试3: Pipe读写Hook
+    iom.schedule(test_iov);                        // 测试4: readv/writev
+    iom.schedule(test_fcntl_nonblock);             // 测试5: fcntl非阻塞
+    iom.schedule(test_setsockopt_timeout);         // 测试6: setsockopt超时
     iom.schedule(test_socket_timeout_resume_once); // 测试7: socket超时只恢复一次
 
     // 10秒后自动停止

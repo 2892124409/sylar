@@ -4,8 +4,8 @@
  */
 
 #include "config/config.h"
-#include "sylar/fiber/scheduler.h"
 #include "log/logger.h"
+#include "sylar/fiber/scheduler.h"
 
 #include <atomic>
 #include <cassert>
@@ -19,17 +19,17 @@ static void shared_stack_job()
 {
     int step = g_steps.fetch_add(1) + 1;
     BASE_LOG_INFO(g_logger) << "shared_stack_job step=" << step
-                             << " fiber_id=" << sylar::Fiber::GetFiberId();
+                            << " fiber_id=" << sylar::Fiber::GetFiberId();
     sylar::Fiber::YieldToReady();
 
     step = g_steps.fetch_add(1) + 1;
     BASE_LOG_INFO(g_logger) << "shared_stack_job step=" << step
-                             << " fiber_id=" << sylar::Fiber::GetFiberId();
+                            << " fiber_id=" << sylar::Fiber::GetFiberId();
     sylar::Fiber::YieldToReady();
 
     step = g_steps.fetch_add(1) + 1;
     BASE_LOG_INFO(g_logger) << "shared_stack_job step=" << step
-                             << " fiber_id=" << sylar::Fiber::GetFiberId();
+                            << " fiber_id=" << sylar::Fiber::GetFiberId();
 }
 
 int main()

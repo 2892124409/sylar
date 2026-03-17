@@ -5,7 +5,8 @@
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
-void test_simple_request() {
+void test_simple_request()
+{
     http::HttpRequestParser parser;
     std::string raw = "GET /ping?name=sylar HTTP/1.1\r\nHost: localhost\r\nCookie: SID=abc; theme=dark\r\n\r\n";
     size_t consumed = 0;
@@ -19,7 +20,8 @@ void test_simple_request() {
     assert(request->isKeepAlive());
 }
 
-void test_half_body() {
+void test_half_body()
+{
     http::HttpRequestParser parser;
     std::string raw = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhel";
     size_t consumed = 0;
@@ -33,7 +35,8 @@ void test_half_body() {
     assert(request->getBody() == "hello");
 }
 
-void test_pipelined_requests() {
+void test_pipelined_requests()
+{
     http::HttpRequestParser parser;
     std::string raw =
         "GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -49,7 +52,8 @@ void test_pipelined_requests() {
     assert(!request->isKeepAlive());
 }
 
-void test_request_too_large() {
+void test_request_too_large()
+{
     size_t old_header = http::HttpRequestParser::GetMaxHeaderSize();
     size_t old_body = http::HttpRequestParser::GetMaxBodySize();
 
@@ -80,7 +84,8 @@ void test_request_too_large() {
     http::HttpRequestParser::SetMaxBodySize(old_body);
 }
 
-int main() {
+int main()
+{
     test_simple_request();
     test_half_body();
     test_pipelined_requests();

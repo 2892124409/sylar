@@ -1,6 +1,6 @@
 #include "http/stream/sse.h"
-#include "sylar/net/socket.h"
 #include "log/logger.h"
+#include "sylar/net/socket.h"
 
 #include <assert.h>
 #include <string>
@@ -9,22 +9,26 @@
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
-class TestSocket : public sylar::Socket {
-public:
+class TestSocket : public sylar::Socket
+{
+  public:
     TestSocket(int family, int type, int protocol = 0)
-        : sylar::Socket(family, type, protocol) {
+        : sylar::Socket(family, type, protocol)
+    {
     }
 
     using sylar::Socket::init;
 };
 
-static http::HttpSession::ptr CreateSessionFromFd(int fd) {
+static http::HttpSession::ptr CreateSessionFromFd(int fd)
+{
     std::shared_ptr<TestSocket> sock(new TestSocket(AF_UNIX, SOCK_STREAM, 0));
     assert(sock->init(fd));
     return http::HttpSession::ptr(new http::HttpSession(sock));
 }
 
-void test_send_event() {
+void test_send_event()
+{
     int fds[2] = {-1, -1};
     assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
@@ -46,7 +50,8 @@ void test_send_event() {
     ::close(fds[1]);
 }
 
-void test_send_comment() {
+void test_send_comment()
+{
     int fds[2] = {-1, -1};
     assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
@@ -64,7 +69,8 @@ void test_send_comment() {
     ::close(fds[1]);
 }
 
-int main() {
+int main()
+{
     test_send_event();
     test_send_comment();
     BASE_LOG_INFO(g_logger) << "test_sse_writer passed";

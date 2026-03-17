@@ -4,8 +4,8 @@
  */
 
 #include "sylar/net/bytearray.h"
-#include <iostream>
 #include <chrono>
+#include <iostream>
 #include <vector>
 
 void test_allocation_performance()

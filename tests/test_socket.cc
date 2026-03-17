@@ -11,14 +11,14 @@
  * 6. UDP 数据收发
  */
 
-#include "sylar/net/socket.h"
-#include "sylar/net/address.h"
 #include "log/logger.h"
 #include "sylar/fiber/iomanager.h"
-#include <iostream>
-#include <cstring>
-#include <thread>
+#include "sylar/net/address.h"
+#include "sylar/net/socket.h"
 #include <chrono>
+#include <cstring>
+#include <iostream>
+#include <thread>
 
 // ============================================================================
 // 全局日志器
@@ -450,7 +450,7 @@ void test_tcp_client_server()
     }
 
     // 发送响应
-    const char *response = "Hello from server!";
+    const char* response = "Hello from server!";
     client_conn->send(response, strlen(response));
     std::cout << "[服务器] 发送响应: \"" << response << "\"\n";
 
@@ -500,7 +500,7 @@ void test_udp_communication()
     // 2. sock1 向 sock2 发送数据
     // -------------------------------------------------------------------------
     // UDP 使用 sendTo，需要指定目标地址
-    const char *msg = "UDP Hello!";
+    const char* msg = "UDP Hello!";
     int sent = sock1->sendTo(msg, strlen(msg), addr2);
     std::cout << "\n[2] sock1 发送 " << sent << " 字节到 " << addr2->toString() << "\n";
 
@@ -523,7 +523,7 @@ void test_udp_communication()
     // -------------------------------------------------------------------------
     // 4. sock2 回复
     // -------------------------------------------------------------------------
-    const char *reply = "UDP Reply!";
+    const char* reply = "UDP Reply!";
     sock2->sendTo(reply, strlen(reply), addr1);
     std::cout << "\n[4] sock2 发送回复\n";
 
@@ -655,7 +655,7 @@ void test_socket_status()
 // 主函数
 // ============================================================================
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     std::cout << "========================================\n";
     std::cout << "        Socket 模块测试程序\n";

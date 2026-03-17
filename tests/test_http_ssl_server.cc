@@ -3,9 +3,9 @@
 #include "http/ssl/ssl_context.h"
 #include "http/ssl/ssl_socket.h"
 #include "http/ssl/ssl_socket_stream.h"
-#include "sylar/net/address.h"
-#include "sylar/fiber/hook.h"
 #include "log/logger.h"
+#include "sylar/fiber/hook.h"
+#include "sylar/net/address.h"
 
 #include <cassert>
 #include <cstdlib>
@@ -18,20 +18,20 @@ static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 namespace
 {
 
-    std::string PrepareSslFixtures()
-    {
-        char tmpl[] = "/tmp/sylar_http_ssl_XXXXXX";
-        char *dir = mkdtemp(tmpl);
-        assert(dir);
-        std::string base(dir);
-        std::string cert = base + "/server.crt";
-        std::string key = base + "/server.key";
-        std::string cmd = "openssl req -x509 -nodes -newkey rsa:2048 -keyout \"" + key +
-                          "\" -out \"" + cert +
-                          "\" -subj /CN=localhost -days 1 >/dev/null 2>&1";
-        assert(std::system(cmd.c_str()) == 0);
-        return base;
-    }
+std::string PrepareSslFixtures()
+{
+    char tmpl[] = "/tmp/sylar_http_ssl_XXXXXX";
+    char* dir = mkdtemp(tmpl);
+    assert(dir);
+    std::string base(dir);
+    std::string cert = base + "/server.crt";
+    std::string key = base + "/server.key";
+    std::string cmd = "openssl req -x509 -nodes -newkey rsa:2048 -keyout \"" + key +
+                      "\" -out \"" + cert +
+                      "\" -subj /CN=localhost -days 1 >/dev/null 2>&1";
+    assert(std::system(cmd.c_str()) == 0);
+    return base;
+}
 
 } // namespace
 
@@ -49,11 +49,11 @@ int main()
 
     server->getServletDispatch()->addServlet("/ping", [](http::HttpRequest::ptr,
                                                          http::HttpResponse::ptr rsp,
-                                                         http::HttpSession::ptr) {
+                                                         http::HttpSession::ptr)
+                                             {
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("secure-pong");
-        return 0;
-    });
+        return 0; });
 
     std::vector<sylar::Address::ptr> addrs;
     std::vector<sylar::Address::ptr> fails;
@@ -61,7 +61,8 @@ int main()
     assert(server->bind(addrs, fails));
     assert(server->start());
 
-    iom.schedule([]() {
+    iom.schedule([]()
+                 {
         sleep(1);
         http::ssl::SslConfig client_config;
         http::ssl::SslContext::ptr client_ctx(new http::ssl::SslContext(client_config, http::ssl::SslMode::CLIENT));
@@ -77,13 +78,12 @@ int main()
         std::string rsp(buf, rt);
         assert(rsp.find("200 OK") != std::string::npos);
         assert(rsp.find("secure-pong") != std::string::npos);
-        stream.close();
-    });
+        stream.close(); });
 
-    iom.schedule([server]() {
+    iom.schedule([server]()
+                 {
         sleep(2);
-        server->stop();
-    });
+        server->stop(); });
 
     BASE_LOG_INFO(g_logger) << "test_http_ssl_server passed";
     return 0;

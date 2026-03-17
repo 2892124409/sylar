@@ -13,21 +13,28 @@ namespace storage
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
-AsyncMySqlWriter::AsyncMySqlWriter(const config::MysqlSettings &mysql_settings,
-                                   const config::PersistSettings &persist_settings)
-    : m_mysql_settings(mysql_settings)
-    , m_persist_settings(persist_settings)
-    , m_running(false)
-    , m_conn(nullptr)
+/**
+ * @brief 构造函数，保存配置并初始化运行状态。
+ */
+AsyncMySqlWriter::AsyncMySqlWriter(const config::MysqlSettings& mysql_settings,
+                                   const config::PersistSettings& persist_settings)
+    : m_mysql_settings(mysql_settings), m_persist_settings(persist_settings), m_running(false), m_conn(nullptr)
 {
 }
 
+/**
+ * @brief 析构函数，确保线程和连接被正确回收。
+ */
 AsyncMySqlWriter::~AsyncMySqlWriter()
 {
     Stop();
 }
 
-bool AsyncMySqlWriter::Start(std::string &error)
+/**
+ * @brief 启动异步写入线程。
+ * @details 启动前先进行连库与建表，避免线程启动后立即失败。
+ */
+bool AsyncMySqlWriter::Start(std::string& error)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_running)
@@ -45,6 +52,9 @@ bool AsyncMySqlWriter::Start(std::string &error)
     return true;
 }
 
+/**
+ * @brief 停止异步线程并释放连接。
+ */
 void AsyncMySqlWriter::Stop()
 {
     {
@@ -77,7 +87,10 @@ void AsyncMySqlWriter::Stop()
     }
 }
 
-bool AsyncMySqlWriter::Enqueue(const common::PersistMessage &message, std::string &error)
+/**
+ * @brief 将消息放入内存队列，供后台线程后续刷盘。
+ */
+bool AsyncMySqlWriter::Enqueue(const common::PersistMessage& message, std::string& error)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -98,6 +111,9 @@ bool AsyncMySqlWriter::Enqueue(const common::PersistMessage &message, std::strin
     return true;
 }
 
+/**
+ * @brief 后台线程主循环：等待事件、取批次、调用 FlushBatch。
+ */
 void AsyncMySqlWriter::Run()
 {
     while (true)
@@ -108,9 +124,11 @@ void AsyncMySqlWriter::Run()
             std::unique_lock<std::mutex> lock(m_mutex);
             if (m_queue.empty() && m_running)
             {
+                // 队列为空时按 flush_interval_ms 周期唤醒，兼顾实时性与批量合并。
                 m_cond.wait_for(lock, std::chrono::milliseconds(m_persist_settings.flush_interval_ms));
             }
 
+            // 每轮最多提取 batch_size 条，避免单次事务过大。
             size_t fetch_count = std::min(m_queue.size(), m_persist_settings.batch_size);
             for (size_t i = 0; i < fetch_count; ++i)
             {
@@ -118,6 +136,7 @@ void AsyncMySqlWriter::Run()
                 m_queue.pop_front();
             }
 
+            // 停止后若没有待刷数据则退出线程；有数据则先刷完再退出。
             if (batch.empty() && !m_running)
             {
                 break;
@@ -137,7 +156,10 @@ void AsyncMySqlWriter::Run()
     }
 }
 
-bool AsyncMySqlWriter::EnsureConnected(std::string &error)
+/**
+ * @brief 确保 MySQL 连接可用，不可用时自动重连。
+ */
+bool AsyncMySqlWriter::EnsureConnected(std::string& error)
 {
     if (m_conn)
     {
@@ -178,9 +200,12 @@ bool AsyncMySqlWriter::EnsureConnected(std::string &error)
     return true;
 }
 
-bool AsyncMySqlWriter::EnsureSchema(std::string &error)
+/**
+ * @brief 幂等建表，确保 conversations/chat_messages 存在。
+ */
+bool AsyncMySqlWriter::EnsureSchema(std::string& error)
 {
-    static const char *kCreateConversationsSql =
+    static const char* kCreateConversationsSql =
         "CREATE TABLE IF NOT EXISTS conversations ("
         " id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
         " sid VARCHAR(128) NOT NULL,"
@@ -192,7 +217,7 @@ bool AsyncMySqlWriter::EnsureSchema(std::string &error)
         " KEY idx_updated_at_ms (updated_at_ms)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
-    static const char *kCreateMessagesSql =
+    static const char* kCreateMessagesSql =
         "CREATE TABLE IF NOT EXISTS chat_messages ("
         " id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
         " sid VARCHAR(128) NOT NULL,"
@@ -207,7 +232,10 @@ bool AsyncMySqlWriter::EnsureSchema(std::string &error)
     return ExecuteSql(kCreateConversationsSql, error) && ExecuteSql(kCreateMessagesSql, error);
 }
 
-bool AsyncMySqlWriter::ExecuteSql(const std::string &sql, std::string &error)
+/**
+ * @brief 执行单条 SQL。
+ */
+bool AsyncMySqlWriter::ExecuteSql(const std::string& sql, std::string& error)
 {
     if (mysql_query(m_conn, sql.c_str()) != 0)
     {
@@ -217,7 +245,10 @@ bool AsyncMySqlWriter::ExecuteSql(const std::string &sql, std::string &error)
     return true;
 }
 
-bool AsyncMySqlWriter::FlushBatch(std::deque<common::PersistMessage> &batch, std::string &error)
+/**
+ * @brief 刷写一个批次消息到数据库（事务语义）。
+ */
+bool AsyncMySqlWriter::FlushBatch(std::deque<common::PersistMessage>& batch, std::string& error)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -226,6 +257,7 @@ bool AsyncMySqlWriter::FlushBatch(std::deque<common::PersistMessage> &batch, std
         return false;
     }
 
+    // 开启事务，保证一个 batch 内 conversations/chat_messages 同步落地。
     if (!ExecuteSql("BEGIN", error))
     {
         return false;
@@ -233,7 +265,7 @@ bool AsyncMySqlWriter::FlushBatch(std::deque<common::PersistMessage> &batch, std
 
     for (size_t i = 0; i < batch.size(); ++i)
     {
-        const common::PersistMessage &message = batch[i];
+        const common::PersistMessage& message = batch[i];
         std::ostringstream upsert_conversation;
         upsert_conversation << "INSERT INTO conversations (sid, conversation_id, created_at_ms, updated_at_ms) VALUES ('"
                             << Escape(message.sid)
@@ -245,6 +277,7 @@ bool AsyncMySqlWriter::FlushBatch(std::deque<common::PersistMessage> &batch, std
                             << message.created_at_ms
                             << ") ON DUPLICATE KEY UPDATE updated_at_ms=VALUES(updated_at_ms)";
 
+        // 任一 SQL 失败则回滚整个批次，避免部分写入。
         if (!ExecuteSql(upsert_conversation.str(), error))
         {
             ExecuteSql("ROLLBACK", error);
@@ -271,6 +304,7 @@ bool AsyncMySqlWriter::FlushBatch(std::deque<common::PersistMessage> &batch, std
         }
     }
 
+    // 提交事务；提交失败同样执行回滚。
     if (!ExecuteSql("COMMIT", error))
     {
         ExecuteSql("ROLLBACK", error);
@@ -280,7 +314,10 @@ bool AsyncMySqlWriter::FlushBatch(std::deque<common::PersistMessage> &batch, std
     return true;
 }
 
-std::string AsyncMySqlWriter::Escape(const std::string &value)
+/**
+ * @brief SQL 转义，防止拼接语句时特殊字符破坏语义。
+ */
+std::string AsyncMySqlWriter::Escape(const std::string& value)
 {
     std::string escaped;
     escaped.resize(value.size() * 2 + 1);

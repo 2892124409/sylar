@@ -1,7 +1,7 @@
 #include "ai/common/ai_utils.h"
 #include "ai/config/ai_app_config.h"
 #include "ai/http/ai_http_api.h"
-#include "ai/llm/deepseek_client.h"
+#include "ai/llm/openai_compatible_client.h"
 #include "ai/service/chat_service.h"
 #include "ai/storage/async_mysql_writer.h"
 #include "ai/storage/chat_repository.h"
@@ -11,6 +11,7 @@
 #include "http/server/http_server.h"
 #include "http/ssl/ssl_config.h"
 #include "log/logger.h"
+#include "sylar/fiber/fiber_framework_config.h"
 #include "sylar/fiber/hook.h"
 #include "sylar/net/address.h"
 
@@ -25,64 +26,105 @@
 #include <iostream>
 #include <vector>
 
+/**
+ * @file main.cc
+ * @brief AI 对话服务端入口，负责配置加载、依赖装配、HTTP 启动与优雅停机。
+ */
+
 namespace
 {
 
-    static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
-    std::atomic<bool> g_stop_requested(false);
+/** @brief 当前编译单元使用的系统日志器。 */
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
+/** @brief 进程停止标志，由信号处理函数置位，主循环轮询读取。 */
+std::atomic<bool> g_stop_requested(false);
 
-    void HandleSignal(int signo)
+/**
+ * @brief POSIX 信号处理函数，仅设置停止标志。
+ * @param signo 接收到的信号值（当前未使用）。
+ */
+void HandleSignal(int signo)
+{
+    (void)signo;
+    g_stop_requested.store(true, std::memory_order_release);
+}
+
+/**
+ * @brief 从 YAML 文件加载配置并合并到全局配置中心。
+ * @param config_file 配置文件路径。为空时使用默认注册配置。
+ * @param[out] error 加载失败时返回异常信息。
+ * @return true 加载成功；false 加载失败。
+ */
+bool LoadConfigFromFile(const std::string& config_file, std::string& error)
+{
+    if (config_file.empty())
     {
-        (void)signo;
-        g_stop_requested.store(true, std::memory_order_release);
+        return true;
     }
 
-    bool LoadConfigFromFile(const std::string &config_file, std::string &error)
+    try
     {
-        if (config_file.empty())
+        YAML::Node node = YAML::LoadFile(config_file);
+        base::Config::LoadFromYaml(node);
+        return true;
+    }
+    catch (const std::exception& ex)
+    {
+        error = ex.what();
+        return false;
+    }
+}
+
+/**
+ * @brief 从命令行解析配置文件路径。
+ * @details 支持三种格式：
+ *   - `-c /path/to/config.yml`
+ *   - `--config /path/to/config.yml`
+ *   - `--config=/path/to/config.yml`
+ * @param argc 命令行参数数量。
+ * @param argv 命令行参数数组。
+ * @return 配置文件路径；未提供时返回空字符串。
+ */
+std::string ParseConfigFilePath(int argc, char** argv)
+{
+    std::string config_file;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+        if ((arg == "-c" || arg == "--config") && i + 1 < argc)
         {
-            return true;
+            config_file = argv[++i];
+            continue;
         }
 
-        try
+        const std::string prefix = "--config=";
+        if (arg.compare(0, prefix.size(), prefix) == 0)
         {
-            YAML::Node node = YAML::LoadFile(config_file);
-            base::Config::LoadFromYaml(node);
-            return true;
-        }
-        catch (const std::exception &ex)
-        {
-            error = ex.what();
-            return false;
+            config_file = arg.substr(prefix.size());
         }
     }
 
-    std::string ParseConfigFilePath(int argc, char **argv)
-    {
-        std::string config_file;
-
-        for (int i = 1; i < argc; ++i)
-        {
-            std::string arg = argv[i];
-            if ((arg == "-c" || arg == "--config") && i + 1 < argc)
-            {
-                config_file = argv[++i];
-                continue;
-            }
-
-            const std::string prefix = "--config=";
-            if (arg.compare(0, prefix.size(), prefix) == 0)
-            {
-                config_file = arg.substr(prefix.size());
-            }
-        }
-
-        return config_file;
-    }
+    return config_file;
+}
 
 } // namespace
 
-int main(int argc, char **argv)
+/**
+ * @brief AI 对话服务端主入口。
+ * @details 执行流程：
+ *   1) 启用 hook；
+ *   2) 加载并校验配置；
+ *   3) 初始化存储仓库与异步写入线程；
+ *   4) 组装 LLM 与 ChatService；
+ *   5) 注册路由并启动 HTTP 服务；
+ *   6) 等待 SIGINT/SIGTERM；
+ *   7) 执行优雅停机。
+ * @param argc 命令行参数数量。
+ * @param argv 命令行参数数组。
+ * @return 0 正常退出；非 0 启动或运行失败。
+ */
+int main(int argc, char** argv)
 {
     sylar::set_hook_enable(true);
 
@@ -100,14 +142,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /// @brief 聊天接口依赖 SID，会话机制必须启用。
     http::HttpFrameworkConfig::SetSessionEnabled(true);
 
     const ai::config::ServerSettings server_settings = ai::config::AiAppConfig::GetServerSettings();
-    const ai::config::DeepSeekSettings deepseek_settings = ai::config::AiAppConfig::GetDeepSeekSettings();
+    const ai::config::OpenAICompatibleSettings openai_settings =
+        ai::config::AiAppConfig::GetOpenAICompatibleSettings();
     const ai::config::ChatSettings chat_settings = ai::config::AiAppConfig::GetChatSettings();
     const ai::config::MysqlSettings mysql_settings = ai::config::AiAppConfig::GetMysqlSettings();
     const ai::config::PersistSettings persist_settings = ai::config::AiAppConfig::GetPersistSettings();
 
+    /// @brief 先初始化查询仓库；数据库不可用时快速失败。
     ai::storage::ChatRepository::ptr chat_repository(new ai::storage::ChatRepository(mysql_settings));
     if (!chat_repository->Init(error))
     {
@@ -115,6 +160,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /// @brief 启动异步持久化线程（队列 + 批量刷盘）。
     ai::storage::AsyncMySqlWriter::ptr async_writer(new ai::storage::AsyncMySqlWriter(mysql_settings, persist_settings));
     if (!async_writer->Start(error))
     {
@@ -122,12 +168,35 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    ai::llm::LlmClient::ptr llm_client(new ai::llm::DeepSeekClient(deepseek_settings));
+    /// @brief 组装核心依赖：LLM 客户端 + ChatService。
+    ai::llm::LlmClient::ptr llm_client(new ai::llm::OpenAICompatibleClient(openai_settings));
     ai::service::ChatService::ptr chat_service(new ai::service::ChatService(
         chat_settings, llm_client, chat_repository, async_writer));
 
-    http::HttpServer::ptr server = http::HttpServer::CreateWithConfig();
+    // 按 benchmark 同款模式创建 worker：
+    // use_caller=true  => 单 IOM（io/accept 复用同一调度器）
+    // use_caller=false => 双 IOM（io 与 accept 分离）
+    const uint32_t io_worker_threads = http::HttpFrameworkConfig::GetIOWorkerThreads();
+    const uint32_t accept_worker_threads = http::HttpFrameworkConfig::GetAcceptWorkerThreads();
+    const bool use_caller = sylar::FiberFrameworkConfig::GetIOManagerUseCaller();
 
+    sylar::IOManager::ptr io_worker;
+    sylar::IOManager::ptr accept_worker;
+    if (use_caller)
+    {
+        io_worker.reset(new sylar::IOManager(io_worker_threads, true, "sylar-http-worker"));
+        accept_worker = io_worker;
+    }
+    else
+    {
+        io_worker.reset(new sylar::IOManager(io_worker_threads, false, "sylar-http-io-worker"));
+        accept_worker.reset(new sylar::IOManager(accept_worker_threads, false, "sylar-http-accept-worker"));
+    }
+
+    /// @brief 使用上述 worker 创建 HTTP Server。
+    http::HttpServer::ptr server(new http::HttpServer(io_worker.get(), accept_worker.get()));
+
+    /// @brief 可选 TLS 配置（由 YAML 决定是否启用）。
     if (server_settings.enable_ssl)
     {
         http::ssl::SslConfig ssl_config;
@@ -142,6 +211,7 @@ int main(int argc, char **argv)
         }
     }
 
+    /// @brief 为每个请求注入 request_id，便于链路追踪。
     server->addMiddleware(http::Middleware::ptr(new http::CallbackMiddleware(
         [](http::HttpRequest::ptr request, http::HttpResponse::ptr response, http::HttpSession::ptr)
         {
@@ -152,8 +222,10 @@ int main(int argc, char **argv)
         },
         http::CallbackMiddleware::AfterCallback())));
 
-    ai::api::RegisterAiHttpApi(server, chat_service, chat_settings, deepseek_settings.default_model);
+    /// @brief 注册 AI 业务路由。
+    ai::api::RegisterAiHttpApi(server, chat_service, chat_settings, openai_settings.default_model);
 
+    /// @brief 解析绑定地址（host:port）。
     sylar::Address::ptr bind_addr =
         sylar::Address::LookupAny(server_settings.host + ":" + std::to_string(server_settings.port));
     if (!bind_addr)
@@ -167,6 +239,7 @@ int main(int argc, char **argv)
     std::vector<sylar::Address::ptr> fails;
     addrs.push_back(bind_addr);
 
+    /// @brief 启动服务；若 bind/start 失败则先停写线程再退出。
     if (!server->bind(addrs, fails) || !server->start())
     {
         std::cerr << "start ai chat server failed at " << server_settings.host << ":" << server_settings.port << std::endl;
@@ -175,18 +248,59 @@ int main(int argc, char **argv)
     }
 
     std::cout << "ai_chat_server started on " << server_settings.host << ":" << server_settings.port
-              << " ssl=" << (server_settings.enable_ssl ? "on" : "off") << std::endl;
+              << " ssl=" << (server_settings.enable_ssl ? "on" : "off")
+              << " use_caller=" << (use_caller ? "on" : "off") << std::endl;
 
+    /// @brief 注册优雅退出信号：Ctrl+C(SIGINT) 或 kill(SIGTERM)。
     ::signal(SIGINT, HandleSignal);
     ::signal(SIGTERM, HandleSignal);
 
-    while (!g_stop_requested.load(std::memory_order_acquire))
+    if (use_caller)
     {
-        sleep(1);
+        // caller 模式下，让主线程进入 IOM 调度循环；
+        // 通过定时器轮询停止标志并触发关停。
+        sylar::Timer::ptr stop_timer;
+        stop_timer = io_worker->addTimer(200, [&]()
+                                         {
+            if (!g_stop_requested.load(std::memory_order_acquire))
+            {
+                return;
+            }
+
+            BASE_LOG_INFO(g_logger) << "ai_chat_server stopping (caller mode)";
+            server->stop();
+            if (accept_worker && accept_worker != io_worker)
+            {
+                accept_worker->stop();
+            }
+            if (stop_timer)
+            {
+                stop_timer->cancel();
+            } }, true);
+        io_worker->stop();
+    }
+    else
+    {
+        /// @brief 非 caller 模式下，主线程阻塞轮询，直到收到停止信号。
+        while (!g_stop_requested.load(std::memory_order_acquire))
+        {
+            usleep(200 * 1000);
+        }
+
+        /// @brief 先停 HTTP 服务，再停 worker。
+        BASE_LOG_INFO(g_logger) << "ai_chat_server stopping";
+        server->stop();
+        if (accept_worker)
+        {
+            accept_worker->stop();
+        }
+        if (io_worker && io_worker != accept_worker)
+        {
+            io_worker->stop();
+        }
     }
 
-    BASE_LOG_INFO(g_logger) << "ai_chat_server stopping";
-    server->stop();
+    // 最后停止持久化线程，保证已入队消息尽量刷盘完成后再退出。
     async_writer->Stop();
     return 0;
 }

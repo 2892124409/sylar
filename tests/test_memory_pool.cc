@@ -15,23 +15,23 @@ static void test_hash_bucket_append_and_fallback_free()
 {
     sylar::HashBucket::initMemoryPool(64);
 
-    void *fallback = sylar::HashBucket::useMemory(100);
+    void* fallback = sylar::HashBucket::useMemory(100);
     assert(fallback != nullptr);
 
     sylar::HashBucket::initMemoryPool(128);
     sylar::HashBucket::freeMemory(fallback, 100);
 
-    base::MemoryPool &pool = sylar::HashBucket::getMemoryPool(1);
-    void *pooled = pool.allocate();
+    base::MemoryPool& pool = sylar::HashBucket::getMemoryPool(1);
+    void* pooled = pool.allocate();
     assert(pooled != nullptr);
     assert(pooled != fallback);
     pool.deallocate(pooled);
 
-    void *routed1 = sylar::HashBucket::useMemory(100);
+    void* routed1 = sylar::HashBucket::useMemory(100);
     assert(routed1 != nullptr);
     sylar::HashBucket::freeMemory(routed1, 100);
 
-    void *routed2 = sylar::HashBucket::useMemory(100);
+    void* routed2 = sylar::HashBucket::useMemory(100);
     assert(routed2 == routed1);
     sylar::HashBucket::freeMemory(routed2, 100);
 }
@@ -59,7 +59,7 @@ static void test_http_pooled_shared_creation()
 
 static void test_http_session_reuse_via_shared_ptr_deleter()
 {
-    void *first_address = nullptr;
+    void* first_address = nullptr;
     {
         http::HttpSession::ptr first = http::MakeHttpPooledShared<http::HttpSession>(sylar::Socket::ptr());
         assert(first);
@@ -81,8 +81,8 @@ static void test_memory_pool_alignment()
     pool.init(33);
 
     const std::size_t alignment = alignof(std::max_align_t);
-    void *slot1 = pool.allocate();
-    void *slot2 = pool.allocate();
+    void* slot1 = pool.allocate();
+    void* slot2 = pool.allocate();
 
     assert(slot1 != nullptr);
     assert(slot2 != nullptr);

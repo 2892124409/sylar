@@ -1,6 +1,6 @@
-#include "sylar/net/address.h"
 #include "log/logger.h"
 #include "sylar/base/endian.h"
+#include "sylar/net/address.h"
 #include <iostream>
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
@@ -184,7 +184,7 @@ void test_address_factory()
     sa_in.sin_family = AF_INET;
     sa_in.sin_port = sylar::byteswapOnLittleEndian((uint16_t)80);
     sa_in.sin_addr.s_addr = sylar::byteswapOnLittleEndian((uint32_t)0xC0A80101);
-    sylar::Address::ptr addr1 = sylar::Address::Create((struct sockaddr *)&sa_in, sizeof(sa_in));
+    sylar::Address::ptr addr1 = sylar::Address::Create((struct sockaddr*)&sa_in, sizeof(sa_in));
     std::cout << "IPv4工厂: " << addr1->toString() << " (类型: " << addr1->getFamily() << ")" << std::endl;
 
     // 测试2：IPv6
@@ -192,7 +192,7 @@ void test_address_factory()
     sa_in6.sin6_family = AF_INET6;
     sa_in6.sin6_port = sylar::byteswapOnLittleEndian((uint16_t)443);
     memset(&sa_in6.sin6_addr, 0, 16);
-    sylar::Address::ptr addr2 = sylar::Address::Create((struct sockaddr *)&sa_in6, sizeof(sa_in6));
+    sylar::Address::ptr addr2 = sylar::Address::Create((struct sockaddr*)&sa_in6, sizeof(sa_in6));
     std::cout << "IPv6工厂: " << addr2->toString() << " (类型: " << addr2->getFamily() << ")" << std::endl;
 }
 
@@ -247,7 +247,7 @@ void test_interface_addresses()
     if (sylar::Address::GetInterfaceAddresses(results, AF_INET))
     {
         std::cout << "本机网卡信息:" << std::endl;
-        for (auto &kv : results)
+        for (auto& kv : results)
         {
             std::cout << "  " << kv.first << ": "
                       << kv.second.first->toString()
@@ -264,7 +264,7 @@ void test_interface_addresses()
     if (sylar::Address::GetInterfaceAddresses(any_addrs, "*", AF_INET))
     {
         std::cout << "任意地址:" << std::endl;
-        for (auto &p : any_addrs)
+        for (auto& p : any_addrs)
         {
             std::cout << "  " << p.first->toString() << std::endl;
         }
@@ -275,7 +275,7 @@ void test_interface_addresses()
 // 主函数
 // ============================================================================
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     std::cout << "========================================" << std::endl;
     std::cout << "        Address 模块测试程序" << std::endl;

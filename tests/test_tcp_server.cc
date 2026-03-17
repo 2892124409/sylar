@@ -7,17 +7,17 @@
  * 2. 多地址绑定
  */
 
-#include "sylar/net/tcp_server.h"
-#include "sylar/net/socket_stream.h"
-#include "sylar/net/socket.h"
-#include "sylar/net/address.h"
-#include "log/logger.h"
-#include "sylar/fiber/iomanager.h"
-#include "sylar/fiber/hook.h" // 添加 hook 头文件
 #include "config/config.h"
+#include "log/logger.h"
 #include "sylar/fiber/fiber.h"
-#include <iostream>
+#include "sylar/fiber/hook.h" // 添加 hook 头文件
+#include "sylar/fiber/iomanager.h"
+#include "sylar/net/address.h"
+#include "sylar/net/socket.h"
+#include "sylar/net/socket_stream.h"
+#include "sylar/net/tcp_server.h"
 #include <cstring>
+#include <iostream>
 
 // ============================================================================
 // 全局日志器
@@ -34,17 +34,17 @@ static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
  */
 class EchoServer : public sylar::net::TcpServer
 {
-public:
+  public:
     typedef std::shared_ptr<EchoServer> ptr;
 
-    EchoServer(sylar::IOManager *io_worker = sylar::IOManager::GetThis(),
-               sylar::IOManager *accept_worker = sylar::IOManager::GetThis())
+    EchoServer(sylar::IOManager* io_worker = sylar::IOManager::GetThis(),
+               sylar::IOManager* accept_worker = sylar::IOManager::GetThis())
         : TcpServer(io_worker, accept_worker)
     {
         setName("EchoServer/1.0.0");
     }
 
-protected:
+  protected:
     /**
      * @brief 处理客户端连接 - Echo 实现
      */
@@ -112,7 +112,7 @@ void test_echo_server_use_caller()
     if (!server->bind(addrs, fails))
     {
         BASE_LOG_ERROR(g_logger) << "bind fail";
-        for (auto &addr : fails)
+        for (auto& addr : fails)
         {
             std::cout << "  绑定失败: " << addr->toString() << "\n";
         }
@@ -229,7 +229,7 @@ void test_echo_server_worker_only()
     if (!server->bind(addrs, fails))
     {
         BASE_LOG_ERROR(g_logger) << "bind fail";
-        for (auto &addr : fails)
+        for (auto& addr : fails)
         {
             std::cout << "  绑定失败: " << addr->toString() << "\n";
         }
@@ -312,7 +312,7 @@ void test_echo_server_worker_only()
 // 主函数
 // ============================================================================
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     std::cout << "========================================\n";
     std::cout << "  TcpServer 共享栈模式测试\n";

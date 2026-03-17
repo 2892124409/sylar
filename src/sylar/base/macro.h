@@ -5,10 +5,10 @@
 #ifndef __SYLAR_BASE_MACRO_H__
 #define __SYLAR_BASE_MACRO_H__
 
-#include <string.h>
-#include <assert.h>
-#include "util.h"
 #include "log/logger.h"
+#include "util.h"
+#include <assert.h>
+#include <string.h>
 
 // 获取当前日志器的宏
 #define BASE_LOG_ROOT() base::LoggerMgr::GetInstance()->getRoot()
@@ -24,25 +24,25 @@
 #endif
 
 /// 断言宏
-#define BASE_ASSERT(x)                                                                \
-    if (SYLAR_UNLIKELY(!(x)))                                                          \
-    {                                                                                  \
-        BASE_LOG_ERROR(BASE_LOG_ROOT()) << "ASSERTION: " #x                          \
-                                          << "\nbacktrace:\n"                          \
-                                          << base::BacktraceToString(100, 2, "    "); \
-        assert(x);                                                                     \
+#define BASE_ASSERT(x)                                                              \
+    if (SYLAR_UNLIKELY(!(x)))                                                       \
+    {                                                                               \
+        BASE_LOG_ERROR(BASE_LOG_ROOT()) << "ASSERTION: " #x                         \
+                                        << "\nbacktrace:\n"                         \
+                                        << base::BacktraceToString(100, 2, "    "); \
+        assert(x);                                                                  \
     }
 
 /// 带消息的断言宏
-#define BASE_ASSERT2(x, w)                                                            \
-    if (SYLAR_UNLIKELY(!(x)))                                                          \
-    {                                                                                  \
-        BASE_LOG_ERROR(BASE_LOG_ROOT()) << "ASSERTION: " #x                          \
-                                          << "\n"                                      \
-                                          << w                                         \
-                                          << "\nbacktrace:\n"                          \
-                                          << base::BacktraceToString(100, 2, "    "); \
-        assert(x);                                                                     \
+#define BASE_ASSERT2(x, w)                                                          \
+    if (SYLAR_UNLIKELY(!(x)))                                                       \
+    {                                                                               \
+        BASE_LOG_ERROR(BASE_LOG_ROOT()) << "ASSERTION: " #x                         \
+                                        << "\n"                                     \
+                                        << w                                        \
+                                        << "\nbacktrace:\n"                         \
+                                        << base::BacktraceToString(100, 2, "    "); \
+        assert(x);                                                                  \
     }
 
 #endif

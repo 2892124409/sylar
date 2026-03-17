@@ -17,10 +17,10 @@ namespace
 
 class FakeLlmClient : public ai::llm::LlmClient
 {
-public:
-    virtual bool Complete(const ai::llm::LlmCompletionRequest &request,
-                          ai::llm::LlmCompletionResult &result,
-                          std::string &error) override
+  public:
+    virtual bool Complete(const ai::llm::LlmCompletionRequest& request,
+                          ai::llm::LlmCompletionResult& result,
+                          std::string& error) override
     {
         (void)error;
         last_request = request;
@@ -32,10 +32,10 @@ public:
         return true;
     }
 
-    virtual bool StreamComplete(const ai::llm::LlmCompletionRequest &request,
-                                const DeltaCallback &on_delta,
-                                ai::llm::LlmCompletionResult &result,
-                                std::string &error) override
+    virtual bool StreamComplete(const ai::llm::LlmCompletionRequest& request,
+                                const DeltaCallback& on_delta,
+                                ai::llm::LlmCompletionResult& result,
+                                std::string& error) override
     {
         (void)error;
         last_request = request;
@@ -56,12 +56,12 @@ public:
 
 class FakeStore : public ai::service::ChatStore
 {
-public:
-    virtual bool LoadRecentMessages(const std::string &sid,
-                                    const std::string &conversation_id,
+  public:
+    virtual bool LoadRecentMessages(const std::string& sid,
+                                    const std::string& conversation_id,
                                     size_t limit,
-                                    std::vector<ai::common::ChatMessage> &out,
-                                    std::string &error) override
+                                    std::vector<ai::common::ChatMessage>& out,
+                                    std::string& error) override
     {
         (void)sid;
         (void)conversation_id;
@@ -71,11 +71,11 @@ public:
         return true;
     }
 
-    virtual bool LoadHistory(const std::string &sid,
-                             const std::string &conversation_id,
+    virtual bool LoadHistory(const std::string& sid,
+                             const std::string& conversation_id,
                              size_t limit,
-                             std::vector<ai::common::ChatMessage> &out,
-                             std::string &error) override
+                             std::vector<ai::common::ChatMessage>& out,
+                             std::string& error) override
     {
         (void)sid;
         (void)conversation_id;
@@ -93,8 +93,8 @@ public:
 
 class FakeSink : public ai::service::MessageSink
 {
-public:
-    virtual bool Enqueue(const ai::common::PersistMessage &message, std::string &error) override
+  public:
+    virtual bool Enqueue(const ai::common::PersistMessage& message, std::string& error) override
     {
         (void)error;
         records.push_back(message);
@@ -171,7 +171,7 @@ void TestStream()
     request.conversation_id = "conv-stream";
     request.model = "deepseek-chat";
 
-    std::vector<std::pair<std::string, std::string> > events;
+    std::vector<std::pair<std::string, std::string>> events;
 
     ai::common::ChatCompletionResponse response;
     std::string error;
@@ -179,7 +179,8 @@ void TestStream()
 
     bool ok = service.StreamComplete(
         request,
-        [&events](const std::string &event, const std::string &data) {
+        [&events](const std::string& event, const std::string& data)
+        {
             events.push_back(std::make_pair(event, data));
             return true;
         },

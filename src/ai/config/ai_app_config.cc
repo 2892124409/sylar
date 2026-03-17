@@ -27,20 +27,21 @@ http::ConfigVar<std::string>::ptr g_ai_server_ssl_cert_file =
 http::ConfigVar<std::string>::ptr g_ai_server_ssl_key_file =
     http::Config::Lookup<std::string>("ai.server.ssl_key_file", "", "ai server ssl key file path");
 
-http::ConfigVar<std::string>::ptr g_ai_deepseek_base_url =
-    http::Config::Lookup<std::string>("ai.deepseek.base_url", "https://api.deepseek.com/v1", "deepseek base url");
+// OpenAI-Compatible 配置键：ai.openai_compatible.*
+http::ConfigVar<std::string>::ptr g_ai_openai_base_url =
+    http::Config::Lookup<std::string>("ai.openai_compatible.base_url", "", "openai-compatible base url");
 
-http::ConfigVar<std::string>::ptr g_ai_deepseek_api_key =
-    http::Config::Lookup<std::string>("ai.deepseek.api_key", "", "deepseek api key");
+http::ConfigVar<std::string>::ptr g_ai_openai_api_key =
+    http::Config::Lookup<std::string>("ai.openai_compatible.api_key", "", "openai-compatible api key");
 
-http::ConfigVar<std::string>::ptr g_ai_deepseek_default_model =
-    http::Config::Lookup<std::string>("ai.deepseek.default_model", "deepseek-chat", "deepseek default model");
+http::ConfigVar<std::string>::ptr g_ai_openai_default_model =
+    http::Config::Lookup<std::string>("ai.openai_compatible.default_model", "", "openai-compatible default model");
 
-http::ConfigVar<uint64_t>::ptr g_ai_deepseek_connect_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.deepseek.connect_timeout_ms", 3000, "deepseek connect timeout ms");
+http::ConfigVar<uint64_t>::ptr g_ai_openai_connect_timeout_ms =
+    http::Config::Lookup<uint64_t>("ai.openai_compatible.connect_timeout_ms", 3000, "openai-compatible connect timeout ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_deepseek_request_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.deepseek.request_timeout_ms", 120000, "deepseek request timeout ms");
+http::ConfigVar<uint64_t>::ptr g_ai_openai_request_timeout_ms =
+    http::Config::Lookup<uint64_t>("ai.openai_compatible.request_timeout_ms", 120000, "openai-compatible request timeout ms");
 
 http::ConfigVar<bool>::ptr g_ai_chat_require_sid =
     http::Config::Lookup<bool>("ai.chat.require_sid", true, "whether sid is required");
@@ -106,14 +107,14 @@ ServerSettings AiAppConfig::GetServerSettings()
     return settings;
 }
 
-DeepSeekSettings AiAppConfig::GetDeepSeekSettings()
+OpenAICompatibleSettings AiAppConfig::GetOpenAICompatibleSettings()
 {
-    DeepSeekSettings settings;
-    settings.base_url = g_ai_deepseek_base_url->getValue();
-    settings.api_key = ResolveDeepSeekApiKey();
-    settings.default_model = g_ai_deepseek_default_model->getValue();
-    settings.connect_timeout_ms = g_ai_deepseek_connect_timeout_ms->getValue();
-    settings.request_timeout_ms = g_ai_deepseek_request_timeout_ms->getValue();
+    OpenAICompatibleSettings settings;
+    settings.base_url = g_ai_openai_base_url->getValue();
+    settings.api_key = ResolveOpenAICompatibleApiKey();
+    settings.default_model = g_ai_openai_default_model->getValue();
+    settings.connect_timeout_ms = g_ai_openai_connect_timeout_ms->getValue();
+    settings.request_timeout_ms = g_ai_openai_request_timeout_ms->getValue();
     return settings;
 }
 
@@ -152,19 +153,25 @@ PersistSettings AiAppConfig::GetPersistSettings()
     return settings;
 }
 
-std::string AiAppConfig::ResolveDeepSeekApiKey()
+std::string AiAppConfig::ResolveOpenAICompatibleApiKey()
 {
-    std::string key = g_ai_deepseek_api_key->getValue();
+    std::string key = g_ai_openai_api_key->getValue();
     if (!key.empty())
     {
         return key;
     }
 
-    const char *env_key = std::getenv("DEEPSEEK_API_KEY");
+    const char* env_key = std::getenv("OPENAI_COMPATIBLE_API_KEY");
+    if (env_key && env_key[0] != '\0')
+    {
+        return std::string(env_key);
+    }
+
+    env_key = std::getenv("OPENAI_API_KEY");
     return env_key ? std::string(env_key) : std::string();
 }
 
-bool AiAppConfig::Validate(std::string &error)
+bool AiAppConfig::Validate(std::string& error)
 {
     const ServerSettings server = GetServerSettings();
     if (server.host.empty())
@@ -183,20 +190,21 @@ bool AiAppConfig::Validate(std::string &error)
         return false;
     }
 
-    const DeepSeekSettings deepseek = GetDeepSeekSettings();
-    if (deepseek.base_url.empty())
+    const OpenAICompatibleSettings openai = GetOpenAICompatibleSettings();
+    if (openai.base_url.empty())
     {
-        error = "ai.deepseek.base_url can not be empty";
+        error = "ai.openai_compatible.base_url can not be empty";
         return false;
     }
-    if (deepseek.api_key.empty())
+    if (openai.api_key.empty())
     {
-        error = "deepseek api key is empty, configure ai.deepseek.api_key or DEEPSEEK_API_KEY";
+        error = "openai-compatible api key is empty, configure ai.openai_compatible.api_key"
+                " or OPENAI_COMPATIBLE_API_KEY / OPENAI_API_KEY";
         return false;
     }
-    if (deepseek.default_model.empty())
+    if (openai.default_model.empty())
     {
-        error = "ai.deepseek.default_model can not be empty";
+        error = "ai.openai_compatible.default_model can not be empty";
         return false;
     }
 

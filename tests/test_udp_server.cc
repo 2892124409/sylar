@@ -7,14 +7,14 @@
  * 2. 多地址绑定
  */
 
-#include "sylar/net/udp_server.h"
-#include "sylar/net/socket.h"
-#include "sylar/net/address.h"
 #include "log/logger.h"
-#include "sylar/fiber/iomanager.h"
 #include "sylar/fiber/hook.h"
-#include <iostream>
+#include "sylar/fiber/iomanager.h"
+#include "sylar/net/address.h"
+#include "sylar/net/socket.h"
+#include "sylar/net/udp_server.h"
 #include <cstring>
+#include <iostream>
 
 // ============================================================================
 // 全局日志器
@@ -31,26 +31,26 @@ static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
  */
 class EchoUdpServer : public sylar::net::UdpServer
 {
-public:
+  public:
     typedef std::shared_ptr<EchoUdpServer> ptr;
 
-    EchoUdpServer(sylar::IOManager *io_worker = sylar::IOManager::GetThis(),
-                  sylar::IOManager *recv_worker = sylar::IOManager::GetThis())
+    EchoUdpServer(sylar::IOManager* io_worker = sylar::IOManager::GetThis(),
+                  sylar::IOManager* recv_worker = sylar::IOManager::GetThis())
         : UdpServer(io_worker, recv_worker)
     {
         setName("EchoUdpServer/1.0.0");
     }
 
-protected:
+  protected:
     /**
      * @brief 处理数据报 - Echo 实现
      */
-    virtual void handleDatagram(const void *data, size_t len,
+    virtual void handleDatagram(const void* data, size_t len,
                                 sylar::Address::ptr from, sylar::Socket::ptr sock) override
     {
         std::cout << "[EchoUdpServer] received " << len << " bytes from "
                   << from->toString() << ": "
-                  << std::string((const char *)data, len) << "\n";
+                  << std::string((const char*)data, len) << "\n";
 
         // Echo 回去
         int n = sock ? sock->sendTo(data, len, from) : -1;
@@ -90,7 +90,7 @@ void test_echo_udp_server()
     if (!server->bind(addrs, fails))
     {
         std::cout << "[服务器] bind fail\n";
-        for (auto &addr : fails)
+        for (auto& addr : fails)
         {
             std::cout << "  绑定失败: " << addr->toString() << "\n";
         }
@@ -157,7 +157,7 @@ void test_echo_udp_server()
 // 主函数
 // ============================================================================
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     std::cout << "========================================\n";
     std::cout << "  UdpServer 模块测试\n";

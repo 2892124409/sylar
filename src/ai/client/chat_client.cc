@@ -39,7 +39,7 @@ struct StreamResult
     std::string error;
 };
 
-std::string Trim(const std::string &value)
+std::string Trim(const std::string& value)
 {
     size_t begin = 0;
     while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin])))
@@ -55,22 +55,17 @@ std::string Trim(const std::string &value)
     return value.substr(begin, end - begin);
 }
 
-bool IsLocalBaseUrl(const std::string &base_url)
+bool IsLocalBaseUrl(const std::string& base_url)
 {
-    return base_url.compare(0, 16, "http://127.0.0.1") == 0
-           || base_url.compare(0, 17, "https://127.0.0.1") == 0
-           || base_url.compare(0, 16, "http://localhost") == 0
-           || base_url.compare(0, 17, "https://localhost") == 0
-           || base_url.compare(0, 11, "http://[::1]") == 0
-           || base_url.compare(0, 12, "https://[::1]") == 0;
+    return base_url.compare(0, 16, "http://127.0.0.1") == 0 || base_url.compare(0, 17, "https://127.0.0.1") == 0 || base_url.compare(0, 16, "http://localhost") == 0 || base_url.compare(0, 17, "https://localhost") == 0 || base_url.compare(0, 11, "http://[::1]") == 0 || base_url.compare(0, 12, "https://[::1]") == 0;
 }
 
-std::string DumpJsonSafe(const nlohmann::json &value)
+std::string DumpJsonSafe(const nlohmann::json& value)
 {
     return value.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
-void PrintUsage(const char *argv0)
+void PrintUsage(const char* argv0)
 {
     std::cout
         << "Usage: " << argv0 << " [options]\n"
@@ -88,16 +83,16 @@ void PrintUsage(const char *argv0)
         << "  /stream on|off           Toggle stream mode\n";
 }
 
-bool ParseDouble(const std::string &text, double &out)
+bool ParseDouble(const std::string& text, double& out)
 {
-    char *end = nullptr;
+    char* end = nullptr;
     out = std::strtod(text.c_str(), &end);
     return end && *end == '\0';
 }
 
-bool ParseUint32(const std::string &text, uint32_t &out)
+bool ParseUint32(const std::string& text, uint32_t& out)
 {
-    char *end = nullptr;
+    char* end = nullptr;
     unsigned long value = std::strtoul(text.c_str(), &end, 10);
     if (!end || *end != '\0' || value > 0xFFFFFFFFul)
     {
@@ -107,7 +102,7 @@ bool ParseUint32(const std::string &text, uint32_t &out)
     return true;
 }
 
-bool ParseArgs(int argc, char **argv, Options &opts)
+bool ParseArgs(int argc, char** argv, Options& opts)
 {
     for (int i = 1; i < argc; ++i)
     {
@@ -173,23 +168,23 @@ bool ParseArgs(int argc, char **argv, Options &opts)
     return true;
 }
 
-size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *userp)
+size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
 {
     size_t total = size * nmemb;
-    std::string *buffer = static_cast<std::string *>(userp);
-    buffer->append(static_cast<const char *>(contents), total);
+    std::string* buffer = static_cast<std::string*>(userp);
+    buffer->append(static_cast<const char*>(contents), total);
     return total;
 }
 
 class SseParser
 {
-public:
-    explicit SseParser(StreamResult *result)
+  public:
+    explicit SseParser(StreamResult* result)
         : m_result(result)
     {
     }
 
-    bool OnChunk(const char *data, size_t len)
+    bool OnChunk(const char* data, size_t len)
     {
         m_buffer.append(data, len);
         size_t pos = 0;
@@ -236,7 +231,7 @@ public:
         return true;
     }
 
-private:
+  private:
     void DispatchEvent()
     {
         if (m_event.empty() && m_data.empty())
@@ -277,25 +272,25 @@ private:
         m_data.clear();
     }
 
-private:
-    StreamResult *m_result;
+  private:
+    StreamResult* m_result;
     std::string m_buffer;
     std::string m_event;
     std::string m_data;
 };
 
-size_t SseWriteCallback(void *contents, size_t size, size_t nmemb, void *userp)
+size_t SseWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
 {
     size_t total = size * nmemb;
-    SseParser *parser = static_cast<SseParser *>(userp);
-    parser->OnChunk(static_cast<const char *>(contents), total);
+    SseParser* parser = static_cast<SseParser*>(userp);
+    parser->OnChunk(static_cast<const char*>(contents), total);
     return total;
 }
 
 class ApiClient
 {
-public:
-    explicit ApiClient(const std::string &base_url)
+  public:
+    explicit ApiClient(const std::string& base_url)
         : m_base_url(base_url)
     {
         m_curl = curl_easy_init();
@@ -333,16 +328,16 @@ public:
         return RequestJson("GET", m_base_url + "/api/v1/healthz", "");
     }
 
-    HttpResult ChatCompletions(const nlohmann::json &payload)
+    HttpResult ChatCompletions(const nlohmann::json& payload)
     {
         return RequestJson("POST", m_base_url + "/api/v1/chat/completions", DumpJsonSafe(payload));
     }
 
-    StreamResult ChatStream(const nlohmann::json &payload)
+    StreamResult ChatStream(const nlohmann::json& payload)
     {
         StreamResult result;
 
-        struct curl_slist *headers = nullptr;
+        struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
 
         curl_easy_setopt(m_curl, CURLOPT_HTTPHEADER, headers);
@@ -370,20 +365,20 @@ public:
         return result;
     }
 
-    HttpResult History(const std::string &conversation_id, uint32_t limit)
+    HttpResult History(const std::string& conversation_id, uint32_t limit)
     {
         std::ostringstream url;
         url << m_base_url << "/api/v1/chat/history/" << conversation_id << "?limit=" << limit;
         return RequestJson("GET", url.str(), "");
     }
 
-private:
-    HttpResult RequestJson(const std::string &method, const std::string &url, const std::string &body)
+  private:
+    HttpResult RequestJson(const std::string& method, const std::string& url, const std::string& body)
     {
         HttpResult result;
         result.body.clear();
 
-        struct curl_slist *headers = nullptr;
+        struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
 
         curl_easy_setopt(m_curl, CURLOPT_HTTPHEADER, headers);
@@ -416,14 +411,14 @@ private:
         return result;
     }
 
-private:
+  private:
     std::string m_base_url;
-    CURL *m_curl = nullptr;
+    CURL* m_curl = nullptr;
 };
 
-nlohmann::json BuildChatPayload(const std::string &message,
-                                const Options &opts,
-                                const std::string &conversation_id)
+nlohmann::json BuildChatPayload(const std::string& message,
+                                const Options& opts,
+                                const std::string& conversation_id)
 {
     nlohmann::json payload;
     payload["message"] = message;
@@ -443,7 +438,7 @@ nlohmann::json BuildChatPayload(const std::string &message,
     return payload;
 }
 
-void PrintJsonIfPossible(const std::string &text)
+void PrintJsonIfPossible(const std::string& text)
 {
     nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
     if (!parsed.is_discarded())
@@ -458,7 +453,7 @@ void PrintJsonIfPossible(const std::string &text)
 
 } // namespace
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     bool curl_initialized = false;
 
@@ -630,7 +625,7 @@ int main(int argc, char **argv)
             std::cout << "Conversation id: " << conversation_id << "\n";
         }
     }
-    catch (const std::exception &ex)
+    catch (const std::exception& ex)
     {
         std::cerr << "Fatal: " << ex.what() << "\n";
         if (curl_initialized)

@@ -1,8 +1,8 @@
-#include <iostream>
-#include "log/logger.h"
 #include "../sylar/base/util.h"
+#include "log/logger.h"
+#include <iostream>
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     // 1. 获取 root 日志器
     base::Logger::ptr logger = BASE_LOG_ROOT();

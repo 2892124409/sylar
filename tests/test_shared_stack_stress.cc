@@ -4,8 +4,8 @@
  */
 
 #include "config/config.h"
-#include "sylar/fiber/scheduler.h"
 #include "log/logger.h"
+#include "sylar/fiber/scheduler.h"
 
 #include <atomic>
 #include <cassert>
@@ -39,7 +39,7 @@ static void deep_stack_job(int depth)
     {
         int step = g_stress_steps.fetch_add(1) + 1;
         BASE_LOG_INFO(g_logger) << "shared_stack_stress step=" << step
-                                 << " fiber_id=" << sylar::Fiber::GetFiberId();
+                                << " fiber_id=" << sylar::Fiber::GetFiberId();
         if (i < 9)
         {
             sylar::Fiber::YieldToReady();
@@ -57,7 +57,8 @@ int main()
 
     sylar::Scheduler sc(1, true, "shared_stack_stress");
     sc.start();
-    sc.schedule([]() { deep_stack_job(8); });
+    sc.schedule([]()
+                { deep_stack_job(8); });
     sc.stop();
 
     base::Config::Lookup<bool>("fiber.use_shared_stack", false, "fiber use thread-bound shared stack")

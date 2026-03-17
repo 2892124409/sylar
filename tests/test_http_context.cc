@@ -13,63 +13,63 @@ static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 namespace
 {
 
-    class FakeSocketStream : public sylar::SocketStream
+class FakeSocketStream : public sylar::SocketStream
+{
+  public:
+    FakeSocketStream(const std::vector<std::string>& chunks)
+        : sylar::SocketStream(sylar::Socket::ptr(), false), m_chunks(chunks), m_index(0), m_offset(0), m_readCount(0)
     {
-    public:
-        FakeSocketStream(const std::vector<std::string> &chunks)
-            : sylar::SocketStream(sylar::Socket::ptr(), false), m_chunks(chunks), m_index(0), m_offset(0), m_readCount(0)
-        {
-        }
+    }
 
-        virtual int read(void *buffer, size_t length) override
+    virtual int read(void* buffer, size_t length) override
+    {
+        ++m_readCount;
+        if (m_index >= m_chunks.size())
         {
-            ++m_readCount;
-            if (m_index >= m_chunks.size())
-            {
-                return 0;
-            }
-            const std::string &chunk = m_chunks[m_index];
-            size_t size = std::min(length, chunk.size() - m_offset);
-            std::memcpy(buffer, chunk.data() + m_offset, size);
-            m_offset += size;
-            if (m_offset == chunk.size())
-            {
-                ++m_index;
-                m_offset = 0;
-            }
-            return static_cast<int>(size);
+            return 0;
         }
-
-        virtual int read(sylar::ByteArray::ptr, size_t) override
+        const std::string& chunk = m_chunks[m_index];
+        size_t size = std::min(length, chunk.size() - m_offset);
+        std::memcpy(buffer, chunk.data() + m_offset, size);
+        m_offset += size;
+        if (m_offset == chunk.size())
         {
-            return -1;
+            ++m_index;
+            m_offset = 0;
         }
+        return static_cast<int>(size);
+    }
 
-        virtual int write(const void *, size_t) override
-        {
-            return -1;
-        }
+    virtual int read(sylar::ByteArray::ptr, size_t) override
+    {
+        return -1;
+    }
 
-        virtual int write(sylar::ByteArray::ptr, size_t) override
-        {
-            return -1;
-        }
+    virtual int write(const void*, size_t) override
+    {
+        return -1;
+    }
 
-        virtual void close() override
-        {
-        }
+    virtual int write(sylar::ByteArray::ptr, size_t) override
+    {
+        return -1;
+    }
 
-        size_t getReadCount() const
-        {
-            return m_readCount;
-        }
+    virtual void close() override
+    {
+    }
 
-    private:
-        std::vector<std::string> m_chunks;
-        size_t m_index;
-        size_t m_offset;
-        size_t m_readCount;
-    };
+    size_t getReadCount() const
+    {
+        return m_readCount;
+    }
+
+  private:
+    std::vector<std::string> m_chunks;
+    size_t m_index;
+    size_t m_offset;
+    size_t m_readCount;
+};
 
 } // namespace
 

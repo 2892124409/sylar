@@ -1,5 +1,5 @@
-#include "http/router/servlet.h"
 #include "http/core/http_error.h"
+#include "http/router/servlet.h"
 #include "log/logger.h"
 
 #include <cassert>
@@ -387,15 +387,10 @@ void test_exception_cleanup()
                                      http::HttpSession::ptr)
                                  {
                                      post_called = true;
-                                     rsp->setHeader("X-Post", "1");
-                                 });
+                                     rsp->setHeader("X-Post", "1"); });
 
-    dispatch->addServlet("/throw", [](http::HttpRequest::ptr,
-                                       http::HttpResponse::ptr,
-                                       http::HttpSession::ptr) -> int32_t
-                         {
-                             throw std::runtime_error("dispatch exception");
-                         });
+    dispatch->addServlet("/throw", [](http::HttpRequest::ptr, http::HttpResponse::ptr, http::HttpSession::ptr) -> int32_t
+                         { throw std::runtime_error("dispatch exception"); });
 
     http::HttpRequest::ptr req(new http::HttpRequest());
     http::HttpResponse::ptr rsp(new http::HttpResponse());
@@ -406,7 +401,7 @@ void test_exception_cleanup()
     {
         dispatch->handle(req, rsp, http::HttpSession::ptr());
     }
-    catch (const std::exception &)
+    catch (const std::exception&)
     {
         caught = true;
     }

@@ -5,10 +5,10 @@ ai:
     enable_ssl: false
     ssl_cert_file: ""
     ssl_key_file: ""
-  deepseek:
-    base_url: https://api.deepseek.com/v1
-    api_key: "YOUR_DEEPSEEK_API_KEY"
-    default_model: deepseek-chat
+  openai_compatible:
+    base_url: https://api.openai.com/v1
+    api_key: "YOUR_OPENAI_COMPATIBLE_API_KEY"
+    default_model: gpt-4o-mini
     connect_timeout_ms: 3000
     request_timeout_ms: 120000
   chat:
@@ -31,3 +31,17 @@ ai:
     queue_capacity: 10000
     flush_interval_ms: 200
     batch_size: 128
+
+# Scheduler/IO defaults:
+# - iomanager.use_caller: true  -> single IOM mode in ai/main.cc (io=accept)
+# - fiber.pool.enabled: false   -> matches current benchmark-preferred default
+# You can override these values per deployment needs.
+iomanager:
+  use_caller: true
+
+fiber:
+  pool:
+    enabled: false
+    max_size: 1000
+    min_keep: 10
+    idle_timeout: 60000

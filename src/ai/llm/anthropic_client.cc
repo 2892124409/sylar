@@ -1,0 +1,564 @@
+#include "ai/llm/anthropic_client.h"
+
+#include "log/logger.h"
+
+#include <curl/curl.h>
+#include <nlohmann/json.hpp>
+
+#include <mutex>
+#include <sstream>
+
+/**
+ * @file anthropic_client.cc
+ * @brief Anthropic Messages API 客户端实现。
+ */
+
+namespace ai
+{
+namespace llm
+{
+
+static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
+
+namespace
+{
+
+struct SyncWriteContext
+{
+    std::string response;
+};
+
+struct StreamWriteContext
+{
+    LlmClient::DeltaCallback on_delta;
+    std::string line_buffer;
+    std::string assembled;
+    std::string model;
+    std::string finish_reason;
+    uint64_t prompt_tokens = 0;
+    uint64_t completion_tokens = 0;
+    std::string parse_error;
+    bool callback_aborted = false;
+};
+
+void EnsureCurlGlobalInit()
+{
+    static std::once_flag s_init_flag;
+    std::call_once(s_init_flag, []()
+                   { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
+
+std::string Trim(const std::string& value)
+{
+    size_t begin = 0;
+    while (begin < value.size() && (value[begin] == ' ' || value[begin] == '\t' || value[begin] == '\r'))
+    {
+        ++begin;
+    }
+    size_t end = value.size();
+    while (end > begin && (value[end - 1] == ' ' || value[end - 1] == '\t' || value[end - 1] == '\r'))
+    {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+std::string BuildApiKeyHeader(const std::string& api_key)
+{
+    return "x-api-key: " + api_key;
+}
+
+std::string BuildApiVersionHeader(const std::string& api_version)
+{
+    return "anthropic-version: " + api_version;
+}
+
+size_t SyncWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
+{
+    size_t total = size * nmemb;
+    SyncWriteContext* ctx = static_cast<SyncWriteContext*>(userp);
+    ctx->response.append(static_cast<const char*>(contents), total);
+    return total;
+}
+
+bool TryParseErrorNode(const nlohmann::json& node, std::string& error)
+{
+    if (!node.is_object())
+    {
+        return false;
+    }
+
+    if (node.contains("error") && node["error"].is_object())
+    {
+        const nlohmann::json& err = node["error"];
+        if (err.contains("message") && err["message"].is_string())
+        {
+            error = err["message"].get<std::string>();
+        }
+        else
+        {
+            error = "anthropic returned error";
+        }
+        return true;
+    }
+
+    if (node.contains("type") && node["type"].is_string() && node["type"].get<std::string>() == "error")
+    {
+        if (node.contains("message") && node["message"].is_string())
+        {
+            error = node["message"].get<std::string>();
+        }
+        else
+        {
+            error = "anthropic stream error";
+        }
+        return true;
+    }
+
+    return false;
+}
+
+bool ExtractTextFromContentArray(const nlohmann::json& content, std::string& out)
+{
+    if (!content.is_array())
+    {
+        return false;
+    }
+
+    bool has_text = false;
+    for (size_t i = 0; i < content.size(); ++i)
+    {
+        if (!content[i].is_object())
+        {
+            continue;
+        }
+        const nlohmann::json& item = content[i];
+        if (item.contains("type") && item["type"].is_string() && item["type"].get<std::string>() == "text" && item.contains("text") && item["text"].is_string())
+        {
+            out.append(item["text"].get<std::string>());
+            has_text = true;
+        }
+    }
+    return has_text;
+}
+
+void FillUsageFromNode(const nlohmann::json& usage, uint64_t& prompt_tokens, uint64_t& completion_tokens)
+{
+    if (!usage.is_object())
+    {
+        return;
+    }
+
+    if (usage.contains("input_tokens") && usage["input_tokens"].is_number_unsigned())
+    {
+        prompt_tokens = usage["input_tokens"].get<uint64_t>();
+    }
+    if (usage.contains("output_tokens") && usage["output_tokens"].is_number_unsigned())
+    {
+        completion_tokens = usage["output_tokens"].get<uint64_t>();
+    }
+}
+
+nlohmann::json BuildRequestBody(const LlmCompletionRequest& request, bool stream)
+{
+    nlohmann::json body;
+    body["model"] = request.model;
+    body["temperature"] = request.temperature;
+    body["max_tokens"] = request.max_tokens;
+    body["stream"] = stream;
+
+    std::string system_prompt;
+    body["messages"] = nlohmann::json::array();
+    for (size_t i = 0; i < request.messages.size(); ++i)
+    {
+        const common::ChatMessage& message = request.messages[i];
+        if (message.role == "system")
+        {
+            if (!system_prompt.empty())
+            {
+                system_prompt.append("\n\n");
+            }
+            system_prompt.append(message.content);
+            continue;
+        }
+
+        nlohmann::json item;
+        item["role"] = (message.role == "assistant") ? "assistant" : "user";
+        item["content"] = message.content;
+        body["messages"].push_back(item);
+    }
+
+    if (!system_prompt.empty())
+    {
+        body["system"] = system_prompt;
+    }
+    return body;
+}
+
+bool ParseSyncResponse(const std::string& response_text, LlmCompletionResult& result, std::string& error)
+{
+    nlohmann::json parsed = nlohmann::json::parse(response_text, nullptr, false);
+    if (parsed.is_discarded())
+    {
+        error = "anthropic response is not valid json";
+        return false;
+    }
+
+    if (TryParseErrorNode(parsed, error))
+    {
+        return false;
+    }
+
+    if (parsed.contains("model") && parsed["model"].is_string())
+    {
+        result.model = parsed["model"].get<std::string>();
+    }
+
+    if (parsed.contains("stop_reason") && parsed["stop_reason"].is_string())
+    {
+        result.finish_reason = parsed["stop_reason"].get<std::string>();
+    }
+
+    if (!parsed.contains("content"))
+    {
+        error = "anthropic response missing content";
+        return false;
+    }
+
+    if (!ExtractTextFromContentArray(parsed["content"], result.content))
+    {
+        error = "anthropic response missing content.text";
+        return false;
+    }
+
+    if (parsed.contains("usage"))
+    {
+        FillUsageFromNode(parsed["usage"], result.prompt_tokens, result.completion_tokens);
+    }
+
+    return true;
+}
+
+bool HandleStreamDataLine(const std::string& line, StreamWriteContext& ctx)
+{
+    if (line.empty())
+    {
+        return true;
+    }
+
+    const std::string prefix = "data:";
+    if (line.compare(0, prefix.size(), prefix) != 0)
+    {
+        return true;
+    }
+
+    std::string payload = Trim(line.substr(prefix.size()));
+    if (payload.empty() || payload == "[DONE]")
+    {
+        return true;
+    }
+
+    nlohmann::json chunk = nlohmann::json::parse(payload, nullptr, false);
+    if (chunk.is_discarded())
+    {
+        ctx.parse_error = "invalid anthropic stream chunk json";
+        return false;
+    }
+
+    if (TryParseErrorNode(chunk, ctx.parse_error))
+    {
+        return false;
+    }
+
+    if (chunk.contains("model") && chunk["model"].is_string())
+    {
+        ctx.model = chunk["model"].get<std::string>();
+    }
+
+    if (chunk.contains("message") && chunk["message"].is_object())
+    {
+        const nlohmann::json& message = chunk["message"];
+        if (message.contains("model") && message["model"].is_string())
+        {
+            ctx.model = message["model"].get<std::string>();
+        }
+        if (message.contains("usage"))
+        {
+            FillUsageFromNode(message["usage"], ctx.prompt_tokens, ctx.completion_tokens);
+        }
+        if (message.contains("stop_reason") && message["stop_reason"].is_string())
+        {
+            ctx.finish_reason = message["stop_reason"].get<std::string>();
+        }
+    }
+
+    if (chunk.contains("usage"))
+    {
+        FillUsageFromNode(chunk["usage"], ctx.prompt_tokens, ctx.completion_tokens);
+    }
+
+    if (chunk.contains("stop_reason") && chunk["stop_reason"].is_string())
+    {
+        ctx.finish_reason = chunk["stop_reason"].get<std::string>();
+    }
+
+    if (chunk.contains("delta") && chunk["delta"].is_object())
+    {
+        const nlohmann::json& delta = chunk["delta"];
+        if (delta.contains("stop_reason") && delta["stop_reason"].is_string())
+        {
+            ctx.finish_reason = delta["stop_reason"].get<std::string>();
+        }
+        if (delta.contains("text") && delta["text"].is_string())
+        {
+            const std::string text = delta["text"].get<std::string>();
+            if (!text.empty())
+            {
+                ctx.assembled.append(text);
+                if (ctx.on_delta && !ctx.on_delta(text))
+                {
+                    ctx.callback_aborted = true;
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (chunk.contains("content_block") && chunk["content_block"].is_object())
+    {
+        const nlohmann::json& block = chunk["content_block"];
+        if (block.contains("type") && block["type"].is_string() && block["type"].get<std::string>() == "text" && block.contains("text") && block["text"].is_string())
+        {
+            const std::string text = block["text"].get<std::string>();
+            if (!text.empty())
+            {
+                ctx.assembled.append(text);
+                if (ctx.on_delta && !ctx.on_delta(text))
+                {
+                    ctx.callback_aborted = true;
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+size_t StreamWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
+{
+    size_t total = size * nmemb;
+    StreamWriteContext* ctx = static_cast<StreamWriteContext*>(userp);
+    ctx->line_buffer.append(static_cast<const char*>(contents), total);
+
+    size_t pos = 0;
+    while (true)
+    {
+        size_t line_end = ctx->line_buffer.find('\n', pos);
+        if (line_end == std::string::npos)
+        {
+            break;
+        }
+
+        std::string line = ctx->line_buffer.substr(pos, line_end - pos);
+        if (!line.empty() && line[line.size() - 1] == '\r')
+        {
+            line.erase(line.size() - 1);
+        }
+
+        if (!HandleStreamDataLine(line, *ctx))
+        {
+            return 0;
+        }
+
+        pos = line_end + 1;
+    }
+
+    if (pos > 0)
+    {
+        ctx->line_buffer.erase(0, pos);
+    }
+    return total;
+}
+
+} // namespace
+
+AnthropicClient::AnthropicClient(const AnthropicSettings& settings)
+    : m_settings(settings)
+{
+    EnsureCurlGlobalInit();
+}
+
+std::string AnthropicClient::BuildMessagesUrl() const
+{
+    if (m_settings.base_url.empty())
+    {
+        return "https://api.anthropic.com/v1/messages";
+    }
+
+    const std::string& base_url = m_settings.base_url;
+    if (base_url.size() >= 3 && base_url.compare(base_url.size() - 3, 3, "/v1") == 0)
+    {
+        return base_url + "/messages";
+    }
+    if (base_url.size() >= 4 && base_url.compare(base_url.size() - 4, 4, "/v1/") == 0)
+    {
+        return base_url + "messages";
+    }
+    if (!base_url.empty() && base_url[base_url.size() - 1] == '/')
+    {
+        return base_url + "v1/messages";
+    }
+    return base_url + "/v1/messages";
+}
+
+bool AnthropicClient::Complete(const LlmCompletionRequest& request,
+                               LlmCompletionResult& result,
+                               std::string& error)
+{
+    CURL* curl = curl_easy_init();
+    if (!curl)
+    {
+        error = "curl_easy_init failed";
+        return false;
+    }
+
+    SyncWriteContext write_ctx;
+    nlohmann::json body = BuildRequestBody(request, false);
+    const std::string payload = body.dump();
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, BuildApiKeyHeader(m_settings.api_key).c_str());
+    headers = curl_slist_append(headers, BuildApiVersionHeader(m_settings.api_version).c_str());
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, BuildMessagesUrl().c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, SyncWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
+
+    CURLcode code = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (code != CURLE_OK)
+    {
+        error = std::string("anthropic request failed: ") + curl_easy_strerror(code);
+        return false;
+    }
+
+    if (http_code < 200 || http_code >= 300)
+    {
+        std::ostringstream ss;
+        ss << "anthropic http status " << http_code;
+        if (!write_ctx.response.empty())
+        {
+            ss << ", body=" << write_ctx.response;
+        }
+        error = ss.str();
+        return false;
+    }
+
+    if (!ParseSyncResponse(write_ctx.response, result, error))
+    {
+        BASE_LOG_ERROR(g_logger) << "Parse anthropic sync response failed, body=" << write_ctx.response;
+        return false;
+    }
+
+    if (result.model.empty())
+    {
+        result.model = request.model;
+    }
+
+    return true;
+}
+
+bool AnthropicClient::StreamComplete(const LlmCompletionRequest& request,
+                                     const DeltaCallback& on_delta,
+                                     LlmCompletionResult& result,
+                                     std::string& error)
+{
+    CURL* curl = curl_easy_init();
+    if (!curl)
+    {
+        error = "curl_easy_init failed";
+        return false;
+    }
+
+    StreamWriteContext write_ctx;
+    write_ctx.on_delta = on_delta;
+
+    nlohmann::json body = BuildRequestBody(request, true);
+    const std::string payload = body.dump();
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, BuildApiKeyHeader(m_settings.api_key).c_str());
+    headers = curl_slist_append(headers, BuildApiVersionHeader(m_settings.api_version).c_str());
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, BuildMessagesUrl().c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
+
+    CURLcode code = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (code != CURLE_OK)
+    {
+        if (write_ctx.callback_aborted)
+        {
+            error = "stream callback aborted";
+        }
+        else if (!write_ctx.parse_error.empty())
+        {
+            error = write_ctx.parse_error;
+        }
+        else
+        {
+            error = std::string("anthropic stream request failed: ") + curl_easy_strerror(code);
+        }
+        return false;
+    }
+
+    if (http_code < 200 || http_code >= 300)
+    {
+        std::ostringstream ss;
+        ss << "anthropic stream http status " << http_code;
+        error = ss.str();
+        return false;
+    }
+
+    if (!write_ctx.parse_error.empty())
+    {
+        error = write_ctx.parse_error;
+        return false;
+    }
+
+    result.content = write_ctx.assembled;
+    result.model = write_ctx.model.empty() ? request.model : write_ctx.model;
+    result.finish_reason = write_ctx.finish_reason;
+    result.prompt_tokens = write_ctx.prompt_tokens;
+    result.completion_tokens = write_ctx.completion_tokens;
+    return true;
+}
+
+} // namespace llm
+} // namespace ai

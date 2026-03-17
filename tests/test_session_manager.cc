@@ -1,7 +1,7 @@
-#include "http/session/session_manager.h"
 #include "http/core/http_framework_config.h"
-#include "sylar/fiber/iomanager.h"
+#include "http/session/session_manager.h"
 #include "log/logger.h"
+#include "sylar/fiber/iomanager.h"
 
 #include <assert.h>
 #include <atomic>
@@ -13,7 +13,8 @@
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 // 用例1：验证 create/get 的基础闭环。
-void test_create_and_get() {
+void test_create_and_get()
+{
     // 创建 SessionManager，最大非活跃时间设为 1000ms。
     http::SessionManager::ptr manager(new http::SessionManager(1000));
     // 创建一个新会话。
@@ -34,7 +35,8 @@ void test_create_and_get() {
 }
 
 // 用例2：验证 getOrCreate 的“命中复用/未命中新建”语义。
-void test_get_or_create_reuse() {
+void test_get_or_create_reuse()
+{
     // 创建 SessionManager。
     http::SessionManager::ptr manager(new http::SessionManager(1000));
 
@@ -66,7 +68,8 @@ void test_get_or_create_reuse() {
 }
 
 // 用例3：验证会话过期与 sweepExpired 行为。
-void test_expire_and_sweep() {
+void test_expire_and_sweep()
+{
     // 创建 SessionManager，过期时间设置得较短（20ms）以便测试。
     http::SessionManager::ptr manager(new http::SessionManager(20));
     // 连续创建两个会话。
@@ -90,7 +93,8 @@ void test_expire_and_sweep() {
 }
 
 // 用例4：验证定时器驱动的自动 sweep。
-void test_timer_sweep() {
+void test_timer_sweep()
+{
     // 创建单线程 IOManager，作为 TimerManager 使用。
     sylar::IOManager iom(1, false, "session_timer_test");
     // 创建 SessionManager，过期时间 30ms。
@@ -116,7 +120,8 @@ void test_timer_sweep() {
 }
 
 // 用例5：验证并发 create/get 的线程安全基础行为。
-void test_concurrent_access() {
+void test_concurrent_access()
+{
     // 创建 SessionManager。
     http::SessionManager::ptr manager(new http::SessionManager(1000));
     // 原子计数器：统计创建总数。
@@ -125,9 +130,11 @@ void test_concurrent_access() {
     std::vector<std::thread> threads;
 
     // 启动 4 个线程并发创建/读取会话。
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 4; ++i)
+    {
         // 把线程对象放入容器。
-        threads.push_back(std::thread([manager, &created]() {
+        threads.push_back(std::thread([manager, &created]()
+                                      {
             // 每个线程循环 100 次。
             for (int j = 0; j < 100; ++j) {
                 // 创建会话。
@@ -138,12 +145,12 @@ void test_concurrent_access() {
                 ++created;
                 // 断言刚创建的 SID 可以被 get 命中。
                 assert(manager->get(session->getId()));
-            }
-        }));
+            } }));
     }
 
     // 等待所有线程执行完成。
-    for (size_t i = 0; i < threads.size(); ++i) {
+    for (size_t i = 0; i < threads.size(); ++i)
+    {
         // join 第 i 个线程。
         threads[i].join();
     }
@@ -153,7 +160,8 @@ void test_concurrent_access() {
 }
 
 // 用例6：验证第四阶段新增的 SessionStorage 注入能力。
-void test_session_storage_injection() {
+void test_session_storage_injection()
+{
     // 构造默认内存存储实现。
     http::SessionStorage::ptr storage(new http::MemorySessionStorage());
     // 将 storage 注入 SessionManager。
@@ -179,7 +187,8 @@ void test_session_storage_injection() {
     assert(!storage->load(session->getId()));
 }
 
-void test_default_inactivity_timeout_from_config() {
+void test_default_inactivity_timeout_from_config()
+{
     uint64_t old_timeout = http::HttpFrameworkConfig::GetSessionInactivityTimeoutMs();
     http::HttpFrameworkConfig::SetSessionInactivityTimeoutMs(4321);
 
@@ -192,7 +201,8 @@ void test_default_inactivity_timeout_from_config() {
 }
 
 // 测试主函数：顺序执行所有 SessionManager 相关用例。
-int main() {
+int main()
+{
     // 运行 create/get 基础测试。
     test_create_and_get();
     // 运行 getOrCreate 复用测试。

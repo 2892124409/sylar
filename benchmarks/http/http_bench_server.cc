@@ -1,8 +1,8 @@
-#include "http/server/http_server.h"
 #include "http/core/http_error.h"
 #include "http/core/http_framework_config.h"
-#include "sylar/fiber/fiber_framework_config.h"
+#include "http/server/http_server.h"
 #include "log/logger.h"
+#include "sylar/fiber/fiber_framework_config.h"
 #include "sylar/fiber/hook.h"
 #include "sylar/net/address.h"
 
@@ -203,21 +203,28 @@ bool ParseArgs(int argc, char** argv, Options& options)
             continue;
         }
 
-        
-        if (ReadOptionValue(arg, i, argc, argv, "--shared-stack", value)) {
-            if (!ParseUint32(value, options.shared_stack)) return false;
+        if (ReadOptionValue(arg, i, argc, argv, "--shared-stack", value))
+        {
+            if (!ParseUint32(value, options.shared_stack))
+                return false;
             continue;
         }
-        if (ReadOptionValue(arg, i, argc, argv, "--fiber-pool", value)) {
-            if (!ParseUint32(value, options.fiber_pool)) return false;
+        if (ReadOptionValue(arg, i, argc, argv, "--fiber-pool", value))
+        {
+            if (!ParseUint32(value, options.fiber_pool))
+                return false;
             continue;
         }
-        if (ReadOptionValue(arg, i, argc, argv, "--fiber-stack-size", value)) {
-            if (!ParseUint32(value, options.fiber_stack_size) || options.fiber_stack_size < 64 * 1024) return false;
+        if (ReadOptionValue(arg, i, argc, argv, "--fiber-stack-size", value))
+        {
+            if (!ParseUint32(value, options.fiber_stack_size) || options.fiber_stack_size < 64 * 1024)
+                return false;
             continue;
         }
-        if (ReadOptionValue(arg, i, argc, argv, "--use-caller", value)) {
-            if (!ParseUint32(value, options.use_caller)) return false;
+        if (ReadOptionValue(arg, i, argc, argv, "--use-caller", value))
+        {
+            if (!ParseUint32(value, options.use_caller))
+                return false;
             continue;
         }
 
@@ -255,52 +262,53 @@ bool HasRequiredStringField(const YAML::Node& node, const char* key)
 void RegisterRoutes(const http::HttpServer::ptr& server)
 {
     server->getServletDispatch()->addPreInterceptor([](http::HttpRequest::ptr req,
-                                                      http::HttpResponse::ptr rsp,
-                                                      http::HttpSession::ptr) {
+                                                       http::HttpResponse::ptr rsp,
+                                                       http::HttpSession::ptr)
+                                                    {
         if (req->getPath() == "/blocked")
         {
             http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Blocked", "blocked by pre interceptor");
             return false;
         }
-        return true;
-    });
+        return true; });
 
     server->getServletDispatch()->addServlet("/ping", [](http::HttpRequest::ptr,
                                                          http::HttpResponse::ptr rsp,
-                                                         http::HttpSession::ptr) {
+                                                         http::HttpSession::ptr)
+                                             {
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("pong");
-        return 0;
-    });
+        return 0; });
 
     server->getServletDispatch()->addServlet("/user/me", [](http::HttpRequest::ptr,
                                                             http::HttpResponse::ptr rsp,
-                                                            http::HttpSession::ptr) {
+                                                            http::HttpSession::ptr)
+                                             {
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("exact-user");
-        return 0;
-    });
+        return 0; });
 
     server->getServletDispatch()->addParamServlet("/user/:id", [](http::HttpRequest::ptr req,
                                                                   http::HttpResponse::ptr rsp,
-                                                                  http::HttpSession::ptr) {
+                                                                  http::HttpSession::ptr)
+                                                  {
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("user:" + req->getRouteParam("id"));
-        return 0;
-    });
+        return 0; });
 
     server->getServletDispatch()->addServlet("/api/user/profile", [](http::HttpRequest::ptr,
-                                                                          http::HttpResponse::ptr rsp,
-                                                                          http::HttpSession::ptr) {
+                                                                     http::HttpResponse::ptr rsp,
+                                                                     http::HttpSession::ptr)
+                                             {
         usleep(20 * 1000); // simulate hook-friendly upstream wait
         rsp->setHeader("Content-Type", "application/json");
         rsp->setBody("{\"code\":0, \"msg\":\"ok\", \"data\":{\"id\":123, \"name\":\"sylar\"}}");
-        return 0;
-    });
+        return 0; });
 
     server->getServletDispatch()->addServlet("/api/data/upload", [](http::HttpRequest::ptr req,
                                                                     http::HttpResponse::ptr rsp,
-                                                                    http::HttpSession::ptr) {
+                                                                    http::HttpSession::ptr)
+                                             {
         if (req->getBody().empty()) {
             http::ApplyErrorResponse(rsp, http::HttpStatus::BAD_REQUEST, "Bad Request", "payload missing");
             return 0;
@@ -325,21 +333,21 @@ void RegisterRoutes(const http::HttpServer::ptr& server)
 
         rsp->setHeader("Content-Type", "application/json");
         rsp->setBody("{\"code\":0, \"msg\":\"upload success\"}");
-        return 0;
-    });
+        return 0; });
 
     server->getServletDispatch()->addServlet("/api/file/download", [](http::HttpRequest::ptr,
                                                                       http::HttpResponse::ptr rsp,
-                                                                      http::HttpSession::ptr) {
+                                                                      http::HttpSession::ptr)
+                                             {
         static const std::string large_payload(1024 * 1024, 'A'); // stable 1MB payload, avoids per-request allocation noise
         rsp->setHeader("Content-Type", "application/octet-stream");
         rsp->setBody(large_payload);
-        return 0;
-    });
+        return 0; });
 
     server->getServletDispatch()->addParamServlet("/sleep/:ms", [](http::HttpRequest::ptr req,
                                                                    http::HttpResponse::ptr rsp,
-                                                                   http::HttpSession::ptr) {
+                                                                   http::HttpSession::ptr)
+                                                  {
         uint32_t sleep_ms = 0;
         if (!ParseSleepMs(req->getRouteParam("ms"), sleep_ms))
         {
@@ -353,18 +361,17 @@ void RegisterRoutes(const http::HttpServer::ptr& server)
         }
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setBody("slept:" + std::to_string(sleep_ms));
-        return 0;
-    });
+        return 0; });
 
     server->getServletDispatch()->addServlet("/__admin/quit", [](http::HttpRequest::ptr,
                                                                  http::HttpResponse::ptr rsp,
-                                                                 http::HttpSession::ptr) {
+                                                                 http::HttpSession::ptr)
+                                             {
         g_stop_requested = 1;
         rsp->setHeader("Content-Type", "text/plain");
         rsp->setKeepAlive(false);
         rsp->setBody("shutting-down");
-        return 0;
-    });
+        return 0; });
 }
 
 } // namespace
@@ -399,11 +406,14 @@ int main(int argc, char** argv)
     sylar::IOManager::ptr io_worker;
     sylar::IOManager::ptr accept_worker;
 
-    if (options.use_caller) {
+    if (options.use_caller)
+    {
         // 单 IOM 架构 (Single Reactor)：总工作线程为 io_threads (包含主线程)
         io_worker.reset(new sylar::IOManager(options.io_threads, true, "sylar-http-worker"));
         accept_worker = io_worker;
-    } else {
+    }
+    else
+    {
         // 双 IOM 架构 (Main-Sub Reactor)：IO 与 Accept 线程池独立配置。
         io_worker.reset(new sylar::IOManager(options.io_threads, false, "sylar-http-io"));
         accept_worker.reset(new sylar::IOManager(options.accept_threads, false, "sylar-http-accept"));
@@ -434,9 +444,11 @@ int main(int argc, char** argv)
               << " use_caller=" << options.use_caller
               << std::endl;
 
-    if (options.use_caller) {
+    if (options.use_caller)
+    {
         sylar::Timer::ptr stop_timer;
-        stop_timer = io_worker->addTimer(500, [&]() {
+        stop_timer = io_worker->addTimer(500, [&]()
+                                         {
             if (g_stop_requested) {
                 std::cout << "http_bench_server (caller mode) shutting down" << std::endl;
                 server->stop();
@@ -446,19 +458,23 @@ int main(int argc, char** argv)
                 if (stop_timer) {
                     stop_timer->cancel();
                 }
-            }
-        }, true);
-        io_worker->stop(); 
-    } else {
-        while (!g_stop_requested) {
+            } }, true);
+        io_worker->stop();
+    }
+    else
+    {
+        while (!g_stop_requested)
+        {
             usleep(200 * 1000);
         }
         std::cout << "http_bench_server shutting down" << std::endl;
         server->stop();
-        if (accept_worker) {
+        if (accept_worker)
+        {
             accept_worker->stop();
         }
-        if (io_worker && io_worker != accept_worker) {
+        if (io_worker && io_worker != accept_worker)
+        {
             io_worker->stop();
         }
     }

@@ -5,8 +5,8 @@
  * @date 2026-02-14
  */
 
-#include "sylar/base/endian.h"
 #include "log/logger.h"
+#include "sylar/base/endian.h"
 #include <iostream>
 
 static base::Logger::ptr g_logger = BASE_LOG_ROOT();
@@ -19,19 +19,19 @@ void test_byteswap()
     uint16_t val16 = 0x1234;
     uint16_t swapped16 = sylar::byteswap(val16);
     BASE_LOG_INFO(g_logger) << "uint16_t: 0x" << std::hex << val16
-                             << " -> 0x" << swapped16 << std::dec;
+                            << " -> 0x" << swapped16 << std::dec;
 
     // 测试 32 位
     uint32_t val32 = 0x12345678;
     uint32_t swapped32 = sylar::byteswap(val32);
     BASE_LOG_INFO(g_logger) << "uint32_t: 0x" << std::hex << val32
-                             << " -> 0x" << swapped32 << std::dec;
+                            << " -> 0x" << swapped32 << std::dec;
 
     // 测试 64 位
     uint64_t val64 = 0x123456789ABCDEF0;
     uint64_t swapped64 = sylar::byteswap(val64);
     BASE_LOG_INFO(g_logger) << "uint64_t: 0x" << std::hex << val64
-                             << " -> 0x" << swapped64 << std::dec;
+                            << " -> 0x" << swapped64 << std::dec;
 }
 
 void test_conditional_swap()
@@ -49,12 +49,12 @@ void test_conditional_swap()
     // 在小端机器上会转换，大端机器上不转换
     uint32_t result1 = sylar::byteswapOnLittleEndian(val);
     BASE_LOG_INFO(g_logger) << "byteswapOnLittleEndian(0x" << std::hex << val
-                             << ") = 0x" << result1 << std::dec;
+                            << ") = 0x" << result1 << std::dec;
 
     // 在大端机器上会转换，小端机器上不转换
     uint32_t result2 = sylar::byteswapOnBigEndian(val);
     BASE_LOG_INFO(g_logger) << "byteswapOnBigEndian(0x" << std::hex << val
-                             << ") = 0x" << result2 << std::dec;
+                            << ") = 0x" << result2 << std::dec;
 }
 
 void test_network_byte_order()

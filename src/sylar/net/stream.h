@@ -8,124 +8,124 @@
 #ifndef __SYLAR_STREAM_H__
 #define __SYLAR_STREAM_H__
 
-#include <memory>
 #include "bytearray.h"
+#include <memory>
 
 namespace sylar
 {
 
+/**
+ * @brief 流结构抽象基类
+ * @details 提供统一的读写接口，readFixSize/writeFixSize 解决 TCP 部分读写问题
+ */
+class Stream
+{
+  public:
+    typedef std::shared_ptr<Stream> ptr;
+
     /**
-     * @brief 流结构抽象基类
-     * @details 提供统一的读写接口，readFixSize/writeFixSize 解决 TCP 部分读写问题
+     * @brief 析构函数
      */
-    class Stream
-    {
-    public:
-        typedef std::shared_ptr<Stream> ptr;
+    virtual ~Stream() {}
 
-        /**
-         * @brief 析构函数
-         */
-        virtual ~Stream() {}
+    /**
+     * @brief 读数据
+     * @param[out] buffer 接收数据的内存
+     * @param[in] length 接收数据的内存大小
+     * @return
+     *      @retval >0 返回接收到的数据的实际大小
+     *      @retval =0 被关闭
+     *      @retval <0 出现流错误
+     */
+    virtual int read(void* buffer, size_t length) = 0;
 
-        /**
-         * @brief 读数据
-         * @param[out] buffer 接收数据的内存
-         * @param[in] length 接收数据的内存大小
-         * @return
-         *      @retval >0 返回接收到的数据的实际大小
-         *      @retval =0 被关闭
-         *      @retval <0 出现流错误
-         */
-        virtual int read(void *buffer, size_t length) = 0;
+    /**
+     * @brief 读数据
+     * @param[out] ba 接收数据的 ByteArray
+     * @param[in] length 接收数据的内存大小
+     * @return
+     *      @retval >0 返回接收到的数据的实际大小
+     *      @retval =0 被关闭
+     *      @retval <0 出现流错误
+     */
+    virtual int read(ByteArray::ptr ba, size_t length) = 0;
 
-        /**
-         * @brief 读数据
-         * @param[out] ba 接收数据的 ByteArray
-         * @param[in] length 接收数据的内存大小
-         * @return
-         *      @retval >0 返回接收到的数据的实际大小
-         *      @retval =0 被关闭
-         *      @retval <0 出现流错误
-         */
-        virtual int read(ByteArray::ptr ba, size_t length) = 0;
+    /**
+     * @brief 读固定长度的数据
+     * @details 内部循环调用 read()，直到读满 length 字节或出错
+     * @param[out] buffer 接收数据的内存
+     * @param[in] length 接收数据的内存大小
+     * @return
+     *      @retval >0 返回接收到的数据的实际大小
+     *      @retval =0 被关闭
+     *      @retval <0 出现流错误
+     */
+    virtual int readFixSize(void* buffer, size_t length);
 
-        /**
-         * @brief 读固定长度的数据
-         * @details 内部循环调用 read()，直到读满 length 字节或出错
-         * @param[out] buffer 接收数据的内存
-         * @param[in] length 接收数据的内存大小
-         * @return
-         *      @retval >0 返回接收到的数据的实际大小
-         *      @retval =0 被关闭
-         *      @retval <0 出现流错误
-         */
-        virtual int readFixSize(void *buffer, size_t length);
+    /**
+     * @brief 读固定长度的数据
+     * @details 内部循环调用 read()，直到读满 length 字节或出错
+     * @param[out] ba 接收数据的 ByteArray
+     * @param[in] length 接收数据的内存大小
+     * @return
+     *      @retval >0 返回接收到的数据的实际大小
+     *      @retval =0 被关闭
+     *      @retval <0 出现流错误
+     */
+    virtual int readFixSize(ByteArray::ptr ba, size_t length);
 
-        /**
-         * @brief 读固定长度的数据
-         * @details 内部循环调用 read()，直到读满 length 字节或出错
-         * @param[out] ba 接收数据的 ByteArray
-         * @param[in] length 接收数据的内存大小
-         * @return
-         *      @retval >0 返回接收到的数据的实际大小
-         *      @retval =0 被关闭
-         *      @retval <0 出现流错误
-         */
-        virtual int readFixSize(ByteArray::ptr ba, size_t length);
+    /**
+     * @brief 写数据
+     * @param[in] buffer 写数据的内存
+     * @param[in] length 写入数据的内存大小
+     * @return
+     *      @retval >0 返回写入到的数据的实际大小
+     *      @retval =0 被关闭
+     *      @retval <0 出现流错误
+     */
+    virtual int write(const void* buffer, size_t length) = 0;
 
-        /**
-         * @brief 写数据
-         * @param[in] buffer 写数据的内存
-         * @param[in] length 写入数据的内存大小
-         * @return
-         *      @retval >0 返回写入到的数据的实际大小
-         *      @retval =0 被关闭
-         *      @retval <0 出现流错误
-         */
-        virtual int write(const void *buffer, size_t length) = 0;
+    /**
+     * @brief 写数据
+     * @param[in] ba 写数据的 ByteArray
+     * @param[in] length 写入数据的内存大小
+     * @return
+     *      @retval >0 返回写入到的数据的实际大小
+     *      @retval =0 被关闭
+     *      @retval <0 出现流错误
+     */
+    virtual int write(ByteArray::ptr ba, size_t length) = 0;
 
-        /**
-         * @brief 写数据
-         * @param[in] ba 写数据的 ByteArray
-         * @param[in] length 写入数据的内存大小
-         * @return
-         *      @retval >0 返回写入到的数据的实际大小
-         *      @retval =0 被关闭
-         *      @retval <0 出现流错误
-         */
-        virtual int write(ByteArray::ptr ba, size_t length) = 0;
+    /**
+     * @brief 写固定长度的数据
+     * @details 内部循环调用 write()，直到写满 length 字节或出错
+     * @param[in] buffer 写数据的内存
+     * @param[in] length 写入数据的内存大小
+     * @return
+     *      @retval >0 返回写入到的数据的实际大小
+     *      @retval =0 被关闭
+     *      @retval <0 出现流错误
+     */
+    virtual int writeFixSize(const void* buffer, size_t length);
 
-        /**
-         * @brief 写固定长度的数据
-         * @details 内部循环调用 write()，直到写满 length 字节或出错
-         * @param[in] buffer 写数据的内存
-         * @param[in] length 写入数据的内存大小
-         * @return
-         *      @retval >0 返回写入到的数据的实际大小
-         *      @retval =0 被关闭
-         *      @retval <0 出现流错误
-         */
-        virtual int writeFixSize(const void *buffer, size_t length);
+    /**
+     * @brief 写固定长度的数据
+     * @details 内部循环调用 write()，直到写满 length 字节或出错
+     * @param[in] ba 写数据的 ByteArray
+     * @param[in] length 写入数据的内存大小
+     * @return
+     *      @retval >0 返回写入到的数据的实际大小
+     *      @retval =0 被关闭
+     *      @retval <0 出现流错误
+     */
+    virtual int writeFixSize(ByteArray::ptr ba, size_t length);
 
-        /**
-         * @brief 写固定长度的数据
-         * @details 内部循环调用 write()，直到写满 length 字节或出错
-         * @param[in] ba 写数据的 ByteArray
-         * @param[in] length 写入数据的内存大小
-         * @return
-         *      @retval >0 返回写入到的数据的实际大小
-         *      @retval =0 被关闭
-         *      @retval <0 出现流错误
-         */
-        virtual int writeFixSize(ByteArray::ptr ba, size_t length);
+    /**
+     * @brief 关闭流
+     */
+    virtual void close() = 0;
+};
 
-        /**
-         * @brief 关闭流
-         */
-        virtual void close() = 0;
-    };
-
-}
+} // namespace sylar
 
 #endif

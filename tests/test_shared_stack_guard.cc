@@ -4,9 +4,9 @@
  */
 
 #include "config/config.h"
+#include "log/logger.h"
 #include "sylar/fiber/fiber.h"
 #include "sylar/fiber/scheduler.h"
-#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>
@@ -21,7 +21,7 @@ static void guard_job()
     {
         int step = g_guard_steps.fetch_add(1) + 1;
         BASE_LOG_INFO(g_logger) << "guard_job step=" << step
-                                 << " fiber_id=" << sylar::Fiber::GetFiberId();
+                                << " fiber_id=" << sylar::Fiber::GetFiberId();
         if (i < 2)
         {
             sylar::Fiber::YieldToReady();

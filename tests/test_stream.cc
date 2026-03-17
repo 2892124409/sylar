@@ -9,14 +9,14 @@
  * 4. 地址信息获取
  */
 
-#include "sylar/net/socket_stream.h"
-#include "sylar/net/socket.h"
-#include "sylar/net/address.h"
-#include "sylar/net/bytearray.h"
 #include "log/logger.h"
 #include "sylar/fiber/iomanager.h"
-#include <iostream>
+#include "sylar/net/address.h"
+#include "sylar/net/bytearray.h"
+#include "sylar/net/socket.h"
+#include "sylar/net/socket_stream.h"
 #include <cstring>
+#include <iostream>
 
 // ============================================================================
 // 全局日志器
@@ -365,7 +365,7 @@ void test_address_info()
 // 主函数
 // ============================================================================
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     std::cout << "========================================\n";
     std::cout << "  Stream + SocketStream 模块测试\n";

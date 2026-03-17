@@ -1,5 +1,5 @@
-#include "sylar/fiber/iomanager.h"
 #include "log/logger.h"
+#include "sylar/fiber/iomanager.h"
 #include "sylar/fiber/timer.h"
 
 static base::Logger::ptr g_logger = BASE_LOG_ROOT();

@@ -1,5 +1,5 @@
-#include "http/core/http_framework_config.h"
 #include "http/core/http_error.h"
+#include "http/core/http_framework_config.h"
 #include "http/core/http_parser.h"
 #include "log/logger.h"
 
@@ -9,7 +9,8 @@
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
-int main() {
+int main()
+{
     size_t old_header = http::HttpFrameworkConfig::GetMaxHeaderSize();
     size_t old_body = http::HttpFrameworkConfig::GetMaxBodySize();
     uint64_t old_connection_timeout = http::HttpFrameworkConfig::GetConnectionTimeoutMs();

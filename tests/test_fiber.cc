@@ -4,9 +4,9 @@
  * @author sylar.yin (Modified by Gemini Agent)
  * @date 2026-02-07
  */
-#include "sylar/fiber/fiber.h"
 #include "log/logger.h"
 #include "sylar/concurrency/thread.h"
+#include "sylar/fiber/fiber.h"
 #include <vector>
 
 base::Logger::ptr g_logger = BASE_LOG_ROOT();
@@ -65,7 +65,7 @@ void test_fiber()
     BASE_LOG_INFO(g_logger) << "【主协程】测试结束 (test_fiber end)";
 }
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     sylar::Thread::SetName("main");
 

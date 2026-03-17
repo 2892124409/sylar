@@ -4,9 +4,9 @@
  */
 
 #include "config/config.h"
+#include "log/logger.h"
 #include "sylar/fiber/fiber.h"
 #include "sylar/fiber/scheduler.h"
-#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>
@@ -30,7 +30,7 @@ static void reset_job()
     {
         int step = g_lifecycle_steps.fetch_add(1) + 1;
         BASE_LOG_INFO(g_logger) << "reset_job step=" << step
-                                 << " fiber_id=" << sylar::Fiber::GetFiberId();
+                                << " fiber_id=" << sylar::Fiber::GetFiberId();
         if (i == 0)
         {
             sylar::Fiber::YieldToReady();
@@ -49,10 +49,10 @@ int main()
     {
         sylar::Scheduler sc(1, true, "shared_stack_lifecycle_throw");
         sc.start();
-        sc.schedule([]() {
+        sc.schedule([]()
+                    {
             g_lifecycle_fiber.reset(new sylar::Fiber(&throwing_job, 0, true));
-            sylar::Scheduler::GetThis()->schedule(g_lifecycle_fiber);
-        });
+            sylar::Scheduler::GetThis()->schedule(g_lifecycle_fiber); });
         sc.stop();
     }
 

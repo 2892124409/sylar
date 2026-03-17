@@ -4,9 +4,9 @@
  */
 
 #include "config/config.h"
+#include "log/logger.h"
 #include "sylar/base/util.h"
 #include "sylar/fiber/scheduler.h"
-#include "log/logger.h"
 
 #include <atomic>
 #include <cassert>
@@ -35,8 +35,8 @@ static void shared_stack_mt_job()
 
         int step = g_mt_steps.fetch_add(1) + 1;
         BASE_LOG_INFO(g_logger) << "shared_stack_mt_job step=" << step
-                                 << " fiber_id=" << sylar::Fiber::GetFiberId()
-                                 << " thread_id=" << tid;
+                                << " fiber_id=" << sylar::Fiber::GetFiberId()
+                                << " thread_id=" << tid;
 
         if (i < 2)
         {
