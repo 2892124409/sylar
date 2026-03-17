@@ -3,11 +3,11 @@
 
 #include "ai/config/ai_app_config.h"
 #include "ai/service/chat_interfaces.h"
+#include "ai/storage/mysql_connection_pool.h"
 
 #include <mysql/mysql.h>
 
 #include <memory>
-#include <mutex>
 #include <string>
 
 /**
@@ -24,14 +24,13 @@ namespace storage
  * @brief 聊天历史读取仓库（MySQL 实现）。
  *
  * 该类是 `service::ChatStore` 的具体实现，负责：
- * - 建立并维护 MySQL 连接；
+ * - 从连接池获取连接执行查询；
  * - 启动阶段自动检查/创建最小表结构；
  * - 根据 `sid + conversation_id` 读取历史消息；
  * - 返回按时间正序（从旧到新）的消息序列，供上下文拼接。
  *
  * 线程安全说明：
- * - 通过 `m_mutex` 串行保护 `MYSQL*` 连接与查询过程；
- * - 当前实现以“单连接 + 互斥锁”保证安全，优先简单可靠。
+ * - 通过连接池分配独立连接，减少全局串行瓶颈。
  */
 class ChatRepository : public service::ChatStore
 {
@@ -40,12 +39,12 @@ class ChatRepository : public service::ChatStore
 
     /**
      * @brief 构造仓库对象。
-     * @param settings MySQL 配置快照。
+     * @param pool MySQL 连接池。
      */
-    explicit ChatRepository(const config::MysqlSettings& settings);
+    explicit ChatRepository(const MysqlConnectionPool::ptr& pool);
 
     /**
-     * @brief 析构函数，负责关闭数据库连接。
+     * @brief 析构函数。
      */
     virtual ~ChatRepository();
 
@@ -81,13 +80,19 @@ class ChatRepository : public service::ChatStore
      */
     virtual bool LoadHistory(const std::string& sid, const std::string& conversation_id, size_t limit, std::vector<common::ChatMessage>& out, std::string& error) override;
 
-  private:
-    /**
-     * @brief 确保 MySQL 连接可用。
-     * @details 若已有连接不可用会自动关闭并重连。
-     */
-    bool EnsureConnected(std::string& error);
+    virtual bool LoadConversationSummary(const std::string& sid,
+                                         const std::string& conversation_id,
+                                         std::string& summary,
+                                         uint64_t& updated_at_ms,
+                                         std::string& error) override;
 
+    virtual bool SaveConversationSummary(const std::string& sid,
+                                         const std::string& conversation_id,
+                                         const std::string& summary,
+                                         uint64_t updated_at_ms,
+                                         std::string& error) override;
+
+  private:
     /**
      * @brief 确保最小表结构存在（幂等建表）。
      */
@@ -96,22 +101,18 @@ class ChatRepository : public service::ChatStore
     /**
      * @brief 执行单条 SQL 语句。
      */
-    bool ExecuteSql(const std::string& sql, std::string& error);
+    bool ExecuteSql(MYSQL* conn, const std::string& sql, std::string& error);
 
     /**
      * @brief 对输入字符串做 SQL 转义，避免拼接 SQL 时注入风险。
      */
-    std::string Escape(const std::string& value);
+    std::string Escape(MYSQL* conn, const std::string& value);
 
   private:
-    /** @brief MySQL 配置快照。 */
-    config::MysqlSettings m_settings;
-    /** @brief 底层 MySQL 连接句柄。 */
-    MYSQL* m_conn;
+    /** @brief 连接池句柄。 */
+    MysqlConnectionPool::ptr m_pool;
     /** @brief 初始化完成标志。 */
     bool m_initialized;
-    /** @brief 连接与查询互斥锁。 */
-    std::mutex m_mutex;
 };
 
 } // namespace storage

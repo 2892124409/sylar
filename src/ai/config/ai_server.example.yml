@@ -5,10 +5,19 @@ ai:
     enable_ssl: false
     ssl_cert_file: ""
     ssl_key_file: ""
+  provider:
+    type: openai_compatible
   openai_compatible:
     base_url: https://api.openai.com/v1
     api_key: "YOUR_OPENAI_COMPATIBLE_API_KEY"
     default_model: gpt-4o-mini
+    connect_timeout_ms: 3000
+    request_timeout_ms: 120000
+  anthropic:
+    base_url: https://api.anthropic.com
+    api_key: "YOUR_ANTHROPIC_API_KEY"
+    default_model: claude-3-5-sonnet-20241022
+    api_version: "2023-06-01"
     connect_timeout_ms: 3000
     request_timeout_ms: 120000
   chat:
@@ -16,9 +25,14 @@ ai:
     max_context_messages: 20
     history_load_limit: 20
     history_query_limit_max: 200
+    max_context_tokens: 4096
+    recent_window_messages: 20
+    summary_trigger_tokens: 3072
+    summary_max_tokens: 512
     default_temperature: 0.7
     default_max_tokens: 1024
     system_prompt: ""
+    summary_prompt: "你是对话摘要助手。请把旧对话压缩成简洁、可延续上下文的中文摘要，保留人物偏好、事实、约束、未完成任务。"
   mysql:
     host: 127.0.0.1
     port: 3306
@@ -27,6 +41,9 @@ ai:
     database: ai_chat
     charset: utf8mb4
     connect_timeout_seconds: 5
+    pool_min_size: 2
+    pool_max_size: 8
+    pool_acquire_timeout_ms: 3000
   persist:
     queue_capacity: 10000
     flush_interval_ms: 200

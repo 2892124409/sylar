@@ -23,6 +23,7 @@ class FakeLlmClient : public ai::llm::LlmClient
                           std::string& error) override
     {
         (void)error;
+        ++complete_calls;
         last_request = request;
         result.content = "assistant reply";
         result.model = request.model;
@@ -52,6 +53,7 @@ class FakeLlmClient : public ai::llm::LlmClient
     }
 
     ai::llm::LlmCompletionRequest last_request;
+    int complete_calls = 0;
 };
 
 class FakeStore : public ai::service::ChatStore
@@ -88,7 +90,37 @@ class FakeStore : public ai::service::ChatStore
         return true;
     }
 
+    virtual bool LoadConversationSummary(const std::string& sid,
+                                         const std::string& conversation_id,
+                                         std::string& summary,
+                                         uint64_t& updated_at_ms,
+                                         std::string& error) override
+    {
+        (void)sid;
+        (void)conversation_id;
+        (void)error;
+        summary = summary_text;
+        updated_at_ms = summary_updated_at_ms;
+        return true;
+    }
+
+    virtual bool SaveConversationSummary(const std::string& sid,
+                                         const std::string& conversation_id,
+                                         const std::string& summary,
+                                         uint64_t updated_at_ms,
+                                         std::string& error) override
+    {
+        (void)sid;
+        (void)conversation_id;
+        (void)error;
+        summary_text = summary;
+        summary_updated_at_ms = updated_at_ms;
+        return true;
+    }
+
     std::vector<ai::common::ChatMessage> seed_messages;
+    std::string summary_text;
+    uint64_t summary_updated_at_ms = 0;
 };
 
 class FakeSink : public ai::service::MessageSink
@@ -111,9 +143,14 @@ ai::config::ChatSettings BuildDefaultChatSettings()
     settings.max_context_messages = 20;
     settings.history_load_limit = 20;
     settings.history_query_limit_max = 200;
+    settings.max_context_tokens = 4096;
+    settings.recent_window_messages = 20;
+    settings.summary_trigger_tokens = 3072;
+    settings.summary_max_tokens = 512;
     settings.default_temperature = 0.7;
     settings.default_max_tokens = 1024;
     settings.system_prompt = "";
+    settings.summary_prompt = "summary prompt";
     return settings;
 }
 
@@ -245,6 +282,59 @@ void TestMissingSidRejected()
     assert(status == http::HttpStatus::BAD_REQUEST);
 }
 
+void TestSummaryRefresh()
+{
+    ai::config::ChatSettings settings = BuildDefaultChatSettings();
+    settings.summary_trigger_tokens = 1;
+    settings.recent_window_messages = 2;
+    settings.max_context_messages = 100;
+    settings.max_context_tokens = 4096;
+
+    std::shared_ptr<FakeLlmClient> llm(new FakeLlmClient());
+    std::shared_ptr<FakeStore> store(new FakeStore());
+    std::shared_ptr<FakeSink> sink(new FakeSink());
+
+    ai::common::ChatMessage m1;
+    m1.role = "user";
+    m1.content = "old-1";
+    ai::common::ChatMessage m2;
+    m2.role = "assistant";
+    m2.content = "old-2";
+    ai::common::ChatMessage m3;
+    m3.role = "user";
+    m3.content = "old-3";
+    ai::common::ChatMessage m4;
+    m4.role = "assistant";
+    m4.content = "old-4";
+    store->seed_messages.push_back(m1);
+    store->seed_messages.push_back(m2);
+    store->seed_messages.push_back(m3);
+    store->seed_messages.push_back(m4);
+
+    ai::service::ChatService service(settings, llm, store, sink);
+
+    ai::common::ChatCompletionRequest request;
+    request.sid = "sid-sum";
+    request.conversation_id = "conv-sum";
+    request.message = "new";
+    request.model = "test-model";
+
+    ai::common::ChatCompletionResponse response;
+    std::string error;
+    http::HttpStatus status = http::HttpStatus::OK;
+
+    bool ok = service.Complete(request, response, error, status);
+    assert(ok);
+    assert(status == http::HttpStatus::OK);
+    assert(store->summary_text == "assistant reply");
+    assert(llm->complete_calls >= 2);
+
+    std::vector<ai::common::ChatMessage> history;
+    ok = service.GetHistory(request.sid, request.conversation_id, 20, history, error, status);
+    assert(ok);
+    assert(history.size() == 2);
+}
+
 } // namespace
 
 int main()
@@ -252,5 +342,6 @@ int main()
     TestCompleteAndHistory();
     TestStream();
     TestMissingSidRejected();
+    TestSummaryRefresh();
     return 0;
 }

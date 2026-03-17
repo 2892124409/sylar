@@ -3,6 +3,7 @@
 
 #include "ai/config/ai_app_config.h"
 #include "ai/service/chat_interfaces.h"
+#include "ai/storage/mysql_connection_pool.h"
 
 #include <mysql/mysql.h>
 
@@ -41,10 +42,10 @@ class AsyncMySqlWriter : public service::MessageSink
 
     /**
      * @brief 构造异步写入器。
-     * @param mysql_settings MySQL 连接配置。
+     * @param pool MySQL 连接池。
      * @param persist_settings 持久化队列与批量刷盘配置。
      */
-    AsyncMySqlWriter(const config::MysqlSettings& mysql_settings,
+    AsyncMySqlWriter(const MysqlConnectionPool::ptr& pool,
                      const config::PersistSettings& persist_settings);
 
     /**
@@ -81,11 +82,6 @@ class AsyncMySqlWriter : public service::MessageSink
     void Run();
 
     /**
-     * @brief 确保数据库连接可用，不可用时自动重连。
-     */
-    bool EnsureConnected(std::string& error);
-
-    /**
      * @brief 确保最小表结构存在（幂等建表）。
      */
     bool EnsureSchema(std::string& error);
@@ -93,7 +89,7 @@ class AsyncMySqlWriter : public service::MessageSink
     /**
      * @brief 执行单条 SQL。
      */
-    bool ExecuteSql(const std::string& sql, std::string& error);
+    bool ExecuteSql(MYSQL* conn, const std::string& sql, std::string& error);
 
     /**
      * @brief 将一个批次事务性写入 MySQL。
@@ -104,20 +100,18 @@ class AsyncMySqlWriter : public service::MessageSink
     /**
      * @brief SQL 字符串转义，避免注入风险。
      */
-    std::string Escape(const std::string& value);
+    std::string Escape(MYSQL* conn, const std::string& value);
 
   private:
-    /** @brief MySQL 配置快照。 */
-    config::MysqlSettings m_mysql_settings;
+    /** @brief MySQL 连接池。 */
+    MysqlConnectionPool::ptr m_pool;
     /** @brief 持久化策略配置（队列容量、批大小、刷盘间隔）。 */
     config::PersistSettings m_persist_settings;
 
     /** @brief 运行标志；true 表示后台线程应继续工作。 */
     bool m_running;
-    /** @brief 底层 MySQL 连接句柄。 */
-    MYSQL* m_conn;
 
-    /** @brief 互斥锁，保护运行状态、连接和队列。 */
+    /** @brief 互斥锁，保护运行状态和队列。 */
     std::mutex m_mutex;
     /** @brief 条件变量，用于唤醒后台线程刷盘。 */
     std::condition_variable m_cond;

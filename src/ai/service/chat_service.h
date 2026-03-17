@@ -100,6 +100,10 @@ class ChatService
     {
         /** @brief 缓存的上下文消息。 */
         std::vector<common::ChatMessage> messages;
+        /** @brief 摘要记忆文本。 */
+        std::string summary;
+        /** @brief 摘要更新时间（毫秒）。 */
+        uint64_t summary_updated_at_ms = 0;
         /** @brief 最近访问时间（毫秒时间戳）。 */
         uint64_t touched_at_ms = 0;
     };
@@ -124,8 +128,7 @@ class ChatService
      * @brief 获取上下文快照。
      * @return 会话上下文消息副本；缓存未命中返回空数组。
      */
-    std::vector<common::ChatMessage>
-    SnapshotContext(const std::string& sid, const std::string& conversation_id);
+    ConversationContext SnapshotContext(const std::string& sid, const std::string& conversation_id);
 
     /**
      * @brief 追加 user/assistant 消息到上下文缓存并执行窗口裁剪。
@@ -134,6 +137,25 @@ class ChatService
                                const std::string& conversation_id,
                                const common::ChatMessage& user_message,
                                const common::ChatMessage& assistant_message);
+
+    /**
+     * @brief 依据 token 预算构建最终发送给模型的上下文消息。
+     */
+    std::vector<common::ChatMessage> BuildBudgetedContextMessages(const ConversationContext& context,
+                                                                  const common::ChatMessage& pending_user_message) const;
+
+    /**
+     * @brief 在上下文超阈值时生成/更新摘要记忆。
+     */
+    bool MaybeRefreshSummary(const std::string& sid,
+                             const std::string& conversation_id,
+                             const std::string& model,
+                             std::string& error);
+
+    /**
+     * @brief 启发式估算一条消息的 token 数量。
+     */
+    size_t EstimateMessageTokens(const common::ChatMessage& message) const;
 
     /**
      * @brief 将单条消息提交到异步持久化通道。

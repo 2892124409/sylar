@@ -519,7 +519,7 @@ sylar 框架的 hook 机制（`hook.cc`）已拦截 `socket/connect/read/write/s
 #### 1. 封装 FiberCurlSession（新增文件）
 新增 `src/ai/llm/fiber_curl_session.h/.cc`，封装单次 curl 请求的 fiber 协程化执行：
 
-```
+```cpp
 class FiberCurlSession {
 public:
     // 初始化 curl_multi + curl_easy，注册回调
@@ -532,7 +532,7 @@ public:
 ```
 
 #### 2. Perform() 内部流程（关键）
-```
+```cpp
 CURLcode FiberCurlSession::Perform() {
     CURLM* multi = curl_multi_init();
     curl_multi_add_handle(multi, m_easy);
@@ -568,7 +568,7 @@ CURLcode FiberCurlSession::Perform() {
 
 #### 3. SocketCallback（fd 事件注册）
 当 curl 需要监听某个 fd 的读/写事件时回调此函数：
-```
+```cpp
 static int SocketCallback(CURL* easy, curl_socket_t fd, int what, void* userp, void* socketp) {
     FiberCurlSession* self = static_cast<FiberCurlSession*>(userp);
     IOManager* iom = IOManager::GetThis();
@@ -586,7 +586,7 @@ static int SocketCallback(CURL* easy, curl_socket_t fd, int what, void* userp, v
 
 #### 4. TimerCallback（超时管理）
 curl 内部需要定时器时回调：
-```
+```cpp
 static int TimerCallback(CURLM* multi, long timeout_ms, void* userp) {
     FiberCurlSession* self = static_cast<FiberCurlSession*>(userp);
     IOManager* iom = IOManager::GetThis();
@@ -613,7 +613,7 @@ session.Init(curl);
 CURLcode code = session.Perform();
 ```
 
-其余代码（请求构建、响应解析、回调处理）完全���变。
+其余代码（请求构建、响应解析、回调处理）。
 
 ### 需要注意的细节
 
@@ -654,7 +654,7 @@ CURLcode code = session.Perform();
 #### 1. 新增 MysqlConnectionPool
 新增 `src/ai/storage/mysql_connection_pool.h/.cc`：
 
-```
+```cpp
 class MysqlConnectionPool {
 public:
     using ptr = std::shared_ptr<MysqlConnectionPool>;
@@ -674,7 +674,7 @@ public:
 ```
 
 #### 2. RAII 连接守卫
-```
+```cpp
 class ScopedMysqlConn {
     MysqlConnectionPool* m_pool;
     MYSQL* m_conn;

@@ -146,9 +146,12 @@ if(BUILD_AI_CHAT_SERVER)
         src/ai/common/ai_utils.cc
         src/ai/config/ai_app_config.cc
         src/ai/http/ai_http_api.cc
+        src/ai/http/ai_http_handlers.cc
         src/ai/llm/openai_compatible_client.cc
         src/ai/llm/anthropic_client.cc
+        src/ai/llm/fiber_curl_session.cc
         src/ai/service/chat_service.cc
+        src/ai/storage/mysql_connection_pool.cc
         src/ai/storage/chat_repository.cc
         src/ai/storage/async_mysql_writer.cc
         src/ai/main.cc

@@ -58,6 +58,36 @@ class ChatStore
                              size_t limit,
                              std::vector<common::ChatMessage>& out,
                              std::string& error) = 0;
+
+    /**
+     * @brief 加载会话摘要记忆。
+     * @param sid 会话标识 SID。
+     * @param conversation_id 会话 ID。
+     * @param[out] summary 摘要文本，不存在时返回空串。
+     * @param[out] updated_at_ms 摘要更新时间，不存在时返回 0。
+     * @param[out] error 失败原因。
+     * @return true 成功；false 失败。
+     */
+    virtual bool LoadConversationSummary(const std::string& sid,
+                                         const std::string& conversation_id,
+                                         std::string& summary,
+                                         uint64_t& updated_at_ms,
+                                         std::string& error) = 0;
+
+    /**
+     * @brief 保存会话摘要记忆。
+     * @param sid 会话标识 SID。
+     * @param conversation_id 会话 ID。
+     * @param summary 摘要文本。
+     * @param updated_at_ms 摘要更新时间（毫秒时间戳）。
+     * @param[out] error 失败原因。
+     * @return true 成功；false 失败。
+     */
+    virtual bool SaveConversationSummary(const std::string& sid,
+                                         const std::string& conversation_id,
+                                         const std::string& summary,
+                                         uint64_t updated_at_ms,
+                                         std::string& error) = 0;
 };
 
 /**

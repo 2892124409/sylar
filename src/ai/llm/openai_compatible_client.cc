@@ -1,4 +1,5 @@
 #include "ai/llm/openai_compatible_client.h"
+#include "ai/llm/fiber_curl_session.h"
 
 #include "log/logger.h"
 
@@ -426,8 +427,8 @@ bool OpenAICompatibleClient::Complete(const LlmCompletionRequest& request, LlmCo
     // 传入写回调上下文，回调会把数据累积到 write_ctx.response。
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
 
-    // 真正发送请求
-    CURLcode code = curl_easy_perform(curl);
+    FiberCurlSession session(curl);
+    CURLcode code = session.Perform();
 
     long http_code = 0;
     // 取HTTP状态码
@@ -515,7 +516,8 @@ bool OpenAICompatibleClient::StreamComplete(const LlmCompletionRequest& request,
     // 传入流式回调上下文，回调会解析 SSE 并累计到 write_ctx。
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
 
-    CURLcode code = curl_easy_perform(curl);
+    FiberCurlSession session(curl);
+    CURLcode code = session.Perform();
 
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);

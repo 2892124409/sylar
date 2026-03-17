@@ -1,10 +1,12 @@
 #include "ai/common/ai_utils.h"
 #include "ai/config/ai_app_config.h"
 #include "ai/http/ai_http_api.h"
+#include "ai/llm/anthropic_client.h"
 #include "ai/llm/openai_compatible_client.h"
 #include "ai/service/chat_service.h"
 #include "ai/storage/async_mysql_writer.h"
 #include "ai/storage/chat_repository.h"
+#include "ai/storage/mysql_connection_pool.h"
 
 #include "http/core/http_framework_config.h"
 #include "http/middleware/middleware.h"
@@ -146,14 +148,22 @@ int main(int argc, char** argv)
     http::HttpFrameworkConfig::SetSessionEnabled(true);
 
     const ai::config::ServerSettings server_settings = ai::config::AiAppConfig::GetServerSettings();
-    const ai::config::OpenAICompatibleSettings openai_settings =
-        ai::config::AiAppConfig::GetOpenAICompatibleSettings();
+    const ai::config::ProviderSettings provider_settings = ai::config::AiAppConfig::GetProviderSettings();
+    const ai::config::OpenAICompatibleSettings openai_settings = ai::config::AiAppConfig::GetOpenAICompatibleSettings();
+    const ai::config::AnthropicSettings anthropic_settings = ai::config::AiAppConfig::GetAnthropicSettings();
     const ai::config::ChatSettings chat_settings = ai::config::AiAppConfig::GetChatSettings();
     const ai::config::MysqlSettings mysql_settings = ai::config::AiAppConfig::GetMysqlSettings();
     const ai::config::PersistSettings persist_settings = ai::config::AiAppConfig::GetPersistSettings();
 
+    ai::storage::MysqlConnectionPool::ptr mysql_pool(new ai::storage::MysqlConnectionPool());
+    if (!mysql_pool->Init(mysql_settings, error))
+    {
+        std::cerr << "init mysql connection pool failed: " << error << std::endl;
+        return 1;
+    }
+
     /// @brief 先初始化查询仓库；数据库不可用时快速失败。
-    ai::storage::ChatRepository::ptr chat_repository(new ai::storage::ChatRepository(mysql_settings));
+    ai::storage::ChatRepository::ptr chat_repository(new ai::storage::ChatRepository(mysql_pool));
     if (!chat_repository->Init(error))
     {
         std::cerr << "init chat repository failed: " << error << std::endl;
@@ -161,7 +171,7 @@ int main(int argc, char** argv)
     }
 
     /// @brief 启动异步持久化线程（队列 + 批量刷盘）。
-    ai::storage::AsyncMySqlWriter::ptr async_writer(new ai::storage::AsyncMySqlWriter(mysql_settings, persist_settings));
+    ai::storage::AsyncMySqlWriter::ptr async_writer(new ai::storage::AsyncMySqlWriter(mysql_pool, persist_settings));
     if (!async_writer->Start(error))
     {
         std::cerr << "start async mysql writer failed: " << error << std::endl;
@@ -169,7 +179,27 @@ int main(int argc, char** argv)
     }
 
     /// @brief 组装核心依赖：LLM 客户端 + ChatService。
-    ai::llm::LlmClient::ptr llm_client(new ai::llm::OpenAICompatibleClient(openai_settings));
+    ai::llm::LlmClient::ptr llm_client;
+    std::string default_model;
+    if (provider_settings.type == "anthropic")
+    {
+        ai::llm::AnthropicSettings settings;
+        settings.base_url = anthropic_settings.base_url;
+        settings.api_key = anthropic_settings.api_key;
+        settings.default_model = anthropic_settings.default_model;
+        settings.api_version = anthropic_settings.api_version;
+        settings.connect_timeout_ms = anthropic_settings.connect_timeout_ms;
+        settings.request_timeout_ms = anthropic_settings.request_timeout_ms;
+
+        llm_client.reset(new ai::llm::AnthropicClient(settings));
+        default_model = anthropic_settings.default_model;
+    }
+    else
+    {
+        llm_client.reset(new ai::llm::OpenAICompatibleClient(openai_settings));
+        default_model = openai_settings.default_model;
+    }
+
     ai::service::ChatService::ptr chat_service(new ai::service::ChatService(
         chat_settings, llm_client, chat_repository, async_writer));
 
@@ -223,7 +253,7 @@ int main(int argc, char** argv)
         http::CallbackMiddleware::AfterCallback())));
 
     /// @brief 注册 AI 业务路由。
-    ai::api::RegisterAiHttpApi(server, chat_service, chat_settings, openai_settings.default_model);
+    ai::api::RegisterAiHttpApi(server, chat_service, chat_settings, default_model);
 
     /// @brief 解析绑定地址（host:port）。
     sylar::Address::ptr bind_addr =
@@ -302,5 +332,6 @@ int main(int argc, char** argv)
 
     // 最后停止持久化线程，保证已入队消息尽量刷盘完成后再退出。
     async_writer->Stop();
+    mysql_pool->Shutdown();
     return 0;
 }

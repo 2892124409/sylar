@@ -53,6 +53,34 @@ struct OpenAICompatibleSettings
 };
 
 /**
+ * @brief Provider 选择配置。
+ */
+struct ProviderSettings
+{
+    /** @brief provider 类型：`openai_compatible` 或 `anthropic`。 */
+    std::string type;
+};
+
+/**
+ * @brief Anthropic 客户端配置。
+ */
+struct AnthropicSettings
+{
+    /** @brief API 基础地址。 */
+    std::string base_url;
+    /** @brief API Key。 */
+    std::string api_key;
+    /** @brief 默认模型名。 */
+    std::string default_model;
+    /** @brief API 版本头。 */
+    std::string api_version;
+    /** @brief 连接超时（毫秒）。 */
+    uint64_t connect_timeout_ms;
+    /** @brief 请求超时（毫秒）。 */
+    uint64_t request_timeout_ms;
+};
+
+/**
  * @brief 对话业务配置。
  */
 struct ChatSettings
@@ -65,12 +93,22 @@ struct ChatSettings
     size_t history_load_limit;
     /** @brief 历史查询接口允许的 limit 上限。 */
     size_t history_query_limit_max;
+    /** @brief 输入上下文 token 预算上限（启发式估算）。 */
+    size_t max_context_tokens;
+    /** @brief 摘要后保留最近原文消息条数。 */
+    size_t recent_window_messages;
+    /** @brief 触发摘要的 token 阈值（启发式估算）。 */
+    size_t summary_trigger_tokens;
+    /** @brief 摘要生成最大 token 上限。 */
+    uint32_t summary_max_tokens;
     /** @brief 默认采样温度。 */
     double default_temperature;
     /** @brief 默认最大输出 token 数。 */
     uint32_t default_max_tokens;
     /** @brief 可选系统提示词。 */
     std::string system_prompt;
+    /** @brief 摘要模型提示词模板。 */
+    std::string summary_prompt;
 };
 
 /**
@@ -92,6 +130,12 @@ struct MysqlSettings
     std::string charset;
     /** @brief 连接超时（秒）。 */
     uint32_t connect_timeout_seconds;
+    /** @brief 连接池最小连接数。 */
+    size_t pool_min_size;
+    /** @brief 连接池最大连接数。 */
+    size_t pool_max_size;
+    /** @brief 获取连接超时（毫秒）。 */
+    uint64_t pool_acquire_timeout_ms;
 };
 
 /**
@@ -118,8 +162,12 @@ class AiAppConfig
   public:
     /** @brief 获取服务监听配置。 */
     static ServerSettings GetServerSettings();
+    /** @brief 获取 provider 选择配置。 */
+    static ProviderSettings GetProviderSettings();
     /** @brief 获取 OpenAI-Compatible 客户端配置。 */
     static OpenAICompatibleSettings GetOpenAICompatibleSettings();
+    /** @brief 获取 Anthropic 客户端配置。 */
+    static AnthropicSettings GetAnthropicSettings();
     /** @brief 获取对话业务配置。 */
     static ChatSettings GetChatSettings();
     /** @brief 获取数据库连接配置。 */
@@ -134,6 +182,8 @@ class AiAppConfig
      * 为空时回退环境变量 `OPENAI_COMPATIBLE_API_KEY` / `OPENAI_API_KEY`。
      */
     static std::string ResolveOpenAICompatibleApiKey();
+    /** @brief 解析 Anthropic API Key。 */
+    static std::string ResolveAnthropicApiKey();
 
     /**
      * @brief 启动前配置合法性校验。

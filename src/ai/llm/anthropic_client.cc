@@ -1,4 +1,5 @@
 #include "ai/llm/anthropic_client.h"
+#include "ai/llm/fiber_curl_session.h"
 
 #include "log/logger.h"
 
@@ -442,7 +443,8 @@ bool AnthropicClient::Complete(const LlmCompletionRequest& request,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, SyncWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
 
-    CURLcode code = curl_easy_perform(curl);
+    FiberCurlSession session(curl);
+    CURLcode code = session.Perform();
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
@@ -514,7 +516,8 @@ bool AnthropicClient::StreamComplete(const LlmCompletionRequest& request,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
 
-    CURLcode code = curl_easy_perform(curl);
+    FiberCurlSession session(curl);
+    CURLcode code = session.Perform();
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
