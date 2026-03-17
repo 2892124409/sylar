@@ -19,6 +19,8 @@ namespace llm
 
 /**
  * @brief Anthropic 客户端配置。
+ * @details
+ * 对应 `ai.anthropic.*` 配置项，用于构造 Anthropic Messages API 请求。
  */
 struct AnthropicSettings
 {
@@ -38,25 +40,54 @@ struct AnthropicSettings
 
 /**
  * @brief 基于 Anthropic Messages API 的 LLM 客户端。
+ * @details
+ * 该实现对外仍暴露统一的 `LlmClient` 接口，内部负责：
+ * - 组装 Anthropic 协议请求体与请求头；
+ * - 解析同步/流式响应结构；
+ * - 把 Anthropic 协议字段映射为统一 `LlmCompletionResult`。
  */
 class AnthropicClient : public LlmClient
 {
   public:
+    /**
+     * @brief 构造 Anthropic 客户端。
+     * @param settings Anthropic 客户端配置快照。
+     */
     explicit AnthropicClient(const AnthropicSettings& settings);
 
+    /**
+     * @brief 发起同步补全请求。
+     * @param request 统一补全请求对象。
+     * @param[out] result 统一补全结果对象。
+     * @param[out] error 失败原因描述。
+     * @return true 请求成功；false 请求失败。
+     */
     virtual bool Complete(const LlmCompletionRequest& request,
                           LlmCompletionResult& result,
                           std::string& error) override;
 
+    /**
+     * @brief 发起流式补全请求。
+     * @param request 统一补全请求对象。
+     * @param on_delta 增量回调，返回 false 时主动中断流。
+     * @param[out] result 聚合后的统一补全结果对象。
+     * @param[out] error 失败原因描述。
+     * @return true 请求成功；false 请求失败或流被中断。
+     */
     virtual bool StreamComplete(const LlmCompletionRequest& request,
                                 const DeltaCallback& on_delta,
                                 LlmCompletionResult& result,
                                 std::string& error) override;
 
   private:
+    /**
+     * @brief 构建 Anthropic Messages API 地址（`.../v1/messages`）。
+     * @return 完整请求 URL。
+     */
     std::string BuildMessagesUrl() const;
 
   private:
+    /** @brief Anthropic 客户端配置快照。 */
     AnthropicSettings m_settings;
 };
 

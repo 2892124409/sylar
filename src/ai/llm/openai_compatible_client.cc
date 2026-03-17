@@ -427,6 +427,7 @@ bool OpenAICompatibleClient::Complete(const LlmCompletionRequest& request, LlmCo
     // 传入写回调上下文，回调会把数据累积到 write_ctx.response。
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
 
+    // 之前是直接的 curl_easy_perform是阻塞调用，会导致工作线程阻塞
     FiberCurlSession session(curl);
     CURLcode code = session.Perform();
 

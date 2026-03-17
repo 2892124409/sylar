@@ -3,17 +3,17 @@
 ## 项目目标（持续更新）
 - 作为 AI 应用层的阶段化开发日志，持续记录从 V1 最小通路到后续生产化能力建设的全过程。
 - 每个阶段固定记录：目标、实现细节、关键设计取舍、踩坑与复盘。
-- 当前进度：第一阶段（最小通路）已完成，后续阶段按迭代继续补充到同一文档中。
+- 当前进度：第一阶段（最小通路）与第二阶段（Provider 切换 + 上下文摘要 + 并发能力增强）已完成。
 
 ---
 
 ## 当前范围声明
 这份笔记是多阶段持续维护文档，不只记录第一阶段。
 
-- 已落地并已详细展开：第一阶段（最小通路）。
-- 已列出但未展开实现细节：后续阶段（会在落地后继续补写实现记录）。
+- 已落地并已详细展开：第一阶段、第二阶段。
+- 已列出但未展开实现细节：第三阶段及之后。
 - 当前未实现能力：用户账户体系、鉴权授权、限流熔断、观测告警、发布治理等。
-- 当前 V1 运行时主通路：`OpenAICompatibleClient`；`AnthropicClient` 已落代码但尚未接入“按配置切换 provider”。
+- 当前运行时支持通过 `ai.provider.type` 切换 `openai_compatible` / `anthropic`。
 
 ---
 
@@ -317,29 +317,53 @@
 
 ### 7.3 `src/ai/llm/anthropic_client.h/.cc`
 - 已完成 Anthropic Messages API 的同步/流式实现（含 `x-api-key` 与 `anthropic-version` 头）。
-- 当前处于“代码已落地、未接入运行时 provider 选择”的状态，不影响 V1 主通路。
+- 第二阶段已接入运行时 provider 选择，可通过配置直接切换。
 
 #### 当前阶段注意点
 - 回调中断会触发 `stream callback aborted`。
 - 流式 JSON 解析失败会返回 `parse_error`。
-- V1 启动路径默认注入 `OpenAICompatibleClient`，不做 provider 动态路由。
+- 第二阶段起支持 `ai.provider.type=openai_compatible|anthropic` 动态选择 provider。
 
-#### 7.4 V1 Provider 现状（新增）
-- 当前运行时实际生效 provider：`OpenAICompatibleClient`。
-- 当前可直接支持的厂商范围：只要提供 OpenAI-Compatible `chat/completions` 接口，通常可通过配置直接切换。
-- 当前切换方式（不改代码）：
+#### 学习问答记录（chunk 边界与上下游保证）
+**Q：什么是 chunk 边界？为什么会把 JSON“切坏”？**
+
+**A：**
+`CURLOPT_WRITEFUNCTION` 每次收到的是“任意大小的一段字节”（chunk），不是协议语义上的完整行或完整 JSON。
+
+1. chunk 边界由网络/TCP/缓冲策略决定，不等于 SSE 事件边界
+2. 一条 `data: {...}\n` 可能被拆成多次回调
+3. 如果按“每次回调”直接 `json::parse`，就会因为半截 JSON 触发解析失败
+
+**Q：当前实现如何避免 chunk 边界把 JSON 切坏？**
+
+**A：**
+核心原则是“按协议边界解析，不按网络 chunk 解析”。
+
+1. 上游（LLM -> 本服务）解析保证
+   - 在 `OpenAICompatibleClient::StreamWriteCallback` 里先把字节追加到 `line_buffer`
+   - 仅当发现 `\n` 时才切出“完整一行”交给 `HandleStreamDataLine`
+   - 仅解析 `data:` 行 payload，尾部半行残片保留到下一次回调继续拼接
+   - 这样即使单个 JSON 被拆成多个 chunk，也会在拼成完整行后再解析
+
+2. 下游（本服务 -> 客户端）发送保证
+   - `ChatService::StreamComplete` 统一输出结构化事件：`start/delta/done/error`
+   - `SSEWriter::sendEvent` 负责按 SSE 协议编码：`event:` + 多行 `data:` + 空行终止
+   - 底层 `writeFixSize` 保证单次事件帧 payload 完整写出
+   - 但网络仍可能把一个事件帧拆成多个 TCP 包，客户端也必须按 SSE 协议边界重组，不能按一次 read 解析
+
+结论：上游和下游都采用“协议边界驱动”的处理方式，避免了 chunk 边界导致的半包 JSON 解析问题。
+
+#### 7.4 Provider 状态（阶段演进）
+- 第一阶段：运行时固定 `OpenAICompatibleClient`。
+- 第二阶段：运行时支持 `openai_compatible/anthropic` 二选一配置切换。
+- 对 OpenAI-Compatible 厂商的切换方式（不改代码）：
 1. 修改 `ai.openai_compatible.base_url` 指向目标厂商兼容网关。
 2. 修改 `ai.openai_compatible.api_key` 为目标厂商密钥。
 3. 修改 `ai.openai_compatible.default_model` 为目标厂商模型名。
-- 已实现但未接入主流程：`AnthropicClient`（代码存在，但 V1 `main.cc` 未做 provider 选择分支）。
-- V1 已知边界：
-1. 尚未支持“按配置在 OpenAI-Compatible / Anthropic 之间动态切换”。
-2. 尚未抽象统一 provider 类型字段（例如 `ai.provider.type=openai_compatible|anthropic`）。
-3. 尚未统一不同 provider 的特有参数扩展（例如 Anthropic 版本头、特殊字段）。
-- 保持 V1 稳定前提下的后续最小改造入口（第二阶段可做）：
-1. 在配置中新增 `ai.provider.type`。
-2. 在 `main.cc` 按 `type` 创建对应 `LlmClient` 实现。
-3. 保持 `ChatService` 与 `ai_http_api` 无感，继续仅依赖 `LlmClient` 抽象。
+- 第二阶段已完成项：
+1. 新增并启用 `ai.provider.type`。
+2. `main.cc` 按配置创建对应 `LlmClient` 实现。
+3. `ChatService` 与 API 层保持无感。
 
 #### 7.5 `OpenAICompatible` vs `Anthropic` 协议差异（面试高频）
 下面按“协议层”而不是“业务层”对比，便于面试时说明为什么需要两个 client。
@@ -392,9 +416,9 @@
 - 当前项目做法：`ChatService` 只依赖 `LlmClient`，`OpenAICompatibleClient/AnthropicClient` 各自吸收协议差异。
 
 ##### 7) 当前 V1 实施状态（避免答偏）
-- 已上线主通路：`OpenAICompatibleClient`
-- 已实现未接入主流程：`AnthropicClient`
-- 未完成项：运行时按配置选择 provider（计划在第二阶段补上 `ai.provider.type`）。
+- 第一阶段主通路：`OpenAICompatibleClient`
+- 第二阶段能力：运行时按 `ai.provider.type` 在 `OpenAICompatibleClient/AnthropicClient` 间切换
+- 统一入口保持不变：`ChatService` 只依赖 `LlmClient` 抽象
 
 ---
 
@@ -440,9 +464,9 @@
 
 ---
 
-## 第一阶段调用链
+### 第一阶段调用链
 
-### 同步链路
+#### 同步链路
 ```text
 Client
   -> POST /api/v1/chat/completions
@@ -460,7 +484,7 @@ Client
 AsyncMySqlWriter::Run -> FlushBatch -> BEGIN/UPSERT/INSERT/COMMIT
 ```
 
-### 流式链路
+#### 流式链路
 ```text
 Client
   -> POST /api/v1/chat/stream
@@ -476,263 +500,444 @@ Client
 
 ---
 
-## 第一阶段已知限制
+#### 阶段总结
+##### 一句话总结
+第一阶段的核心目标是打通 AI 应用层最小通路：HTTP 路由可用、业务编排可跑、模型调用可达、消息可入库、客户端可联调。
+
+##### 当前结论
+到第一阶段结束时，最小闭环已经稳定可用；但仍存在明显工程边界：
+
 1. 暂无登录体系，仅以 `SID` 区分会话。
 2. 落库语义为“入队成功”，不是“请求返回前强一致落盘”。
 3. 内存上下文没有全局淘汰策略（当前只裁剪单会话消息长度）。
 4. 缺少生产级限流、熔断、审计和观测能力。
 
----
+#### 下一阶段
+##### 第二阶段会怎么做
+第二阶段围绕“可扩展、可并发、可持续对话”推进，重点包括：
 
-## 后续阶段（未实现）
-- 第二阶段（关键优先）：上下文策略升级（从“按条数裁剪”升级为“按 token 预算 + 摘要记忆 + 最近窗口”）。
-  - 目标：降低关键信息丢失风险，显著提升多轮对话稳定性与回答一致性。
-  - 计划：新增 `max_context_tokens`，保留最近 N 轮原文，早期历史滚动摘要为 summary memory。
-- 第二阶段补充：API 层解耦重构（`RegisterAiHttpApi` 仅保留路由装配，路由处理逻辑拆分为独立 handler/controller，降低单函数复杂度并提升可测试性）。
-- 第二阶段补充：Provider 选择接入（新增 `ai.provider.type`，在 `main.cc` 按配置创建 `OpenAICompatibleClient` 或 `AnthropicClient`，保持 `ChatService` / `ai_http_api` 无感）。
-- 第二阶段补充：MySQL 连接池化（将 `ChatRepository` 从单连接 + `std::mutex` 串行模型改为连接池模型，配合 hook 机制实现 DB IO 协程化）。详见下方独立章节。
-- 第三阶段：记忆检索增强（RAG/向量召回），在 summary + recent 之外按语义召回历史关键事实。
-- 第四阶段：用户体系与鉴权（账号、Token、会话归属）。
-- 第五阶段：稳定性治理（限流、重试、熔断、降级）。
-- 第六阶段：可观测性（指标、日志、trace、告警）。
-- 第七阶段：运维发布（灰度、配置分层、备份恢复）。
-- 工程改进项：HTTP 响应封装优化，新增 `setJsonBody(...)` 统一 JSON 输出入口，并让 `setBody(std::string&&)` 支持移动语义，减少一次字符串拷贝。
-- 工程改进项：LLM 客户端网络 IO 协程化，建议在第二阶段与 Provider 选择一并落地（改一次 LLM 客户端层、改到位，避免第三阶段 RAG 上线后并发压力暴露线程饥饿问题）。详见下方独立章节。
+1. 上下文策略升级为“token 预算 + 摘要记忆 + 最近窗口”。
+2. API 层解耦，`ai_http_api` 仅保留路由装配。
+3. 引入 `ai.provider.type`，支持 `openai_compatible/anthropic` 运行时切换。
+4. 存储层改为 MySQL 连接池模型，并推进 LLM/DB IO 协程友好化。
 
 ---
 
-## 待实施优化：LLM 客户端从 curl_easy 迁移到 curl_multi + Fiber 协程调度
+## 第二阶段：Provider 切换、上下文摘要与并发能力增强
 
-### 问题背景
-当前 `OpenAICompatibleClient` 和 `AnthropicClient` 使用 `curl_easy_perform()` 发起 HTTP 请求（见 `openai_compatible_client.cc:429` 和 `:518`）。该调用是同步阻塞的：在等待 LLM 上游响应期间，当前 IOManager 工作线程被完全占住。
+### 0. 第二阶段改动类速览
+#### 0.1 配置与启动装配
+- `src/ai/config/ai_app_config.h/.cc`
+- `src/ai/config/ai_server.example.yml`
+- `src/ai/main.cc`
 
-sylar 框架的 hook 机制（`hook.cc`）已拦截 `socket/connect/read/write/send/recv` 等 POSIX IO 系统调用，在 IOManager 线程上自动转为非阻塞 + fiber yield。但 libcurl 内部使用 `poll()`/`select()` 做多路复用等待，而当前 hook 未拦截这两个调用，导致 fiber 在 `poll()` 上真正阻塞，hook 机制无法生效。
+本阶段在配置层新增了 provider 选择（但不支持热重载，服务器启动后就不能更改）、摘要策略参数和 MySQL 连接池参数，并在 `main.cc` 完成按配置装配依赖。
 
-后果：若同时有多个 LLM 请求（尤其是流式请求，耗时可达数十秒），IOManager 的工作线程会被逐个钉死，最终耗尽线程池，整个网络层无法处理新请求。
+#### 0.2 API 层解耦
+- 新增：`src/ai/http/ai_http_handlers.h/.cc`
+- 调整：`src/ai/http/ai_http_api.cc`
 
-### 选定方案：curl_multi + IOManager fd 托管（方案 A）
+`RegisterAiHttpApi` 只保留路由装配，具体路由处理下沉到 `AiHttpHandlers`。
 
-不再使用 `curl_easy_perform()`，改用 `curl_multi` 接口，将 curl 内部的 socket fd 注册到 IOManager 的 epoll 上，IO 就绪时唤醒 fiber 继续驱动 curl 状态机。这样 curl 的网络 IO 完全融入 fiber 调度，单个工作线程可并发处理大量 LLM 请求而互不阻塞。
+#### 0.3 业务编排升级
+- `src/ai/service/chat_service.h/.cc`
+- `src/ai/service/chat_interfaces.h`
 
-### 核心实现步骤
+完成上下文策略从“按条数裁剪”升级为“token 预算 + 摘要记忆 + 最近窗口”。
 
-#### 1. 封装 FiberCurlSession（新增文件）
-新增 `src/ai/llm/fiber_curl_session.h/.cc`，封装单次 curl 请求的 fiber 协程化执行：
+#### 0.4 LLM 客户端并发模型升级
+- 新增：`src/ai/llm/fiber_curl_session.h/.cc`
+- 调整：`src/ai/llm/openai_compatible_client.cc`
+- 调整：`src/ai/llm/anthropic_client.cc`
 
-```cpp
-class FiberCurlSession {
-public:
-    // 初始化 curl_multi + curl_easy，注册回调
-    bool Init(CURL* easy_handle);
-    // 阻塞当前 fiber 直到请求完成（内部通过 yield/resume 实现非阻塞）
-    CURLcode Perform();
-    // 清理资源
-    ~FiberCurlSession();
-};
-```
+将阻塞式 `curl_easy_perform` 改为 `curl_multi + IOManager` 协程化驱动。
 
-#### 2. Perform() 内部流程（关键）
-```cpp
-CURLcode FiberCurlSession::Perform() {
-    CURLM* multi = curl_multi_init();
-    curl_multi_add_handle(multi, m_easy);
+#### 0.5 持久化与并发读写升级
+- 新增：`src/ai/storage/mysql_connection_pool.h/.cc`
+- 调整：`src/ai/storage/chat_repository.h/.cc`
+- 调整：`src/ai/storage/async_mysql_writer.h/.cc`
+- 调整：`src/ai/sql/init_ai_chat.sql`
 
-    // 注册 socket 回调：curl 需要监听 fd 时通知我们
-    curl_multi_setopt(multi, CURLMOPT_SOCKETFUNCTION, SocketCallback);
-    curl_multi_setopt(multi, CURLMOPT_SOCKETDATA, this);
+存储层从“单连接 + 串行锁”升级为连接池模型，并补充摘要字段持久化。
 
-    // 注册 timer 回调：curl 需要超时唤醒时通知我们
-    curl_multi_setopt(multi, CURLMOPT_TIMERFUNCTION, TimerCallback);
-    curl_multi_setopt(multi, CURLMOPT_TIMERDATA, this);
+#### 0.6 构建与测试
+- 调整：`CMakeLists.txt`
+- 调整：`tests/test_ai_chat_service.cc`
 
-    // 启动状态机
-    int running = 0;
-    curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &running);
-
-    // 主循环：每次 fiber yield 等待 IO 或 timer，被唤醒后继续驱动
-    while (running > 0) {
-        Fiber::YieldToHold();  // 让出 fiber，等 IOManager 唤醒
-        // 唤醒后根据就绪的 fd 或超时调用 socket_action
-        curl_multi_socket_action(multi, m_ready_fd, m_ready_action, &running);
-    }
-
-    // 提取结果
-    CURLMsg* msg = curl_multi_info_read(multi, ...);
-    CURLcode result = msg->data.result;
-
-    curl_multi_remove_handle(multi, m_easy);
-    curl_multi_cleanup(multi);
-    return result;
-}
-```
-
-#### 3. SocketCallback（fd 事件注册）
-当 curl 需要监听某个 fd 的读/写事件时回调此函数：
-```cpp
-static int SocketCallback(CURL* easy, curl_socket_t fd, int what, void* userp, void* socketp) {
-    FiberCurlSession* self = static_cast<FiberCurlSession*>(userp);
-    IOManager* iom = IOManager::GetThis();
-
-    // what == CURL_POLL_REMOVE: 移除 fd 上的事件监听
-    // what == CURL_POLL_IN:     注册 READ 事件，就绪时 schedule fiber 恢复
-    // what == CURL_POLL_OUT:    注册 WRITE 事件
-    // what == CURL_POLL_INOUT:  注册 READ + WRITE
-
-    // 先清除旧事件（如果有）
-    // 再按 what 注册新事件，回调中 schedule 当前 fiber 恢复
-    // 记录 m_ready_fd / m_ready_action 供 Perform() 循环使用
-}
-```
-
-#### 4. TimerCallback（超时管理）
-curl 内部需要定时器时回调：
-```cpp
-static int TimerCallback(CURLM* multi, long timeout_ms, void* userp) {
-    FiberCurlSession* self = static_cast<FiberCurlSession*>(userp);
-    IOManager* iom = IOManager::GetThis();
-
-    if (timeout_ms < 0) {
-        // 取消定时器
-    } else if (timeout_ms == 0) {
-        // 立即触发：直接 schedule fiber
-    } else {
-        // 注册 IOManager timer，到期后 schedule fiber 恢复
-    }
-}
-```
-
-#### 5. 改造 OpenAICompatibleClient / AnthropicClient
-将 `Complete()` 和 `StreamComplete()` 中的：
-```cpp
-CURLcode code = curl_easy_perform(curl);
-```
-替换为：
-```cpp
-FiberCurlSession session;
-session.Init(curl);
-CURLcode code = session.Perform();
-```
-
-其余代码（请求构建、响应解析、回调处理）。
-
-### 需要注意的细节
-
-1. **fiber 绑定线程**：`SocketCallback` 中 schedule fiber 恢复时，应尊重 `fiber->getBoundThread()`，避免 ucontext 跨线程恢复崩溃（与 hook.cc 中 sleep 的处理一致）。
-2. **curl_multi 生命周期**：每次请求创建独立的 `CURLM*`，避免多 fiber 共享同一个 multi handle 带来的线程安全问题。如果后续需要连接池复用，可以考虑 per-thread multi handle。
-3. **WRITEFUNCTION 回调兼容**：流式场景的 `StreamWriteCallback` 不需要改动，它仍然由 curl 在数据到达时调用，只是驱动方式从 `curl_easy_perform` 内部循环变成了 `curl_multi_socket_action` 驱动。
-4. **错误处理**：`curl_multi_info_read` 返回的 `CURLMsg` 中包含最终的 `CURLcode`，与原来 `curl_easy_perform` 的返回值语义一致，上层错误处理逻辑无需修改。
-5. **退化兼容**：如果当前线程没有 IOManager（如测试线程），`Perform()` 应退化为直接调用 `curl_easy_perform()`，保持向后兼容。
-
-### 曾考虑但未选择的方案
-
-- **方案 B（hook poll/select）**：在 `hook.cc` 补上 `poll` 和 `select` 的 hook。改动小，但 libcurl 内部状态机复杂，poll 的 fd 集合和超时语义与 IOManager 的 per-fd 事件模型不完全匹配，边界问题多，长期维护成本高。
-- **方案 C（专用阻塞线程池）**：把 `curl_easy_perform()` 扔到独立线程池，fiber yield 等结果。实现简单，但引入额外线程切换开销和线程池管理复杂度，且线程数仍然是并发上限瓶颈，不如方案 A 彻底。
-
-### 预期收益
-- IOManager 工作线程不再被 LLM 请求阻塞，单线程可并发服务大量 LLM 调用。
-- 与框架 fiber 调度体系完全融合，无额外线程池开销。
-- 对上层 `ChatService` 和 API 层完全透明，无需修改。
+新增源码纳入构建，补齐第二阶段关键路径测试。
 
 ---
 
-## 待实施优化：ChatRepository 从单连接改为 MySQL 连接池（第二阶段，curl_multi 改造之后）
+### 1. 本阶段目标
+在第一阶段最小通路可用的基础上，第二阶段目标是把 AI 应用层推进到“可扩展、可并发、可持续对话”的状态：
 
-### 问题背景
-当前 `ChatRepository`（`chat_repository.cc`）使用单个 `MYSQL*` 连接 + `std::mutex` 串行化所有查询。存在两个问题：
+- 运行时可按配置切换 LLM provider（而不是编译期写死）
+- 上下文不再只按条数裁剪，支持摘要记忆与 token 预算控制
+- API 路由从单文件堆叠改为装配与处理分离
+- LLM 调用与 DB 读写不再占死 IO 工作线程
+- 持久化结构支持摘要长期记忆
 
-1. **阻塞工作线程**：`mysql_query()`、`mysql_store_result()`、`mysql_real_connect()`、`mysql_ping()` 底层都走 TCP socket IO。虽然 sylar 的 hook 机制已拦截 `read/write/connect`，理论上能让 MySQL IO 自动 fiber 化，但 `std::mutex` 不是 fiber 感知的——一个 fiber 拿到锁后若在 `mysql_query` 内 yield，锁不会释放，其他 fiber 在 `lock_guard` 处会阻塞整个线程。
-2. **并发瓶颈**：所有读写请求串行排队经过同一个连接，即使 MySQL 本身能处理并发，应用层也只能逐个执行。
+这一阶段仍然是“应用层能力增强”，未进入用户体系、鉴权、限流、观测等生产治理主题。
 
-严重程度比 curl 低（MySQL 查询通常毫秒级，LLM 请求秒级到十秒级），但在 MySQL 慢查询或网络抖动时同样会卡住工作线程。
+---
 
-### 选定方案：连接池
+### 2. 本阶段完成项
 
-不改 MySQL 调用方式（不用非阻塞 API），而是维护一个连接池，每个 fiber 从池中取独立连接，用完归还。
+#### 1. 配置体系升级与 provider 可切换装配
+配置层新增并落地：
 
-### 核心设计
+- `ProviderSettings`（`ai.provider.type`）
+- `AnthropicSettings`（`ai.anthropic.*`）
+- `ChatSettings` 扩展：
+  - `max_context_tokens`
+  - `recent_window_messages`
+  - `summary_trigger_tokens`
+  - `summary_max_tokens`
+  - `summary_prompt`
+- `MysqlSettings` 扩展：
+  - `pool_min_size`
+  - `pool_max_size`
+  - `pool_acquire_timeout_ms`
 
-#### 1. 新增 MysqlConnectionPool
-新增 `src/ai/storage/mysql_connection_pool.h/.cc`：
+`Validate()` 由“固定校验 OpenAI-Compatible”改为“按 `ai.provider.type` 分支校验”，在启动期 fail-fast。
 
-```cpp
-class MysqlConnectionPool {
-public:
-    using ptr = std::shared_ptr<MysqlConnectionPool>;
+`main.cc` 装配逻辑升级为：
 
-    // 初始化连接池，创建 min_size 个初始连接
-    bool Init(const config::MysqlSettings& settings, size_t min_size, size_t max_size, std::string& error);
+1. 读取 provider 配置
+2. 按类型构建 `OpenAICompatibleClient` 或 `AnthropicClient`
+3. 注入统一 `LlmClient` 到 `ChatService`
+4. 同时初始化 MySQL 连接池并注入仓储与异步写入器
 
-    // 从池中获取一个可用连接（池空时创建新连接，达上限时 fiber yield 等待归还）
-    MYSQL* Acquire(uint64_t timeout_ms = 3000);
+这样 `ChatService` 和 HTTP API 层不需要感知 provider 差异，仍只依赖抽象接口。
 
-    // 归还连接到池中
-    void Release(MYSQL* conn);
+##### 学习问答记录（中间件边界）
+**Q：当前有哪些中间件？分别干了什么？**
 
-    // 关闭所有连接
-    void Shutdown();
-};
-```
+**A：**
+当前 AI 应用层在 `main.cc` 里只注入了一个中间件：
 
-#### 2. RAII 连接守卫
-```cpp
-class ScopedMysqlConn {
-    MysqlConnectionPool* m_pool;
-    MYSQL* m_conn;
-public:
-    ScopedMysqlConn(MysqlConnectionPool* pool) : m_pool(pool), m_conn(pool->Acquire()) {}
-    ~ScopedMysqlConn() { if (m_conn) m_pool->Release(m_conn); }
-    MYSQL* get() { return m_conn; }
-    operator bool() { return m_conn != nullptr; }
-};
-```
+1. `request_id` 注入中间件（`CallbackMiddleware::AfterCallback`）
+   - 位置：`src/ai/main.cc` 中 `server->addMiddleware(...)`
+   - 行为：为每个请求生成 `X-Request-Id`，同时写入 request/response 头
+   - 目的：统一链路追踪，便于日志排障和客户端问题定位
+   - 特征：不拦截请求，不改变业务语义，只做横切增强
 
-#### 3. 改造 ChatRepository
-- 构造函数注入 `MysqlConnectionPool::ptr` 替代 `MysqlSettings`。
-- 移除 `m_conn` 成员和 `m_mutex`。
-- 每个查询方法内部通过 `ScopedMysqlConn` 获取/归还连接：
+**Q：为什么现在的数据库操作不属于中间件？**
 
-```cpp
-bool ChatRepository::LoadHistory(...) {
-    ScopedMysqlConn conn(m_pool.get());
-    if (!conn) {
-        error = "acquire mysql connection failed";
-        return false;
-    }
-    // 用 conn.get() 替代原来的 m_conn，其余查询逻辑不变
-    mysql_query(conn.get(), sql.str().c_str());
-    ...
-}
-```
+**A：**
+因为数据库操作属于业务/存储层职责，不在 HTTP 中间件执行链上：
 
-#### 4. 同步改造 AsyncMySqlWriter
-`AsyncMySqlWriter` 当前也持有独立 `MYSQL*` 连接做批量写入。改造方式：
-- 注入同一个连接池，`FlushBatch()` 时 Acquire 一个连接，事务完成后 Release。
-- 或者保持独立连接不变（写路径在后台线程，不占 IOManager 工作线程，优先级低）。
+1. 中间件的定义是“请求管线横切逻辑”
+   - 典型入口是 `before/after`，运行在路由处理前后
+   - 关注点是鉴权、追踪、限流、统一补头、审计等
 
-### 池内等待的 fiber 化
-当池中无可用连接且已达 `max_size` 上限时，`Acquire()` 需要等待其他 fiber 归还。实现方式：
-- 维护一个等待队列（存放 `Fiber::ptr`）。
-- `Acquire()` 发现无可用连接时，将当前 fiber 入队并 `Fiber::YieldToHold()`。
-- `Release()` 归还连接后，若等待队列非空，取出队首 fiber 并 `IOManager::schedule()` 唤醒。
-- 这样等待过程不阻塞线程，其他 fiber 可以继续执行。
+2. 当前数据库读写发生在业务层
+   - 入口是 `ChatService` 调用 `ChatRepository` / `AsyncMySqlWriter`
+   - 这些调用是“具体业务动作”，不是“通用请求横切动作”
 
-### 连接健康检查
-- `Release()` 归还时记录归还时间。
-- `Acquire()` 取出连接时，若距上��使用超过阈值（如 30s），先 `mysql_ping()` 探活，失败则丢弃并创建新连接。
-- 避免拿到已被 MySQL server 超时断开的死连接。
+3. 最关键区别
+   - 中间件：对多路由通用、与具体业务无关、可插拔
+   - DB 操作：强业务语义、依赖会话与消息模型、不可简单复用到所有路由
 
-### 配置扩展
-在 `MysqlSettings` 中新增：
-- `pool_min_size`：初始连接数（默认 2）
-- `pool_max_size`：最大连接数（默认 8）
-- `pool_acquire_timeout_ms`：获取连接超时（默认 3000）
+#### 2. API 层解耦：`ai_http_api` 只负责装配
+本阶段把原先集中在 `ai_http_api.cc` 的路由实现拆出到 `AiHttpHandlers`：
 
-### 曾考虑但未选择的方案
-- **非阻塞 MySQL API（`mysql_real_query_start/cont`）**：需要 MariaDB Connector/C 才有完整支持，标准 libmysqlclient 支持有限。改造量大，且连接池方案已经足够解决并发问题。
-- **仅替换 std::mutex 为 fiber 协程锁**：能让 hook 生效不卡线程，但仍然是单连接串行，并发瓶颈未解。
+- `ai_http_api.cc`：只做“路由 -> handler 成员函数”的绑定
+- `ai_http_handlers.cc`：承接 health/completions/stream/history 四条路由逻辑
 
-### 预期收益
-- 多个 fiber 可并发执行 DB 查询，不再串行排队。
-- 配合 hook 机制，每个连接的 socket IO 自动 fiber 化，不阻塞工作线程。
-- 连接复用减少频繁建连开销。
-- 对上层 `ChatService` 完全透明（`ChatStore` 接口不变）。
+收益：
+
+- 单文件复杂度下降，后续新增 API 路径不再挤在一个注册函数里
+- handler 可独立阅读与测试，更符合 controller 风格
+
+#### 3. ChatService 上下文策略升级：token 预算 + 摘要记忆 + 最近窗口
+核心结构变化：
+
+- `ConversationContext` 新增 `summary` 与 `summary_updated_at_ms`
+- `SnapshotContext()` 返回完整上下文对象（而非仅消息数组）
+
+核心算法变化：
+
+1. `BuildBudgetedContextMessages(...)`
+   - 先拼接 `summary + recent messages`
+   - 使用启发式 token 估算（`bytes/4 + overhead`）
+   - 按预算从近到远选择可携带上下文
+
+2. `MaybeRefreshSummary(...)`
+   - 当累计 token 超过阈值，且历史长度超过最近窗口时触发摘要
+   - 通过 `LlmClient::Complete` 生成新摘要
+   - 内存上下文收缩为“摘要 + 最近窗口消息”
+   - 摘要通过 `ChatStore::SaveConversationSummary(...)` 落库
+
+3. 失败语义
+   - 摘要刷新失败只记日志，不阻断主回复
+   - 主对话链路优先保证可用性
+
+#### 4. LLM 网络 IO 协程化：`FiberCurlSession`
+本阶段新增 `FiberCurlSession`，把一次 curl 请求纳入 sylar 协程调度：
+
+- 在 IOManager 存在时：
+  - 用 `curl_multi` 驱动
+  - 通过 socket/timer 回调接入 IOManager 事件和定时器
+  - 当前 fiber 在等待期间 `YieldToHold()`，不阻塞工作线程
+- 在无 IOManager 场景（如部分测试线程）：
+  - 自动退化到 `curl_easy_perform()`
+
+`OpenAICompatibleClient` 与 `AnthropicClient` 的同步/流式请求都切换为 `FiberCurlSession::Perform()`。
+
+##### 学习问答记录（FiberCurlSession 协程语义）
+**Q：`FiberCurlSession` 挂起的是哪个协程？**
+
+**A：**
+是“执行到 `FiberCurlSession session(curl);` / `session.Perform()` 这一行的当前协程”。
+
+1. 构造函数里会捕获当前上下文
+   - `m_iom = sylar::IOManager::GetThis()`
+   - `m_wait_fiber = sylar::Fiber::GetThis()`
+2. 在 `Perform()` 的等待阶段调用 `Fiber::YieldToHold()` 挂起该协程
+3. 当 socket/timer 事件就绪时，再由 IOManager `schedule(m_wait_fiber, ...)` 恢复同一个协程继续执行
+
+结论：`FiberCurlSession` 不是“为 curl 新建一个协程”，而是“把当前协程在网络等待期间挂起，事件就绪后恢复”。
+
+**Q：为什么 `FiberCurlSession` 里有两个 `private static` 静态成员函数？为什么这样设计？**
+
+**A：**
+这是为了同时满足 libcurl 回调机制和类封装边界：
+
+1. 两个函数对应两类不同回调
+   - `SocketCallback` 对应 `CURLMOPT_SOCKETFUNCTION`（socket 读写事件）
+   - `TimerCallback` 对应 `CURLMOPT_TIMERFUNCTION`（超时事件）
+
+2. 必须使用 `static`
+   - libcurl 是 C 风格回调，要求普通函数指针签名
+   - 非 static 成员函数带隐式 `this`，签名不匹配，不能直接传给 libcurl
+   - static 成员函数无隐式 `this`，可直接作为回调入口
+
+3. 放在 `private` 是为了封装
+   - 这两个函数只是内部“回调入口（trampoline）”
+   - 外部不应直接调用；真正处理逻辑回到对象成员函数（通过 `userp` 还原 `FiberCurlSession*`）执行
+
+结论：两个函数是“按事件类型分工”，`static` 是“为兼容 C 回调签名”，`private` 是“保持内部实现不外泄”。
+
+**Q：`curl_multi` 是怎么取代 `curl_easy_perform` 的？为什么这是项目亮点？**
+
+**A：**
+关键点不是“换了一个 libcurl 接口”，而是把“网络状态机驱动权”从 libcurl 内部拿到应用层，并接入 sylar 的协程调度。
+
+先看两种模型的本质差异：
+
+1. `curl_easy_perform`（阻塞模型）
+   - libcurl 在函数内部自己执行一整套循环：
+     - 等待 socket 可读/可写
+     - 推进连接/TLS/发送/接收状态
+     - 判断超时与完成
+   - 调用方线程会被持续占用，直到请求结束才返回
+
+2. `curl_multi`（外部驱动模型）
+   - libcurl 不再“自己阻塞跑完”，而是把关键事件要求告诉调用方：
+     - 需要监听哪个 fd（读/写）
+     - 需要多久后触发一次 timeout 驱动
+   - 调用方在事件到来时再调用 `curl_multi_socket_action(...)` 推进状态机
+   - 完成状态通过 `curl_multi_info_read(...)` 拉取 `CURLMSG_DONE`
+
+在本项目中的具体落地（`FiberCurlSession::Perform`）：
+
+1. 初始化 multi 并注册回调
+   - `CURLMOPT_SOCKETFUNCTION` -> `SocketCallback`
+   - `CURLMOPT_TIMERFUNCTION` -> `TimerCallback`
+   - 代码：`src/ai/llm/fiber_curl_session.cc`
+
+2. 由回调把 libcurl 事件桥接到 sylar
+   - `SocketCallback` 内部调用 `RegisterSocketWatch`，把 fd 注册到 IOManager
+   - `TimerCallback` 内部调用 `UpdateTimer`，把 timeout 注册到 IOManager 定时器
+
+3. 当前 Fiber 在无事件时主动让出线程
+   - `WaitForSignal()` 中调用 `Fiber::YieldToHold()`
+   - 当前线程可以去运行其他 Fiber，不被单个上游请求占住
+
+4. 事件到来时恢复“同一个 Fiber”
+   - fd/timer 触发后走 `OnSocketEvent(...)`
+   - 事件写入 `m_pending_actions`
+   - 通过 `schedule(m_wait_fiber, m_wait_thread)` 恢复原 Fiber
+
+5. 恢复后继续推进 curl 状态机
+   - 循环弹出 pending action
+   - 每次调用 `curl_multi_socket_action(...)`
+   - 每轮用 `DrainMessages()` 检查是否收到 `CURLMSG_DONE`
+
+可以把它理解为以下时序：
+
+1. `Perform()` 启动 multi 状态机
+2. libcurl 告诉“监听哪些 fd / 何时超时”
+3. 当前 Fiber 挂起（`YieldToHold`）
+4. IOManager 等待 epoll/timer 事件
+5. 事件到来后恢复该 Fiber
+6. Fiber 继续推进 multi 状态机
+7. 直到读到 `CURLMSG_DONE`，返回最终 `CURLcode`
+
+为什么这是本项目亮点（应用层与网络层融合）：
+
+1. 业务层收益
+   - `LlmClient` 接口保持不变，上层业务不用改调用方式
+   - 同步/流式请求都复用同一套协程化网络驱动
+
+2. 运行时收益
+   - 从“线程阻塞等待上游 API”升级为“Fiber 挂起等待 IO”
+   - 显著降低 IO worker 被长请求占死的概率
+   - 高并发下线程利用率与吞吐更稳定
+
+3. 架构收益
+   - 这是 AI 应用层（LLM 请求）第一次真正贴合 sylar 网络层调度模型
+   - 后续做 `curl_multi + 连接复用 + 更细粒度超时/熔断` 都有明确演进基础
+
+补充：兼容性与兜底策略
+
+1. 若当前线程不在 IOManager/Fiber 上，自动回退 `curl_easy_perform`
+2. 统一 `Cleanup()` 保证 timer/fd/multi 资源可重复安全清理
+3. 该设计兼顾“性能路径”与“非协程环境可用性”
+
+结论：`curl_multi` 在这里不是“简单替换函数调用”，而是把 LLM 网络请求改造成 sylar 可调度、可挂起、可恢复的事件驱动执行模型，是第二阶段最核心的工程增强点之一。
+
+##### 面试表达模板（可直接复用）
+**30 秒版本（电梯表达）**
+
+我们把 `curl_easy_perform` 换成了 `curl_multi + IOManager`。  
+本质上是把 libcurl 内部的阻塞状态机驱动，改成应用层事件驱动：socket/timer 事件接入 sylar，当前 Fiber 在等待期间 `YieldToHold` 挂起，事件到来后恢复同一 Fiber 继续推进。  
+这样上层 `LlmClient` 接口不变，但并发模型从“线程阻塞”等上游 API，升级成“协程挂起等待 IO”。
+
+**2 分钟版本（展开说明）**
+
+这个改造的关键不是 API 替换，而是“驱动权迁移”：
+
+1. 以前 `curl_easy_perform` 是黑盒阻塞调用，线程会一直被占用到请求结束。
+2. 现在 `curl_multi` 会告诉我们“该监听哪些 fd、多久后触发超时”，我们把这些事件接到 sylar 的 IOManager。
+3. 在 `FiberCurlSession::Perform` 里，无事件就 `WaitForSignal -> YieldToHold`，让当前 Fiber 主动让出线程。
+4. 当 fd 可读写或超时到达时，回调把 action 入队，并 `schedule` 恢复原 Fiber。
+5. 恢复后继续 `curl_multi_socket_action` 推进状态机，直到 `curl_multi_info_read` 拿到 `CURLMSG_DONE`。
+
+这个方案的工程价值是：
+
+1. 对业务层无侵入：`ChatService`/`LlmClient` 调用方式不变。
+2. 对并发模型收益明显：避免 IO worker 被上游长请求占死。
+3. 与 sylar 架构一致：把应用层 LLM 调用真正纳入 Fiber 调度体系。
+
+#### 5. MySQL 连接池化与摘要持久化
+本节按当前学习目标，聚焦“主服务读路径并发能力”，不展开主服务写库流程。
+
+##### 5.1 为什么要引入连接池（读路径视角）
+1. 避免每次查询都 `mysql_init + mysql_real_connect`，降低延迟与抖动。
+2. 限制并发连接上限，避免读高峰把数据库连接打满。
+3. 池满时使用 fiber 挂起等待，避免阻塞 IO 工作线程。
+
+##### 5.2 主服务读路径调用链（本阶段重点）
+1. `ChatService::GetHistory(...)`
+2. `ChatRepository::LoadHistory(...)`
+3. `ScopedMysqlConn` 构造时向池借连接（`Acquire`）
+4. 执行查询并返回结果
+5. `ScopedMysqlConn` 析构自动归还连接（`Release`）
+
+同类读接口还包括 `LoadRecentMessages(...)`、`LoadConversationSummary(...)`。
+
+##### 5.3 连接池在读路径下的并发策略
+`Acquire(timeout_ms, error)` 的三分支策略：
+
+1. 有空闲连接：直接返回
+2. 无空闲但未达上限：新建连接后返回
+3. 已达上限：当前 fiber 进入等待队列并 `YieldToHold` 挂起，等待 `Release` 或超时定时器唤醒
+
+补充机制：
+
+1. 空闲连接超过阈值会做 `mysql_ping` 健康检查
+2. 失效连接会关闭并从池计数中扣减，再继续尝试获取可用连接
+3. `Shutdown()` 会唤醒等待者，避免协程永久挂起
+
+##### 5.4 摘要字段与结构准备（与读路径相关）
+`conversations` 已包含：
+
+1. `summary_text`
+2. `summary_updated_at_ms`
+
+建表/迁移脚本保持幂等（`ADD COLUMN IF NOT EXISTS`），便于重复部署与升级。
+
+##### 5.5 后续 MQ 架构声明（写路径迁移）
+1. 当前仓库仍有主服务写库实现代码（如 `AsyncMySqlWriter` 等），但本节不再作为学习重点。
+2. 第三阶段引入 MQ 后，主服务进程目标是“只读库 + 生产消息”，不再使用主服务的 MySQL 连接池执行写库。
+3. 写库职责迁移到 MQ 消费者进程，由消费者独立维护自己的 MySQL 连接池并批量落库。
+
+---
+
+### 3. 测试与验证
+本阶段已完成的验证如下：
+
+1. 编译验证
+   - `cmake --build build -j8 --target ai_chat_server test_ai_chat_service`
+   - 结果：通过
+
+2. 单测验证
+   - `./bin/test_ai_chat_service`
+   - 结果：通过
+   - 新增覆盖：`TestSummaryRefresh()`（摘要触发与窗口收缩）
+
+3. 运行验证（OpenAI-Compatible）
+   - 启动服务后 `GET /api/v1/healthz` 返回 `ok=true`
+   - `/api/v1/chat/completions` 可进入新调用链（无有效上游 key 时按预期返回上游超时/错误）
+
+4. 运行验证（Anthropic）
+   - 切换 `ai.provider.type=anthropic` 后服务可启动
+   - `GET /api/v1/healthz` 正常返回
+
+5. 数据库结构验证
+   - `conversations` 表已存在 `summary_text`、`summary_updated_at_ms` 字段
+
+说明：
+- 全量 `ctest` 中大量 `Not Run` 来自仓库其他未构建测试目标，不属于本阶段回归失败。
+
+---
+
+### 4. 当前实现与后续优化
+#### 当前取舍
+- token 计数采用启发式估算，优先轻量落地，不引入 tokenizer 依赖
+- provider 切换粒度是进程级（启动时选择一个 provider）
+- 摘要刷新在主流程后执行，失败降级为告警日志
+
+#### 已知风险点
+1. `MysqlConnectionPool` 的高并发边界仍需专项压测（超时、唤醒顺序、shutdown 竞态）
+2. `FiberCurlSession` 在极端流式并发下仍需长期稳定性观察
+3. 摘要质量受提示词和模型稳定性影响，需后续评估迭代
+
+#### 后续可优化方向
+1. 引入真实 tokenizer（提高 token 预算精度）
+2. 支持 provider 级别更细粒度路由（按模型/租户分流）
+3. 将摘要与长时记忆扩展到检索增强（RAG）
+4. HTTP 响应封装可继续优化（统一 `setJsonBody(...)`、移动语义减少拷贝）
+
+---
+
+### 5. 阶段总结
+第二阶段的核心价值，是把第一阶段“可跑通”升级为“可扩展 + 可并发 + 可持续对话”：
+
+- provider 不再写死，具备运行时可配置切换能力
+- 上下文管理从固定条数进入“预算 + 摘要 + 窗口”策略
+- API、LLM、Storage 三层都完成了面向后续扩展的边界重构
+- 并发模型从“阻塞风险明显”转向“协程友好”
+
+到这里，AI 应用层第二阶段主目标已经完成。
+
+### 6. 下一阶段
+第三阶段建议优先推进：
+
+1. 写路径消息队列化（MQ）：主服务只负责生产消息，消费者负责批量落库。
+2. 记忆检索增强（RAG/向量召回）。
+3. 用户体系与鉴权（账号、token、会话归属）。
+4. 稳定性治理（限流、重试、熔断、降级）。
+5. 可观测性（指标、日志、trace、告警）。
+
+---
+
+## 后续阶段（规划）
+- 第三阶段：写路径消息队列化（MQ），将主服务进程内异步写入升级为外部 MQ（生产者-消费者），实现写路径解耦、削峰与失败重放；消费者侧批量落库并独立维护连接池。
+- 第四阶段：记忆检索增强（RAG/向量召回），在 summary + recent 之外按语义召回历史关键事实。
+- 第五阶段：用户体系与鉴权（账号、Token、会话归属）。
+- 第六阶段：稳定性治理（限流、重试、熔断、降级）。
+- 第七阶段：可观测性（指标、日志、trace、告警）。
+- 第八阶段：运维发布（灰度、配置分层、备份恢复）。

@@ -11,12 +11,13 @@ namespace ai
 namespace api
 {
 
-AiHttpHandlers::AiHttpHandlers(const ai::service::ChatService::ptr& chat_service,
-                               const ai::config::ChatSettings& chat_settings,
-                               const std::string& default_model)
-    : m_chat_service(chat_service)
-    , m_chat_settings(chat_settings)
-    , m_default_model(default_model)
+AiHttpHandlers::AiHttpHandlers(
+    const ai::service::ChatService::ptr& chat_service,
+    const ai::config::ChatSettings& chat_settings,
+    const std::string& default_model)
+    : m_chat_service(chat_service),
+      m_chat_settings(chat_settings),
+      m_default_model(default_model)
 {
 }
 
@@ -25,10 +26,11 @@ std::string AiHttpHandlers::GetRequestId(http::HttpRequest::ptr request) const
     return request->getHeader("x-request-id");
 }
 
-bool AiHttpHandlers::BuildChatRequest(http::HttpRequest::ptr request,
-                                      http::HttpResponse::ptr response,
-                                      ai::common::ChatCompletionRequest& out,
-                                      std::string& error) const
+bool AiHttpHandlers::BuildChatRequest(
+    http::HttpRequest::ptr request,
+    http::HttpResponse::ptr response,
+    ai::common::ChatCompletionRequest& out,
+    std::string& error) const
 {
     out.sid = ai::common::ExtractSid(request, response);
 
@@ -72,9 +74,10 @@ bool AiHttpHandlers::BuildChatRequest(http::HttpRequest::ptr request,
     return true;
 }
 
-void AiHttpHandlers::WriteSuccessJson(http::HttpResponse::ptr response,
-                                      const ai::common::ChatCompletionResponse& chat_response,
-                                      const std::string& request_id) const
+void AiHttpHandlers::WriteSuccessJson(
+    http::HttpResponse::ptr response,
+    const ai::common::ChatCompletionResponse& chat_response,
+    const std::string& request_id) const
 {
     nlohmann::json payload;
     payload["ok"] = true;
@@ -110,9 +113,10 @@ int AiHttpHandlers::HandleHealthz(http::HttpRequest::ptr request,
     return 0;
 }
 
-int AiHttpHandlers::HandleChatCompletions(http::HttpRequest::ptr request,
-                                          http::HttpResponse::ptr response,
-                                          http::HttpSession::ptr)
+int AiHttpHandlers::HandleChatCompletions(
+    http::HttpRequest::ptr request,
+    http::HttpResponse::ptr response,
+    http::HttpSession::ptr)
 {
     const std::string request_id = GetRequestId(request);
 
@@ -200,9 +204,10 @@ int AiHttpHandlers::HandleHistory(http::HttpRequest::ptr request,
     const std::string conversation_id = request->getRouteParam("conversation_id");
 
     const std::string limit_text = request->getParam("limit", "");
-    size_t limit = ai::common::ParseLimit(limit_text,
-                                          static_cast<uint32_t>(m_chat_settings.history_load_limit),
-                                          static_cast<uint32_t>(m_chat_settings.history_query_limit_max));
+    size_t limit = ai::common::ParseLimit(
+        limit_text,
+        static_cast<uint32_t>(m_chat_settings.history_load_limit),
+        static_cast<uint32_t>(m_chat_settings.history_query_limit_max));
 
     std::vector<ai::common::ChatMessage> messages;
     std::string error;

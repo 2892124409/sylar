@@ -66,7 +66,8 @@ class ChatRepository : public service::ChatStore
      * @param[out] error 失败时返回错误信息。
      * @return true 查询成功；false 查询失败。
      */
-    virtual bool LoadRecentMessages(const std::string& sid, const std::string& conversation_id, size_t limit, std::vector<common::ChatMessage>& out, std::string& error) override;
+    virtual bool LoadRecentMessages(const std::string& sid, const std::string& conversation_id, size_t limit,
+                                    std::vector<common::ChatMessage>& out, std::string& error) override;
 
     /**
      * @brief 加载会话历史消息。
@@ -78,18 +79,14 @@ class ChatRepository : public service::ChatStore
      * @param[out] error 失败时返回错误信息。
      * @return true 查询成功；false 查询失败。
      */
-    virtual bool LoadHistory(const std::string& sid, const std::string& conversation_id, size_t limit, std::vector<common::ChatMessage>& out, std::string& error) override;
+    virtual bool LoadHistory(const std::string& sid, const std::string& conversation_id, size_t limit,
+                             std::vector<common::ChatMessage>& out, std::string& error) override;
 
-    virtual bool LoadConversationSummary(const std::string& sid,
-                                         const std::string& conversation_id,
-                                         std::string& summary,
-                                         uint64_t& updated_at_ms,
-                                         std::string& error) override;
+    virtual bool LoadConversationSummary(const std::string& sid, const std::string& conversation_id,
+                                         std::string& summary, uint64_t& updated_at_ms, std::string& error) override;
 
-    virtual bool SaveConversationSummary(const std::string& sid,
-                                         const std::string& conversation_id,
-                                         const std::string& summary,
-                                         uint64_t updated_at_ms,
+    virtual bool SaveConversationSummary(const std::string& sid, const std::string& conversation_id,
+                                         const std::string& summary, uint64_t updated_at_ms,
                                          std::string& error) override;
 
   private:

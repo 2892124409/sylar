@@ -11,6 +11,7 @@
 /**
  * @file llm_client.h
  * @brief 大模型客户端抽象接口与通用请求/响应结构定义。
+ * @details 上层不关心倒是用的是 OpenAI 格式还是 Anthropic 格式的模型 API，上层只调用需要这个基类的两个接口 Complete() 和 StreamComplete().
  */
 
 namespace ai

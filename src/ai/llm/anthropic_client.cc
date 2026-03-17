@@ -24,24 +24,43 @@ static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 namespace
 {
 
+/**
+ * @brief 同步请求写回调上下文。
+ */
 struct SyncWriteContext
 {
+    /** @brief 接收完整 HTTP 响应体。 */
     std::string response;
 };
 
+/**
+ * @brief 流式请求写回调上下文。
+ */
 struct StreamWriteContext
 {
+    /** @brief 上层增量回调。 */
     LlmClient::DeltaCallback on_delta;
+    /** @brief SSE 行缓冲（处理半包）。 */
     std::string line_buffer;
+    /** @brief 聚合后的完整文本。 */
     std::string assembled;
+    /** @brief 响应模型名。 */
     std::string model;
+    /** @brief 停止原因。 */
     std::string finish_reason;
+    /** @brief 输入 token 数。 */
     uint64_t prompt_tokens = 0;
+    /** @brief 输出 token 数。 */
     uint64_t completion_tokens = 0;
+    /** @brief 解析错误信息。 */
     std::string parse_error;
+    /** @brief 是否由上层主动中断流。 */
     bool callback_aborted = false;
 };
 
+/**
+ * @brief 进程级 curl 全局初始化（仅一次）。
+ */
 void EnsureCurlGlobalInit()
 {
     static std::once_flag s_init_flag;
@@ -49,6 +68,9 @@ void EnsureCurlGlobalInit()
                    { curl_global_init(CURL_GLOBAL_DEFAULT); });
 }
 
+/**
+ * @brief 去掉字符串首尾空白字符（空格、Tab、CR）。
+ */
 std::string Trim(const std::string& value)
 {
     size_t begin = 0;
@@ -64,16 +86,25 @@ std::string Trim(const std::string& value)
     return value.substr(begin, end - begin);
 }
 
+/**
+ * @brief 构建 Anthropic API Key 请求头。
+ */
 std::string BuildApiKeyHeader(const std::string& api_key)
 {
     return "x-api-key: " + api_key;
 }
 
+/**
+ * @brief 构建 Anthropic API 版本头。
+ */
 std::string BuildApiVersionHeader(const std::string& api_version)
 {
     return "anthropic-version: " + api_version;
 }
 
+/**
+ * @brief libcurl 同步响应写回调。
+ */
 size_t SyncWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
 {
     size_t total = size * nmemb;
@@ -82,6 +113,12 @@ size_t SyncWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
     return total;
 }
 
+/**
+ * @brief 解析 Anthropic 错误节点（同步或流式事件中的 error）。
+ * @param node 待解析 JSON 节点。
+ * @param[out] error 解析到的人类可读错误信息。
+ * @return true 识别到错误节点；false 非错误节点。
+ */
 bool TryParseErrorNode(const nlohmann::json& node, std::string& error)
 {
     if (!node.is_object())
@@ -119,6 +156,12 @@ bool TryParseErrorNode(const nlohmann::json& node, std::string& error)
     return false;
 }
 
+/**
+ * @brief 从 Anthropic `content[]` 数组提取 text 片段并拼接。
+ * @param content Anthropic 响应中的 content 数组。
+ * @param[out] out 拼接后的文本。
+ * @return true 至少提取到一段文本；false 未提取到有效文本。
+ */
 bool ExtractTextFromContentArray(const nlohmann::json& content, std::string& out)
 {
     if (!content.is_array())
@@ -143,6 +186,9 @@ bool ExtractTextFromContentArray(const nlohmann::json& content, std::string& out
     return has_text;
 }
 
+/**
+ * @brief 从 Anthropic usage 节点提取 token 统计。
+ */
 void FillUsageFromNode(const nlohmann::json& usage, uint64_t& prompt_tokens, uint64_t& completion_tokens)
 {
     if (!usage.is_object())
@@ -160,6 +206,12 @@ void FillUsageFromNode(const nlohmann::json& usage, uint64_t& prompt_tokens, uin
     }
 }
 
+/**
+ * @brief 构建 Anthropic Messages API 请求体。
+ * @details
+ * - `system` 消息会被聚合到顶层 `system` 字段；
+ * - 其余消息映射为 `messages[]` 中的 user/assistant 条目。
+ */
 nlohmann::json BuildRequestBody(const LlmCompletionRequest& request, bool stream)
 {
     nlohmann::json body;
@@ -196,6 +248,9 @@ nlohmann::json BuildRequestBody(const LlmCompletionRequest& request, bool stream
     return body;
 }
 
+/**
+ * @brief 解析 Anthropic 同步响应 JSON。
+ */
 bool ParseSyncResponse(const std::string& response_text, LlmCompletionResult& result, std::string& error)
 {
     nlohmann::json parsed = nlohmann::json::parse(response_text, nullptr, false);
@@ -240,6 +295,9 @@ bool ParseSyncResponse(const std::string& response_text, LlmCompletionResult& re
     return true;
 }
 
+/**
+ * @brief 处理单行 SSE 数据，抽取增量文本并回调上层。
+ */
 bool HandleStreamDataLine(const std::string& line, StreamWriteContext& ctx)
 {
     if (line.empty())
@@ -346,6 +404,9 @@ bool HandleStreamDataLine(const std::string& line, StreamWriteContext& ctx)
     return true;
 }
 
+/**
+ * @brief libcurl 流式写回调：按行切分并委托 HandleStreamDataLine。
+ */
 size_t StreamWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
 {
     size_t total = size * nmemb;
@@ -384,12 +445,18 @@ size_t StreamWriteCallback(void* contents, size_t size, size_t nmemb, void* user
 
 } // namespace
 
+/**
+ * @brief 构造 Anthropic 客户端并完成 curl 全局初始化。
+ */
 AnthropicClient::AnthropicClient(const AnthropicSettings& settings)
     : m_settings(settings)
 {
     EnsureCurlGlobalInit();
 }
 
+/**
+ * @brief 组装 `.../v1/messages` 目标地址。
+ */
 std::string AnthropicClient::BuildMessagesUrl() const
 {
     if (m_settings.base_url.empty())
@@ -413,6 +480,9 @@ std::string AnthropicClient::BuildMessagesUrl() const
     return base_url + "/v1/messages";
 }
 
+/**
+ * @brief Anthropic 同步补全实现。
+ */
 bool AnthropicClient::Complete(const LlmCompletionRequest& request,
                                LlmCompletionResult& result,
                                std::string& error)
@@ -483,6 +553,9 @@ bool AnthropicClient::Complete(const LlmCompletionRequest& request,
     return true;
 }
 
+/**
+ * @brief Anthropic 流式补全实现。
+ */
 bool AnthropicClient::StreamComplete(const LlmCompletionRequest& request,
                                      const DeltaCallback& on_delta,
                                      LlmCompletionResult& result,

@@ -128,18 +128,26 @@ std::string ParseConfigFilePath(int argc, char** argv)
  */
 int main(int argc, char** argv)
 {
+    /// @brief Step 0: 启用 sylar hook。
+    /// @details
+    /// 让后续网络/定时等待等阻塞点在 IOManager 线程内可被 fiber 化调度，
+    /// 降低“一个阻塞调用占死一个工作线程”的风险。
     sylar::set_hook_enable(true);
 
+    /// @brief Step 1: 解析命令行配置路径并加载 YAML 到全局配置中心。
     std::string config_file = ParseConfigFilePath(argc, argv);
     std::string error;
     if (!LoadConfigFromFile(config_file, error))
     {
+        /// @note 配置加载失败直接退出，避免带默认值误启动。
         std::cerr << "load config failed: " << error << std::endl;
         return 1;
     }
 
+    /// @brief Step 2: 启动前配置合法性校验（含 provider 分支校验）。
     if (!ai::config::AiAppConfig::Validate(error))
     {
+        /// @note fail-fast：配置不合法不进入任何后续初始化步骤。
         std::cerr << "invalid ai app config: " << error << std::endl;
         return 1;
     }
@@ -155,14 +163,16 @@ int main(int argc, char** argv)
     const ai::config::MysqlSettings mysql_settings = ai::config::AiAppConfig::GetMysqlSettings();
     const ai::config::PersistSettings persist_settings = ai::config::AiAppConfig::GetPersistSettings();
 
+    /// @brief Step 3: 初始化 MySQL 连接池（读写共享）。
     ai::storage::MysqlConnectionPool::ptr mysql_pool(new ai::storage::MysqlConnectionPool());
     if (!mysql_pool->Init(mysql_settings, error))
     {
+        /// @note 数据层基础设施不可用，直接退出。
         std::cerr << "init mysql connection pool failed: " << error << std::endl;
         return 1;
     }
 
-    /// @brief 先初始化查询仓库；数据库不可用时快速失败。
+    /// @brief Step 4: 初始化查询仓库（建表/迁移检查在这里做）。
     ai::storage::ChatRepository::ptr chat_repository(new ai::storage::ChatRepository(mysql_pool));
     if (!chat_repository->Init(error))
     {
@@ -170,7 +180,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    /// @brief 启动异步持久化线程（队列 + 批量刷盘）。
+    /// @brief Step 5: 启动异步写入器（请求线程只入队，后台批量落库）。
     ai::storage::AsyncMySqlWriter::ptr async_writer(new ai::storage::AsyncMySqlWriter(mysql_pool, persist_settings));
     if (!async_writer->Start(error))
     {
@@ -178,11 +188,14 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    /// @brief 组装核心依赖：LLM 客户端 + ChatService。
+    /// @brief Step 6: 按 provider 类型创建具体 LLM Client。
+    /// @details
+    /// 业务层只依赖 LlmClient 抽象，provider 差异在 main 装配期收敛。
     ai::llm::LlmClient::ptr llm_client;
     std::string default_model;
     if (provider_settings.type == "anthropic")
     {
+        /// @brief 把应用层配置映射到 Anthropic 客户端配置对象。
         ai::llm::AnthropicSettings settings;
         settings.base_url = anthropic_settings.base_url;
         settings.api_key = anthropic_settings.api_key;
@@ -192,20 +205,23 @@ int main(int argc, char** argv)
         settings.request_timeout_ms = anthropic_settings.request_timeout_ms;
 
         llm_client.reset(new ai::llm::AnthropicClient(settings));
+        /// @brief API 默认模型用于未显式传 model 的请求。
         default_model = anthropic_settings.default_model;
     }
     else
     {
+        /// @note Validate 已保证 type 合法；非 anthropic 分支即 openai_compatible。
         llm_client.reset(new ai::llm::OpenAICompatibleClient(openai_settings));
         default_model = openai_settings.default_model;
     }
 
-    ai::service::ChatService::ptr chat_service(new ai::service::ChatService(
-        chat_settings, llm_client, chat_repository, async_writer));
+    /// @brief Step 7: 组装业务编排核心 ChatService。
+    ai::service::ChatService::ptr chat_service(new ai::service::ChatService(chat_settings, llm_client, chat_repository, async_writer));
 
-    // 按 benchmark 同款模式创建 worker：
-    // use_caller=true  => 单 IOM（io/accept 复用同一调度器）
-    // use_caller=false => 双 IOM（io 与 accept 分离）
+    /// @brief Step 8: 按配置创建 HTTP worker（benchmark 同款模式）。
+    /// @details
+    /// - use_caller=true: 单 IOM，io/accept 共用同一个调度器。
+    /// - use_caller=false: 双 IOM，accept 与 io 分离。
     const uint32_t io_worker_threads = http::HttpFrameworkConfig::GetIOWorkerThreads();
     const uint32_t accept_worker_threads = http::HttpFrameworkConfig::GetAcceptWorkerThreads();
     const bool use_caller = sylar::FiberFrameworkConfig::GetIOManagerUseCaller();
@@ -223,10 +239,10 @@ int main(int argc, char** argv)
         accept_worker.reset(new sylar::IOManager(accept_worker_threads, false, "sylar-http-accept-worker"));
     }
 
-    /// @brief 使用上述 worker 创建 HTTP Server。
+    /// @brief Step 9: 使用上述 worker 创建 HTTP Server。
     http::HttpServer::ptr server(new http::HttpServer(io_worker.get(), accept_worker.get()));
 
-    /// @brief 可选 TLS 配置（由 YAML 决定是否启用）。
+    /// @brief Step 10: 可选 TLS 配置（由 YAML 决定是否启用）。
     if (server_settings.enable_ssl)
     {
         http::ssl::SslConfig ssl_config;
@@ -241,7 +257,9 @@ int main(int argc, char** argv)
         }
     }
 
-    /// @brief 为每个请求注入 request_id，便于链路追踪。
+    /// @brief Step 11: 注入 request_id 中间件，统一链路追踪字段。
+    /// @details
+    /// 同时写入 request/response 头，便于服务端日志与客户端响应做对应。
     server->addMiddleware(http::Middleware::ptr(new http::CallbackMiddleware(
         [](http::HttpRequest::ptr request, http::HttpResponse::ptr response, http::HttpSession::ptr)
         {
@@ -252,10 +270,10 @@ int main(int argc, char** argv)
         },
         http::CallbackMiddleware::AfterCallback())));
 
-    /// @brief 注册 AI 业务路由。
+    /// @brief Step 12: 注册 AI 业务路由（health/completions/stream/history）。
     ai::api::RegisterAiHttpApi(server, chat_service, chat_settings, default_model);
 
-    /// @brief 解析绑定地址（host:port）。
+    /// @brief Step 13: 解析并校验绑定地址（host:port）。
     sylar::Address::ptr bind_addr =
         sylar::Address::LookupAny(server_settings.host + ":" + std::to_string(server_settings.port));
     if (!bind_addr)
@@ -269,7 +287,8 @@ int main(int argc, char** argv)
     std::vector<sylar::Address::ptr> fails;
     addrs.push_back(bind_addr);
 
-    /// @brief 启动服务；若 bind/start 失败则先停写线程再退出。
+    /// @brief Step 14: bind + start。
+    /// @note 失败时先停异步写线程，避免后台线程泄漏。
     if (!server->bind(addrs, fails) || !server->start())
     {
         std::cerr << "start ai chat server failed at " << server_settings.host << ":" << server_settings.port << std::endl;
@@ -281,14 +300,14 @@ int main(int argc, char** argv)
               << " ssl=" << (server_settings.enable_ssl ? "on" : "off")
               << " use_caller=" << (use_caller ? "on" : "off") << std::endl;
 
-    /// @brief 注册优雅退出信号：Ctrl+C(SIGINT) 或 kill(SIGTERM)。
+    /// @brief Step 15: 注册优雅退出信号：Ctrl+C(SIGINT) / kill(SIGTERM)。
     ::signal(SIGINT, HandleSignal);
     ::signal(SIGTERM, HandleSignal);
 
     if (use_caller)
     {
-        // caller 模式下，让主线程进入 IOM 调度循环；
-        // 通过定时器轮询停止标志并触发关停。
+        /// @brief caller 模式：
+        /// 主线程进入 IOM 调度循环，通过定时器轮询停止标志触发关停。
         sylar::Timer::ptr stop_timer;
         stop_timer = io_worker->addTimer(200, [&]()
                                          {
@@ -297,6 +316,7 @@ int main(int argc, char** argv)
                 return;
             }
 
+            /// @brief 收到停止信号后按顺序停服与停 worker。
             BASE_LOG_INFO(g_logger) << "ai_chat_server stopping (caller mode)";
             server->stop();
             if (accept_worker && accept_worker != io_worker)
@@ -305,19 +325,22 @@ int main(int argc, char** argv)
             }
             if (stop_timer)
             {
+                /// @brief 关停触发后取消轮询定时器，避免重复执行关停逻辑。
                 stop_timer->cancel();
             } }, true);
+        /// @brief stop() 会阻塞直到调度器完成收尾并退出。
         io_worker->stop();
     }
     else
     {
-        /// @brief 非 caller 模式下，主线程阻塞轮询，直到收到停止信号。
+        /// @brief 非 caller 模式：
+        /// 主线程以 200ms 周期轮询停止标志，避免 busy loop。
         while (!g_stop_requested.load(std::memory_order_acquire))
         {
             usleep(200 * 1000);
         }
 
-        /// @brief 先停 HTTP 服务，再停 worker。
+        /// @brief 停机顺序：先停 HTTP 服务，再停 accept/io worker。
         BASE_LOG_INFO(g_logger) << "ai_chat_server stopping";
         server->stop();
         if (accept_worker)
@@ -330,7 +353,10 @@ int main(int argc, char** argv)
         }
     }
 
-    // 最后停止持久化线程，保证已入队消息尽量刷盘完成后再退出。
+    /// @brief Step 16: 最终收尾。
+    /// @details
+    /// 1) 先停异步写线程，尽量把已入队消息刷盘完成；
+    /// 2) 再关闭连接池，释放数据库连接资源。
     async_writer->Stop();
     mysql_pool->Shutdown();
     return 0;
