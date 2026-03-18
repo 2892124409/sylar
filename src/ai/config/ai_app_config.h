@@ -116,14 +116,10 @@ struct ChatSettings
  */
 struct AuthSettings
 {
-    /** @brief 是否允许未登录游客访问聊天接口。 */
-    bool enable_guest;
     /** @brief 访问令牌有效期（秒）。 */
     uint64_t token_ttl_seconds;
     /** @brief PBKDF2 密码哈希迭代次数。 */
     uint32_t password_pbkdf2_iterations;
-    /** @brief 登录后是否将游客会话数据归并到账号主体。 */
-    bool merge_guest_on_login;
 };
 
 /**

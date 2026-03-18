@@ -707,7 +707,7 @@ int main(int argc, char** argv)
 
         std::cout << "Connected to " << opts.base_url << "\n";
         std::cout << "Mode: " << (opts.stream ? "stream" : "sync") << "\n";
-        std::cout << "Auth: " << (client.HasBearerToken() ? "bearer" : "guest") << "\n";
+        std::cout << "Auth: " << (client.HasBearerToken() ? "bearer" : "unauthenticated") << "\n";
         if (!opts.conversation_id.empty())
         {
             std::cout << "Start with conversation_id=" << opts.conversation_id << "\n";
@@ -752,7 +752,7 @@ int main(int argc, char** argv)
             {
                 if (!client.HasBearerToken())
                 {
-                    std::cout << "Current mode: guest\n";
+                    std::cout << "Current mode: unauthenticated\n";
                 }
                 else
                 {
@@ -795,7 +795,7 @@ int main(int argc, char** argv)
                 }
 
                 client.ClearBearerToken();
-                std::cout << "Logout success, switched to guest mode.\n";
+                std::cout << "Logout success, switched to unauthenticated mode.\n";
                 continue;
             }
 

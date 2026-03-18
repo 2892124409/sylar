@@ -16,47 +16,6 @@ namespace ai
 namespace common
 {
 
-namespace
-{
-
-/**
- * @brief 从响应 `Set-Cookie` 列表中提取 SID。
- * @param response HTTP 响应对象。
- * @return SID 字符串；未命中返回空字符串。
- */
-std::string ExtractSidFromSetCookie(const http::HttpResponse::ptr& response)
-{
-    // 读取响应对象里所有 Set-Cookie 原始条目。
-    const std::vector<std::string>& cookies = response->getSetCookies();
-    // 逐条扫描，查找名为 SID 的 Cookie。
-    for (size_t i = 0; i < cookies.size(); ++i)
-    {
-        // 取出当前条目，避免重复索引访问。
-        const std::string& cookie = cookies[i];
-        // 只接受以 "SID=" 开头的条目；其他 Cookie 直接跳过。
-        if (cookie.compare(0, 4, "SID=") != 0)
-        {
-            // 当前条目不是 SID，继续检查下一条。
-            continue;
-        }
-
-        // 找到属性分隔符 ';'，SID 的值位于 "SID=" 后到 ';' 前。
-        size_t end = cookie.find(';');
-        // 若没有 ';'，说明整条字符串都是 "SID=值" 形式。
-        if (end == std::string::npos)
-        {
-            // 使用字符串末尾作为截断位置。
-            end = cookie.size();
-        }
-        // 从索引 4（跳过 "SID="）开始截取真实 SID 值并返回。
-        return cookie.substr(4, end - 4);
-    }
-    // 未找到 SID 时返回空串，让上层走“无 SID”逻辑。
-    return "";
-}
-
-} // namespace
-
 uint64_t NowMs()
 {
     // 直接复用底层工具函数，返回当前毫秒时间戳。
@@ -85,20 +44,6 @@ std::string GenerateRequestId()
     ss << NowMs() << "-" << s_id.fetch_add(1, std::memory_order_relaxed);
     // 返回 request_id 字符串。
     return ss.str();
-}
-
-std::string ExtractSid(http::HttpRequest::ptr request, http::HttpResponse::ptr response)
-{
-    // 先从请求 Cookie 中读取 SID（最常见来源）。
-    std::string sid = request->getCookie("SID");
-    // 如果请求里已经带了 SID，直接返回。
-    if (!sid.empty())
-    {
-        return sid;
-    }
-
-    // 请求中没有 SID 时，尝试从响应 Set-Cookie 中兜底提取。
-    return ExtractSidFromSetCookie(response);
 }
 
 bool ParseJsonBody(http::HttpRequest::ptr request, nlohmann::json& out, std::string& error)

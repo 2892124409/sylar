@@ -103,17 +103,11 @@ http::ConfigVar<std::string>::ptr g_ai_chat_summary_prompt =
         "你是对话摘要助手。请把旧对话压缩成简洁、可延续上下文的中文摘要，保留人物偏好、事实、约束、未完成任务。",
         "summary prompt");
 
-http::ConfigVar<bool>::ptr g_ai_auth_enable_guest =
-    http::Config::Lookup<bool>("ai.auth.enable_guest", true, "allow guest mode access");
-
 http::ConfigVar<uint64_t>::ptr g_ai_auth_token_ttl_seconds =
     http::Config::Lookup<uint64_t>("ai.auth.token_ttl_seconds", 2592000, "auth token ttl seconds");
 
 http::ConfigVar<uint32_t>::ptr g_ai_auth_password_pbkdf2_iterations =
     http::Config::Lookup<uint32_t>("ai.auth.password_pbkdf2_iterations", 150000, "password pbkdf2 iterations");
-
-http::ConfigVar<bool>::ptr g_ai_auth_merge_guest_on_login =
-    http::Config::Lookup<bool>("ai.auth.merge_guest_on_login", true, "merge guest conversations to user principal on login");
 
 http::ConfigVar<std::string>::ptr g_ai_mysql_host =
     http::Config::Lookup<std::string>("ai.mysql.host", "127.0.0.1", "mysql host");
@@ -218,10 +212,8 @@ ChatSettings AiAppConfig::GetChatSettings()
 AuthSettings AiAppConfig::GetAuthSettings()
 {
     AuthSettings settings;
-    settings.enable_guest = g_ai_auth_enable_guest->getValue();
     settings.token_ttl_seconds = g_ai_auth_token_ttl_seconds->getValue();
     settings.password_pbkdf2_iterations = g_ai_auth_password_pbkdf2_iterations->getValue();
-    settings.merge_guest_on_login = g_ai_auth_merge_guest_on_login->getValue();
     return settings;
 }
 

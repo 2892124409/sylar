@@ -16,7 +16,6 @@
  *
  * 该模块负责：
  * - 时间与 ID 生成；
- * - SID 提取；
  * - JSON 请求体解析；
  * - 标准 JSON 响应/错误响应输出。
  */
@@ -42,15 +41,6 @@ std::string GenerateConversationId();
  * @return 形如 `<ms>-<seq>` 的字符串。
  */
 std::string GenerateRequestId();
-
-/**
- * @brief 从请求上下文提取 SID。
- * @details 先读请求 Cookie `SID`；未命中时尝试从响应 `Set-Cookie` 兜底提取。
- * @param request HTTP 请求对象。
- * @param response HTTP 响应对象。
- * @return SID 字符串；未找到时返回空字符串。
- */
-std::string ExtractSid(http::HttpRequest::ptr request, http::HttpResponse::ptr response);
 
 /**
  * @brief 解析 HTTP 请求体为 JSON。

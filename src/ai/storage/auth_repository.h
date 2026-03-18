@@ -74,10 +74,6 @@ class AuthRepository
                      uint64_t revoked_at_ms,
                      std::string& error);
 
-    bool MergeGuestDataToPrincipal(const std::string& guest_sid,
-                                   const std::string& principal_sid,
-                                   std::string& error);
-
   private:
     bool EnsureSchema(std::string& error);
     bool ExecuteSql(MYSQL* conn, const std::string& sql, std::string& error);

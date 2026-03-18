@@ -46,7 +46,8 @@ struct ChatCompletionRequest
     /**
      * @brief 会话标识 SID，标识这个客户端是谁（会话主体）。
      * @details
-     * 当前项目的 SID 是从 Cookie 取的，一个浏览器如果不清理 Cookie 通常 SID 不变
+     * 当前项目由鉴权中间件注入主体 SID（`X-Principal-Sid`），
+     * 形如 `u:<user_id>`，用于统一标识登录后的会话主体。
      */
     std::string sid;
     /**

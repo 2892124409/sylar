@@ -43,10 +43,8 @@ class AuthService
 
     bool Login(const std::string& username,
                const std::string& password,
-               const std::string& guest_sid,
                std::string& access_token,
                AuthIdentity& identity,
-               bool& merged_guest_data,
                std::string& error,
                http::HttpStatus& status);
 

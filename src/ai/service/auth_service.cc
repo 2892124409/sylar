@@ -79,14 +79,11 @@ bool AuthService::Register(const std::string& username,
 
 bool AuthService::Login(const std::string& username,
                         const std::string& password,
-                        const std::string& guest_sid,
                         std::string& access_token,
                         AuthIdentity& identity,
-                        bool& merged_guest_data,
                         std::string& error,
                         http::HttpStatus& status)
 {
-    merged_guest_data = false;
     if (!m_repository)
     {
         status = http::HttpStatus::INTERNAL_SERVER_ERROR;
@@ -137,29 +134,6 @@ bool AuthService::Login(const std::string& username,
     identity.user_id = user.id;
     identity.username = user.username;
     identity.principal_sid = BuildPrincipalSid(user.id);
-
-    if (m_settings.enable_guest &&
-        m_settings.merge_guest_on_login &&
-        !guest_sid.empty() &&
-        guest_sid != identity.principal_sid &&
-        guest_sid.find("u:") != 0)
-    {
-        std::string merge_error;
-        if (!m_repository->MergeGuestDataToPrincipal(guest_sid, identity.principal_sid, merge_error))
-        {
-            BASE_LOG_ERROR(g_logger) << "merge guest data failed guest_sid=" << guest_sid
-                                     << " principal_sid=" << identity.principal_sid
-                                     << " error=" << merge_error;
-
-            std::string revoke_error;
-            (void)m_repository->RevokeToken(token_hash, now_ms, revoke_error);
-
-            status = http::HttpStatus::INTERNAL_SERVER_ERROR;
-            error = "merge guest history failed";
-            return false;
-        }
-        merged_guest_data = true;
-    }
 
     status = http::HttpStatus::OK;
     return true;

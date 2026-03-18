@@ -120,10 +120,10 @@
 提供 API 层和 Service 层共享的工具函数。
 
 #### 当前学习 API 必看函数
-- `ExtractSid()`：从 Cookie/Set-Cookie 提取 SID。
 - `ParseJsonBody()`：把请求体解析成 JSON。
 - `ParseLimit()`：处理 `limit` 参数，带默认值和上限截断。
 - `WriteJson()` / `WriteJsonError()`：统一 JSON 输出。
+- `GenerateRequestId()`：生成链路 request_id，贯穿日志与响应定位。
 
 #### 当前阶段注意点
 - API 层的错误返回形态基本都通过 `WriteJsonError()` 保持一致。
@@ -437,11 +437,15 @@
 
 ---
 
-### 9. 联调客户端：`src/ai/client/chat_client.cc`
+### 9. 联调客户端：`src/ai/client/auth_chat_client.cc`
 #### 文件作用
-提供同步/流式/历史查询的一体化调试入口。
+提供注册/登录/鉴权状态查询 + 同步/流式/历史查询的一体化调试入口。
 
 #### 关键命令
+- `/register <u> <p>`
+- `/login <u> <p>`
+- `/logout`
+- `/me`
 - `/new`
 - `/history [limit]`
 - `/stream on|off`
@@ -456,7 +460,7 @@
 ### 10. 构建与测试
 #### 目标产物
 - `ai_chat_server`
-- `ai_chat_client`
+- `ai_auth_chat_client`
 - `test_ai_chat_service`
 
 #### 意义
@@ -1017,7 +1021,7 @@ Client
 
 ---
 
-## 第三阶段：用户体系与鉴权（游客可升级）
+## 第三阶段：用户体系与鉴权（强制登录）
 
 ### 0. 第三阶段改动类速览
 #### 0.1 配置与启动装配
@@ -1031,7 +1035,7 @@ Client
 - 新增：`src/ai/storage/auth_repository.h/.cc`
 - 调整：`src/ai/sql/init_ai_chat.sql`
 
-新增 `users`、`auth_tokens` 两张表，并提供游客 SID -> 登录主体 SID 的会话归并能力。
+新增 `users`、`auth_tokens` 两张表，提供注册/登录/鉴权/登出的持久化支撑。
 
 #### 0.3 认证业务服务层
 - 新增：`src/ai/service/auth_service.h/.cc`
@@ -1041,14 +1045,17 @@ Client
 #### 0.4 API 路由与中间件接入
 - 调整：`src/ai/http/ai_http_api.h/.cc`
 - 调整：`src/ai/http/ai_http_handlers.h/.cc`
+- 新增：`src/ai/middleware/auth_middleware.h/.cc`
+- 新增：`src/ai/middleware/request_id_middleware.h/.cc`
 - 调整：`src/ai/main.cc`
 
-新增 4 条鉴权路由，并把聊天请求的会话主体从“仅 Cookie SID”升级为“优先 `X-Principal-Sid`（登录用户主体）”。
+新增 4 条鉴权路由，并把聊天请求会话主体统一为 `X-Principal-Sid`（登录用户主体）。
+中间件实现从 `main.cc` 内联 Lambda 解耦为独立类，`main` 只做中间件装配调用。
 
 #### 0.5 构建与链接
 - 调整：`CMakeLists.txt`
 
-新增 `auth_service/auth_repository` 编译单元，并补充 `OpenSSL::Crypto` 链接用于 PBKDF2/SHA256。
+新增 `auth_service/auth_repository` 与 `ai/middleware/*` 编译单元，并补充 `OpenSSL::Crypto` 链接用于 PBKDF2/SHA256。
 
 ---
 
@@ -1056,8 +1063,8 @@ Client
 在第二阶段“可扩展 + 可并发 + 可持续对话”的基础上，第三阶段目标是解决身份连续性问题：
 
 - 引入账号体系，支持用户名密码注册/登录
-- 保留游客模式，兼容当前调试与未登录使用
-- 登录后把会话主体升级为用户维度（`u:<user_id>`），支持跨端延续历史
+- 会话主体统一为用户维度（`u:<user_id>`），支持跨端延续历史
+- 非公共 API 一律要求 Bearer 鉴权，移除游客访问分支
 - 保持现有 chat/history API 兼容，不破坏第一、二阶段链路
 - 为第四阶段 RAG 和后续权限治理提供统一身份锚点
 
@@ -1068,23 +1075,19 @@ Client
 #### 1. 身份模型升级：`SID` 到 `principal_sid`
 核心语义：
 
-1. 游客请求：
-   - 沿用 Cookie `SID`
-2. 登录请求：
+1. 登录请求：
    - 通过 Bearer token 鉴权后注入 `X-Principal-Sid = u:<user_id>`
-3. ChatService 维度：
+2. ChatService 维度：
    - 继续使用 `sid + conversation_id` 作为上下文与存储键
-   - 但 `sid` 已升级为“统一主体键”（游客 SID 或用户 SID）
+   - 其中 `sid` 统一为登录用户主体 SID（`u:<user_id>`）
 
 这样做到“业务层代码结构不变、身份语义升级”。
 
 #### 2. 配置体系新增 `ai.auth.*`
 新增并落地：
 
-- `enable_guest`（默认 `true`）
 - `token_ttl_seconds`（默认 `2592000`）
 - `password_pbkdf2_iterations`（默认 `150000`）
-- `merge_guest_on_login`（默认 `true`）
 
 `AiAppConfig::Validate()` 增加了 auth 配置合法性校验（TTL 和 PBKDF2 迭代次数必须大于 0）。
 
@@ -1093,13 +1096,6 @@ Client
 
 1. 用户创建与查询
 2. 令牌保存、查询、撤销
-3. 登录后游客数据归并（事务）
-
-归并事务流程：
-
-1. 把游客 `conversations` upsert 到用户主体 SID
-2. 把游客 `chat_messages.sid` 批量改写到用户主体 SID
-3. 删除游客侧 `conversations` 残留记录
 
 新增数据表：
 
@@ -1131,25 +1127,28 @@ Client
 
 中间件策略：
 
-1. 公共路由（不鉴权）：
+1. 当前中间件清单（均在 `src/ai/middleware`）：
+   - `RequestIdMiddleware`：前置生成并注入 `X-Request-Id`
+   - `AuthMiddleware`：前置鉴权、注入 `X-Principal-Sid` 等身份头
+2. 公共路由（不鉴权）：
    - `/api/v1/healthz`
    - `/api/v1/auth/register`
    - `/api/v1/auth/login`
-2. 强制鉴权路由：
+3. 强制鉴权路由：
    - `/api/v1/auth/me`
    - `/api/v1/auth/logout`
-3. 业务路由（chat/history）：
+4. 业务路由（chat/history）：
    - 有 Bearer 且合法 -> 走用户主体
-   - 有 Bearer 但非法/过期/撤销 -> 401（不回退游客）
-   - 无 Bearer -> 若 `enable_guest=true` 则游客可用，否则 401
+   - 有 Bearer 但非法/过期/撤销 -> 401
+   - 无 Bearer -> 401（强制登录）
 
 #### 6. 对话链路身份接入升级
 `AiHttpHandlers::BuildChatRequest()` 与 `HandleHistory()` 已改为：
 
-1. 优先读取 `X-Principal-Sid`
-2. 未命中再回退 `ExtractSid()`（Cookie SID）
+1. 仅从 `X-Principal-Sid` 读取主体 SID
+2. 未携带该头直接返回 401
 
-因此 chat/history 在“登录和游客”两种模式下都能复用同一条服务调用链。
+因此 chat/history 统一走“登录用户主体”调用链。
 
 ---
 
@@ -1168,7 +1167,7 @@ Client
 
 3. 结构验证
    - `init_ai_chat.sql` 已包含 `users` / `auth_tokens` 建表语句
-   - `main.cc` 已完成 auth 中间件和 auth 路由接入
+   - `main.cc` 已完成 request_id/auth 中间件装配，以及 auth 路由接入
 
 说明：
 - 本轮主要完成“第三阶段最小闭环”落地，端到端压测与专项安全测试留到后续阶段补强。
@@ -1180,13 +1179,12 @@ Client
 - 采用 Opaque token + DB 校验，优先可撤销与实现简单
 - 密码策略先做长度与字符合法性基础校验，复杂度策略暂未增强
 - 鉴权中间件先按路径规则控制，未引入细粒度 ACL/RBAC
-- 保留游客模式，避免影响现有调试与快速联调流程
+- 非公共接口统一强制 Bearer，简化权限语义与路由行为
 
 #### 已知风险点
-1. 登录归并在会话量很大时可能增加事务耗时，需压测验证
-2. 目前无登录失败限流/锁定机制，抗暴力破解能力有限
-3. token 生命周期管理较基础（无 refresh token、多设备管理能力弱）
-4. `/api/v1/auth/*` 路由目前未单独做安全审计日志落盘
+1. 目前无登录失败限流/锁定机制，抗暴力破解能力有限
+2. token 生命周期管理较基础（无 refresh token、多设备管理能力弱）
+3. `/api/v1/auth/*` 路由目前未单独做安全审计日志落盘
 
 #### 后续可优化方向
 1. 引入 refresh token 与多端会话管理
@@ -1200,8 +1198,8 @@ Client
 第三阶段核心价值，是把“会话连续性”从 Cookie 维度提升到用户维度：
 
 - 不破坏现有 chat API 协议，完成账号体系平滑接入
-- 通过 `principal_sid` 把游客与登录两条路径收敛到同一业务编排链路
-- 支持登录后历史归并，解决“换端/清 Cookie 后上下文断裂”的核心问题
+- 通过 `principal_sid` 把 chat/history 统一到单一鉴权调用链
+- 移除游客访问分支，避免“有 token/无 token”双轨行为造成语义分叉
 - 为第四阶段 RAG 的“用户级长期记忆”提供了稳定身份锚点
 
 到这里，AI 应用层第三阶段主目标已经完成（最小闭环版本）。

@@ -1,6 +1,7 @@
-#include "ai/common/ai_utils.h"
 #include "ai/config/ai_app_config.h"
 #include "ai/http/ai_http_api.h"
+#include "ai/middleware/auth_middleware.h"
+#include "ai/middleware/request_id_middleware.h"
 #include "ai/llm/anthropic_client.h"
 #include "ai/llm/openai_compatible_client.h"
 #include "ai/service/auth_service.h"
@@ -11,7 +12,6 @@
 #include "ai/storage/mysql_connection_pool.h"
 
 #include "http/core/http_framework_config.h"
-#include "http/middleware/middleware.h"
 #include "http/server/http_server.h"
 #include "http/ssl/ssl_config.h"
 #include "log/logger.h"
@@ -112,32 +112,6 @@ std::string ParseConfigFilePath(int argc, char** argv)
     return config_file;
 }
 
-bool IsPublicAuthPath(const std::string& path)
-{
-    return path == "/api/v1/healthz" || path == "/api/v1/auth/register" || path == "/api/v1/auth/login";
-}
-
-bool IsStrictAuthPath(const std::string& path)
-{
-    return path == "/api/v1/auth/me" || path == "/api/v1/auth/logout";
-}
-
-std::string ParseBearerTokenFromAuthorization(const std::string& authorization)
-{
-    const std::string prefix = "Bearer ";
-    if (authorization.size() <= prefix.size())
-    {
-        return std::string();
-    }
-
-    if (authorization.compare(0, prefix.size(), prefix) != 0)
-    {
-        return std::string();
-    }
-
-    return authorization.substr(prefix.size());
-}
-
 } // namespace
 
 /**
@@ -161,9 +135,6 @@ int main(int argc, char** argv)
     /// 让后续网络/定时等待等阻塞点在 IOManager 线程内可被 fiber 化调度，
     /// 降低“一个阻塞调用占死一个工作线程”的风险。
     sylar::set_hook_enable(true);
-    BASE_LOG_ROOT()->setLevel(base::LogLevel::INFO);
-    BASE_LOG_NAME("system")->setLevel(base::LogLevel::INFO);
-
     BASE_LOG_ROOT()->setLevel(base::LogLevel::INFO);
     BASE_LOG_NAME("system")->setLevel(base::LogLevel::INFO);
 
@@ -214,7 +185,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    /// @brief Step 5: 初始化账号鉴权仓库（用户/Token/游客归并表结构）。
+    /// @brief Step 5: 初始化账号鉴权仓库（用户/Token 表结构）。
     ai::storage::AuthRepository::ptr auth_repository(new ai::storage::AuthRepository(mysql_pool));
     if (!auth_repository->Init(error))
     {
@@ -304,63 +275,10 @@ int main(int argc, char** argv)
     }
 
     /// @brief Step 12: 注入 request_id 中间件，统一链路追踪字段。
-    /// @details
-    /// 同时写入 request/response 头，便于服务端日志与客户端响应做对应。
-    server->addMiddleware(http::Middleware::ptr(new http::CallbackMiddleware(
-        [](http::HttpRequest::ptr request, http::HttpResponse::ptr response, http::HttpSession::ptr)
-        {
-            const std::string request_id = ai::common::GenerateRequestId();
-            request->setHeader("X-Request-Id", request_id);
-            response->setHeader("X-Request-Id", request_id);
-            return true;
-        },
-        http::CallbackMiddleware::AfterCallback())));
+    server->addMiddleware(http::Middleware::ptr(new ai::middleware::RequestIdMiddleware()));
 
-    /// @brief Step 13: 注入鉴权中间件。
-    server->addMiddleware(http::Middleware::ptr(new http::CallbackMiddleware(
-        [auth_service, auth_settings](http::HttpRequest::ptr request, http::HttpResponse::ptr response,
-                                      http::HttpSession::ptr)
-        {
-            const std::string path = request->getPath();
-            if (IsPublicAuthPath(path))
-            {
-                return true;
-            }
-
-            const std::string token = ParseBearerTokenFromAuthorization(request->getHeader("Authorization"));
-            if (token.empty())
-            {
-                if (IsStrictAuthPath(path) || !auth_settings.enable_guest)
-                {
-                    ai::common::WriteJsonError(response, static_cast<http::HttpStatus>(401), "authorization required",
-                                               request->getHeader("x-request-id"));
-                    return false;
-                }
-                return true;
-            }
-
-            if (!auth_service)
-            {
-                ai::common::WriteJsonError(response, http::HttpStatus::INTERNAL_SERVER_ERROR,
-                                           "auth service unavailable", request->getHeader("x-request-id"));
-                return false;
-            }
-
-            ai::service::AuthIdentity identity;
-            std::string auth_error;
-            http::HttpStatus auth_status = http::HttpStatus::OK;
-            if (!auth_service->AuthenticateBearerToken(token, identity, auth_error, auth_status))
-            {
-                ai::common::WriteJsonError(response, auth_status, auth_error, request->getHeader("x-request-id"));
-                return false;
-            }
-
-            request->setHeader("X-Auth-User-Id", std::to_string(identity.user_id));
-            request->setHeader("X-Auth-Username", identity.username);
-            request->setHeader("X-Principal-Sid", identity.principal_sid);
-            return true;
-        },
-        http::CallbackMiddleware::AfterCallback())));
+    /// @brief Step 13: 注入鉴权中间件（从 main 解耦到独立类）。
+    server->addMiddleware(http::Middleware::ptr(new ai::middleware::AuthMiddleware(auth_service)));
 
     /// @brief Step 14: 注册 AI 业务路由（health/completions/stream/history/auth）。
     ai::api::RegisterAiHttpApi(server, auth_service, chat_service, chat_settings, default_model);

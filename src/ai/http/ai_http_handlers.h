@@ -146,15 +146,13 @@ class AiHttpHandlers
     /**
      * @brief 将 HTTP 请求转换为业务请求对象。
      * @details
-     * 会完成 SID 提取、JSON 解析、必填字段校验、默认值填充。
+     * 会完成主体 SID 提取、JSON 解析、必填字段校验、默认值填充。
      * @param request HTTP 请求对象。
-     * @param response HTTP 响应对象（用于 SID 下发等副作用）。
      * @param[out] out 转换后的业务请求对象。
      * @param[out] error 失败原因。
      * @return true 转换成功；false 转换失败。
      */
     bool BuildChatRequest(http::HttpRequest::ptr request,
-                          http::HttpResponse::ptr response,
                           ai::common::ChatCompletionRequest& out,
                           std::string& error) const;
 

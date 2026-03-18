@@ -147,6 +147,8 @@ if(BUILD_AI_CHAT_SERVER)
         src/ai/config/ai_app_config.cc
         src/ai/http/ai_http_api.cc
         src/ai/http/ai_http_handlers.cc
+        src/ai/middleware/auth_middleware.cc
+        src/ai/middleware/request_id_middleware.cc
         src/ai/llm/openai_compatible_client.cc
         src/ai/llm/anthropic_client.cc
         src/ai/llm/fiber_curl_session.cc
@@ -176,22 +178,6 @@ if(BUILD_AI_CHAT_SERVER)
 
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(ai_chat_server PRIVATE -Wall)
-    endif()
-
-    add_executable(ai_chat_client
-        src/ai/client/chat_client.cc
-    )
-    if(TARGET CURL::libcurl)
-        target_link_libraries(ai_chat_client PRIVATE CURL::libcurl)
-    else()
-        target_include_directories(ai_chat_client PRIVATE ${CURL_INCLUDE_DIRS})
-        target_link_libraries(ai_chat_client PRIVATE ${CURL_LIBRARIES})
-    endif()
-    set_target_properties(ai_chat_client PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
-    )
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(ai_chat_client PRIVATE -Wall)
     endif()
 
     add_executable(ai_auth_chat_client

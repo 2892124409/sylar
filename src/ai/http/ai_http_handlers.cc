@@ -30,15 +30,10 @@ std::string AiHttpHandlers::GetRequestId(http::HttpRequest::ptr request) const
 
 bool AiHttpHandlers::BuildChatRequest(
     http::HttpRequest::ptr request,
-    http::HttpResponse::ptr response,
     ai::common::ChatCompletionRequest& out,
     std::string& error) const
 {
     out.sid = request->getHeader("X-Principal-Sid");
-    if (out.sid.empty())
-    {
-        out.sid = ai::common::ExtractSid(request, response);
-    }
 
     nlohmann::json body;
     if (!ai::common::ParseJsonBody(request, body, error))
@@ -142,10 +137,15 @@ int AiHttpHandlers::HandleChatCompletions(
     http::HttpSession::ptr)
 {
     const std::string request_id = GetRequestId(request);
+    if (request->getHeader("X-Principal-Sid").empty())
+    {
+        ai::common::WriteJsonError(response, static_cast<http::HttpStatus>(401), "authorization required", request_id);
+        return 0;
+    }
 
     ai::common::ChatCompletionRequest chat_request;
     std::string error;
-    if (!BuildChatRequest(request, response, chat_request, error))
+    if (!BuildChatRequest(request, chat_request, error))
     {
         ai::common::WriteJsonError(response, http::HttpStatus::BAD_REQUEST, error, request_id);
         return 0;
@@ -168,10 +168,15 @@ int AiHttpHandlers::HandleChatStream(http::HttpRequest::ptr request,
                                      http::HttpSession::ptr session)
 {
     const std::string request_id = GetRequestId(request);
+    if (request->getHeader("X-Principal-Sid").empty())
+    {
+        ai::common::WriteJsonError(response, static_cast<http::HttpStatus>(401), "authorization required", request_id);
+        return 0;
+    }
 
     ai::common::ChatCompletionRequest chat_request;
     std::string error;
-    if (!BuildChatRequest(request, response, chat_request, error))
+    if (!BuildChatRequest(request, chat_request, error))
     {
         ai::common::WriteJsonError(response, http::HttpStatus::BAD_REQUEST, error, request_id);
         return 0;
@@ -226,7 +231,8 @@ int AiHttpHandlers::HandleHistory(http::HttpRequest::ptr request,
     std::string sid = request->getHeader("X-Principal-Sid");
     if (sid.empty())
     {
-        sid = ai::common::ExtractSid(request, response);
+        ai::common::WriteJsonError(response, static_cast<http::HttpStatus>(401), "authorization required", request_id);
+        return 0;
     }
     const std::string conversation_id = request->getRouteParam("conversation_id");
 
@@ -346,14 +352,11 @@ int AiHttpHandlers::HandleAuthLogin(http::HttpRequest::ptr request,
 
     const std::string username = body["username"].get<std::string>();
     const std::string password = body["password"].get<std::string>();
-    const std::string guest_sid = ai::common::ExtractSid(request, response);
 
     std::string access_token;
     ai::service::AuthIdentity identity;
-    bool merged_guest_data = false;
     http::HttpStatus status = http::HttpStatus::OK;
-    if (!m_auth_service->Login(username, password, guest_sid, access_token, identity,
-                               merged_guest_data, error, status))
+    if (!m_auth_service->Login(username, password, access_token, identity, error, status))
     {
         ai::common::WriteJsonError(response, status, error, request_id);
         return 0;
@@ -363,7 +366,6 @@ int AiHttpHandlers::HandleAuthLogin(http::HttpRequest::ptr request,
     payload["ok"] = true;
     payload["token_type"] = "Bearer";
     payload["access_token"] = access_token;
-    payload["merged_guest_data"] = merged_guest_data;
     payload["principal_sid"] = identity.principal_sid;
     payload["user"] = {
         {"id", identity.user_id},

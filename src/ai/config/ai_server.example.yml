@@ -34,10 +34,8 @@ ai:
     system_prompt: ""
     summary_prompt: "你是对话摘要助手。请把旧对话压缩成简洁、可延续上下文的中文摘要，保留人物偏好、事实、约束、未完成任务。"
   auth:
-    enable_guest: true
     token_ttl_seconds: 2592000
     password_pbkdf2_iterations: 150000
-    merge_guest_on_login: true
   mysql:
     host: 127.0.0.1
     port: 3306
