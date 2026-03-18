@@ -2,6 +2,7 @@
 #define __SYLAR_AI_HTTP_AI_HTTP_HANDLERS_H__
 
 #include "ai/config/ai_app_config.h"
+#include "ai/service/auth_service.h"
 #include "ai/service/chat_service.h"
 
 #include "http/server/http_server.h"
@@ -43,6 +44,7 @@ class AiHttpHandlers
      * @param default_model 默认模型名（请求未显式指定 model 时使用）。
      */
     AiHttpHandlers(const ai::service::ChatService::ptr& chat_service,
+                   const ai::service::AuthService::ptr& auth_service,
                    const ai::config::ChatSettings& chat_settings,
                    const std::string& default_model);
 
@@ -95,6 +97,34 @@ class AiHttpHandlers
                       http::HttpSession::ptr session);
 
     /**
+     * @brief 处理注册接口：`POST /api/v1/auth/register`。
+     */
+    int HandleAuthRegister(http::HttpRequest::ptr request,
+                           http::HttpResponse::ptr response,
+                           http::HttpSession::ptr session);
+
+    /**
+     * @brief 处理登录接口：`POST /api/v1/auth/login`。
+     */
+    int HandleAuthLogin(http::HttpRequest::ptr request,
+                        http::HttpResponse::ptr response,
+                        http::HttpSession::ptr session);
+
+    /**
+     * @brief 处理登出接口：`POST /api/v1/auth/logout`。
+     */
+    int HandleAuthLogout(http::HttpRequest::ptr request,
+                         http::HttpResponse::ptr response,
+                         http::HttpSession::ptr session);
+
+    /**
+     * @brief 处理当前用户信息接口：`GET /api/v1/auth/me`。
+     */
+    int HandleAuthMe(http::HttpRequest::ptr request,
+                     http::HttpResponse::ptr response,
+                     http::HttpSession::ptr session);
+
+    /**
      * @brief 处理未命中路由的默认响应。
      * @param request HTTP 请求对象（本接口中不使用）。
      * @param response HTTP 响应对象。
@@ -139,9 +169,13 @@ class AiHttpHandlers
                           const ai::common::ChatCompletionResponse& chat_response,
                           const std::string& request_id) const;
 
+    std::string ParseBearerToken(http::HttpRequest::ptr request) const;
+
   private:
     /** @brief 对话业务服务依赖。 */
     ai::service::ChatService::ptr m_chat_service;
+    /** @brief 账号鉴权服务依赖。 */
+    ai::service::AuthService::ptr m_auth_service;
     /** @brief 对话配置快照。 */
     ai::config::ChatSettings m_chat_settings;
     /** @brief 默认模型名（请求未指定 model 时使用）。 */

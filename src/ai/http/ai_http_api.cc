@@ -8,12 +8,13 @@ namespace api
 {
 
 void RegisterAiHttpApi(const http::HttpServer::ptr& server,
+                       const ai::service::AuthService::ptr& auth_service,
                        const ai::service::ChatService::ptr& chat_service,
                        const ai::config::ChatSettings& chat_settings,
                        const std::string& default_model)
 {
     http::ServletDispatch::ptr dispatch = server->getServletDispatch();
-    AiHttpHandlers::ptr handlers(new AiHttpHandlers(chat_service, chat_settings, default_model));
+    AiHttpHandlers::ptr handlers(new AiHttpHandlers(chat_service, auth_service, chat_settings, default_model));
 
     dispatch->addServlet(
         http::HttpMethod::GET,
@@ -37,6 +38,38 @@ void RegisterAiHttpApi(const http::HttpServer::ptr& server,
         [handlers](http::HttpRequest::ptr request, http::HttpResponse::ptr response, http::HttpSession::ptr session)
         {
             return handlers->HandleChatStream(request, response, session);
+        });
+
+    dispatch->addServlet(
+        http::HttpMethod::POST,
+        "/api/v1/auth/register",
+        [handlers](http::HttpRequest::ptr request, http::HttpResponse::ptr response, http::HttpSession::ptr session)
+        {
+            return handlers->HandleAuthRegister(request, response, session);
+        });
+
+    dispatch->addServlet(
+        http::HttpMethod::POST,
+        "/api/v1/auth/login",
+        [handlers](http::HttpRequest::ptr request, http::HttpResponse::ptr response, http::HttpSession::ptr session)
+        {
+            return handlers->HandleAuthLogin(request, response, session);
+        });
+
+    dispatch->addServlet(
+        http::HttpMethod::POST,
+        "/api/v1/auth/logout",
+        [handlers](http::HttpRequest::ptr request, http::HttpResponse::ptr response, http::HttpSession::ptr session)
+        {
+            return handlers->HandleAuthLogout(request, response, session);
+        });
+
+    dispatch->addServlet(
+        http::HttpMethod::GET,
+        "/api/v1/auth/me",
+        [handlers](http::HttpRequest::ptr request, http::HttpResponse::ptr response, http::HttpSession::ptr session)
+        {
+            return handlers->HandleAuthMe(request, response, session);
         });
 
     dispatch->addParamServlet(

@@ -3,8 +3,10 @@
 #include "ai/http/ai_http_api.h"
 #include "ai/llm/anthropic_client.h"
 #include "ai/llm/openai_compatible_client.h"
+#include "ai/service/auth_service.h"
 #include "ai/service/chat_service.h"
 #include "ai/storage/async_mysql_writer.h"
+#include "ai/storage/auth_repository.h"
 #include "ai/storage/chat_repository.h"
 #include "ai/storage/mysql_connection_pool.h"
 
@@ -110,6 +112,32 @@ std::string ParseConfigFilePath(int argc, char** argv)
     return config_file;
 }
 
+bool IsPublicAuthPath(const std::string& path)
+{
+    return path == "/api/v1/healthz" || path == "/api/v1/auth/register" || path == "/api/v1/auth/login";
+}
+
+bool IsStrictAuthPath(const std::string& path)
+{
+    return path == "/api/v1/auth/me" || path == "/api/v1/auth/logout";
+}
+
+std::string ParseBearerTokenFromAuthorization(const std::string& authorization)
+{
+    const std::string prefix = "Bearer ";
+    if (authorization.size() <= prefix.size())
+    {
+        return std::string();
+    }
+
+    if (authorization.compare(0, prefix.size(), prefix) != 0)
+    {
+        return std::string();
+    }
+
+    return authorization.substr(prefix.size());
+}
+
 } // namespace
 
 /**
@@ -133,6 +161,11 @@ int main(int argc, char** argv)
     /// 让后续网络/定时等待等阻塞点在 IOManager 线程内可被 fiber 化调度，
     /// 降低“一个阻塞调用占死一个工作线程”的风险。
     sylar::set_hook_enable(true);
+    BASE_LOG_ROOT()->setLevel(base::LogLevel::INFO);
+    BASE_LOG_NAME("system")->setLevel(base::LogLevel::INFO);
+
+    BASE_LOG_ROOT()->setLevel(base::LogLevel::INFO);
+    BASE_LOG_NAME("system")->setLevel(base::LogLevel::INFO);
 
     /// @brief Step 1: 解析命令行配置路径并加载 YAML 到全局配置中心。
     std::string config_file = ParseConfigFilePath(argc, argv);
@@ -160,6 +193,7 @@ int main(int argc, char** argv)
     const ai::config::OpenAICompatibleSettings openai_settings = ai::config::AiAppConfig::GetOpenAICompatibleSettings();
     const ai::config::AnthropicSettings anthropic_settings = ai::config::AiAppConfig::GetAnthropicSettings();
     const ai::config::ChatSettings chat_settings = ai::config::AiAppConfig::GetChatSettings();
+    const ai::config::AuthSettings auth_settings = ai::config::AiAppConfig::GetAuthSettings();
     const ai::config::MysqlSettings mysql_settings = ai::config::AiAppConfig::GetMysqlSettings();
     const ai::config::PersistSettings persist_settings = ai::config::AiAppConfig::GetPersistSettings();
 
@@ -180,7 +214,15 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    /// @brief Step 5: 启动异步写入器（请求线程只入队，后台批量落库）。
+    /// @brief Step 5: 初始化账号鉴权仓库（用户/Token/游客归并表结构）。
+    ai::storage::AuthRepository::ptr auth_repository(new ai::storage::AuthRepository(mysql_pool));
+    if (!auth_repository->Init(error))
+    {
+        std::cerr << "init auth repository failed: " << error << std::endl;
+        return 1;
+    }
+
+    /// @brief Step 6: 启动异步写入器（请求线程只入队，后台批量落库）。
     ai::storage::AsyncMySqlWriter::ptr async_writer(new ai::storage::AsyncMySqlWriter(mysql_pool, persist_settings));
     if (!async_writer->Start(error))
     {
@@ -188,7 +230,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    /// @brief Step 6: 按 provider 类型创建具体 LLM Client。
+    /// @brief Step 7: 按 provider 类型创建具体 LLM Client。
     /// @details
     /// 业务层只依赖 LlmClient 抽象，provider 差异在 main 装配期收敛。
     ai::llm::LlmClient::ptr llm_client;
@@ -215,10 +257,14 @@ int main(int argc, char** argv)
         default_model = openai_settings.default_model;
     }
 
-    /// @brief Step 7: 组装业务编排核心 ChatService。
-    ai::service::ChatService::ptr chat_service(new ai::service::ChatService(chat_settings, llm_client, chat_repository, async_writer));
+    /// @brief Step 8: 组装账号与对话业务服务。
+    ai::service::AuthService::ptr auth_service(new ai::service::AuthService(auth_settings, auth_repository));
 
-    /// @brief Step 8: 按配置创建 HTTP worker（benchmark 同款模式）。
+    /// @brief 组装业务编排核心 ChatService。
+    ai::service::ChatService::ptr chat_service(
+        new ai::service::ChatService(chat_settings, llm_client, chat_repository, async_writer));
+
+    /// @brief Step 9: 按配置创建 HTTP worker（benchmark 同款模式）。
     /// @details
     /// - use_caller=true: 单 IOM，io/accept 共用同一个调度器。
     /// - use_caller=false: 双 IOM，accept 与 io 分离。
@@ -239,10 +285,10 @@ int main(int argc, char** argv)
         accept_worker.reset(new sylar::IOManager(accept_worker_threads, false, "sylar-http-accept-worker"));
     }
 
-    /// @brief Step 9: 使用上述 worker 创建 HTTP Server。
+    /// @brief Step 10: 使用上述 worker 创建 HTTP Server。
     http::HttpServer::ptr server(new http::HttpServer(io_worker.get(), accept_worker.get()));
 
-    /// @brief Step 10: 可选 TLS 配置（由 YAML 决定是否启用）。
+    /// @brief Step 11: 可选 TLS 配置（由 YAML 决定是否启用）。
     if (server_settings.enable_ssl)
     {
         http::ssl::SslConfig ssl_config;
@@ -257,7 +303,7 @@ int main(int argc, char** argv)
         }
     }
 
-    /// @brief Step 11: 注入 request_id 中间件，统一链路追踪字段。
+    /// @brief Step 12: 注入 request_id 中间件，统一链路追踪字段。
     /// @details
     /// 同时写入 request/response 头，便于服务端日志与客户端响应做对应。
     server->addMiddleware(http::Middleware::ptr(new http::CallbackMiddleware(
@@ -270,10 +316,56 @@ int main(int argc, char** argv)
         },
         http::CallbackMiddleware::AfterCallback())));
 
-    /// @brief Step 12: 注册 AI 业务路由（health/completions/stream/history）。
-    ai::api::RegisterAiHttpApi(server, chat_service, chat_settings, default_model);
+    /// @brief Step 13: 注入鉴权中间件。
+    server->addMiddleware(http::Middleware::ptr(new http::CallbackMiddleware(
+        [auth_service, auth_settings](http::HttpRequest::ptr request, http::HttpResponse::ptr response,
+                                      http::HttpSession::ptr)
+        {
+            const std::string path = request->getPath();
+            if (IsPublicAuthPath(path))
+            {
+                return true;
+            }
 
-    /// @brief Step 13: 解析并校验绑定地址（host:port）。
+            const std::string token = ParseBearerTokenFromAuthorization(request->getHeader("Authorization"));
+            if (token.empty())
+            {
+                if (IsStrictAuthPath(path) || !auth_settings.enable_guest)
+                {
+                    ai::common::WriteJsonError(response, static_cast<http::HttpStatus>(401), "authorization required",
+                                               request->getHeader("x-request-id"));
+                    return false;
+                }
+                return true;
+            }
+
+            if (!auth_service)
+            {
+                ai::common::WriteJsonError(response, http::HttpStatus::INTERNAL_SERVER_ERROR,
+                                           "auth service unavailable", request->getHeader("x-request-id"));
+                return false;
+            }
+
+            ai::service::AuthIdentity identity;
+            std::string auth_error;
+            http::HttpStatus auth_status = http::HttpStatus::OK;
+            if (!auth_service->AuthenticateBearerToken(token, identity, auth_error, auth_status))
+            {
+                ai::common::WriteJsonError(response, auth_status, auth_error, request->getHeader("x-request-id"));
+                return false;
+            }
+
+            request->setHeader("X-Auth-User-Id", std::to_string(identity.user_id));
+            request->setHeader("X-Auth-Username", identity.username);
+            request->setHeader("X-Principal-Sid", identity.principal_sid);
+            return true;
+        },
+        http::CallbackMiddleware::AfterCallback())));
+
+    /// @brief Step 14: 注册 AI 业务路由（health/completions/stream/history/auth）。
+    ai::api::RegisterAiHttpApi(server, auth_service, chat_service, chat_settings, default_model);
+
+    /// @brief Step 15: 解析并校验绑定地址（host:port）。
     sylar::Address::ptr bind_addr =
         sylar::Address::LookupAny(server_settings.host + ":" + std::to_string(server_settings.port));
     if (!bind_addr)
@@ -287,20 +379,21 @@ int main(int argc, char** argv)
     std::vector<sylar::Address::ptr> fails;
     addrs.push_back(bind_addr);
 
-    /// @brief Step 14: bind + start。
+    /// @brief Step 16: bind + start。
     /// @note 失败时先停异步写线程，避免后台线程泄漏。
     if (!server->bind(addrs, fails) || !server->start())
     {
-        std::cerr << "start ai chat server failed at " << server_settings.host << ":" << server_settings.port << std::endl;
+        std::cerr << "start ai chat server failed at " << server_settings.host << ":" << server_settings.port
+                  << std::endl;
         async_writer->Stop();
         return 1;
     }
 
     std::cout << "ai_chat_server started on " << server_settings.host << ":" << server_settings.port
-              << " ssl=" << (server_settings.enable_ssl ? "on" : "off")
-              << " use_caller=" << (use_caller ? "on" : "off") << std::endl;
+              << " ssl=" << (server_settings.enable_ssl ? "on" : "off") << " use_caller=" << (use_caller ? "on" : "off")
+              << std::endl;
 
-    /// @brief Step 15: 注册优雅退出信号：Ctrl+C(SIGINT) / kill(SIGTERM)。
+    /// @brief Step 17: 注册优雅退出信号：Ctrl+C(SIGINT) / kill(SIGTERM)。
     ::signal(SIGINT, HandleSignal);
     ::signal(SIGTERM, HandleSignal);
 
@@ -309,25 +402,29 @@ int main(int argc, char** argv)
         /// @brief caller 模式：
         /// 主线程进入 IOM 调度循环，通过定时器轮询停止标志触发关停。
         sylar::Timer::ptr stop_timer;
-        stop_timer = io_worker->addTimer(200, [&]()
-                                         {
-            if (!g_stop_requested.load(std::memory_order_acquire))
+        stop_timer = io_worker->addTimer(
+            200,
+            [&]()
             {
-                return;
-            }
+                if (!g_stop_requested.load(std::memory_order_acquire))
+                {
+                    return;
+                }
 
-            /// @brief 收到停止信号后按顺序停服与停 worker。
-            BASE_LOG_INFO(g_logger) << "ai_chat_server stopping (caller mode)";
-            server->stop();
-            if (accept_worker && accept_worker != io_worker)
-            {
-                accept_worker->stop();
-            }
-            if (stop_timer)
-            {
-                /// @brief 关停触发后取消轮询定时器，避免重复执行关停逻辑。
-                stop_timer->cancel();
-            } }, true);
+                /// @brief 收到停止信号后按顺序停服与停 worker。
+                BASE_LOG_INFO(g_logger) << "ai_chat_server stopping (caller mode)";
+                server->stop();
+                if (accept_worker && accept_worker != io_worker)
+                {
+                    accept_worker->stop();
+                }
+                if (stop_timer)
+                {
+                    /// @brief 关停触发后取消轮询定时器，避免重复执行关停逻辑。
+                    stop_timer->cancel();
+                }
+            },
+            true);
         /// @brief stop() 会阻塞直到调度器完成收尾并退出。
         io_worker->stop();
     }
@@ -353,7 +450,7 @@ int main(int argc, char** argv)
         }
     }
 
-    /// @brief Step 16: 最终收尾。
+    /// @brief Step 18: 最终收尾。
     /// @details
     /// 1) 先停异步写线程，尽量把已入队消息刷盘完成；
     /// 2) 再关闭连接池，释放数据库连接资源。

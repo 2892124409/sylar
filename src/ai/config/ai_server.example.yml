@@ -8,11 +8,11 @@ ai:
   provider:
     type: openai_compatible
   openai_compatible:
-    base_url: https://api.openai.com/v1
-    api_key: "YOUR_OPENAI_COMPATIBLE_API_KEY"
-    default_model: gpt-4o-mini
-    connect_timeout_ms: 3000
-    request_timeout_ms: 120000
+    base_url: https://api.deepseek.com/v1
+    api_key: "sk-0c2ef3af68c841aa92ab2eae60f57c41"
+    default_model: deepseek-chat
+    connect_timeout_ms: 10000
+    request_timeout_ms: 180000
   anthropic:
     base_url: https://api.anthropic.com
     api_key: "YOUR_ANTHROPIC_API_KEY"
@@ -33,11 +33,16 @@ ai:
     default_max_tokens: 1024
     system_prompt: ""
     summary_prompt: "你是对话摘要助手。请把旧对话压缩成简洁、可延续上下文的中文摘要，保留人物偏好、事实、约束、未完成任务。"
+  auth:
+    enable_guest: true
+    token_ttl_seconds: 2592000
+    password_pbkdf2_iterations: 150000
+    merge_guest_on_login: true
   mysql:
     host: 127.0.0.1
     port: 3306
     user: ai_chat_user
-    password: "YOUR_DB_PASSWORD"
+    password: "ai_chat_122699"
     database: ai_chat
     charset: utf8mb4
     connect_timeout_seconds: 5

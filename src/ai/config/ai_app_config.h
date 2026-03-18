@@ -112,6 +112,21 @@ struct ChatSettings
 };
 
 /**
+ * @brief 账号与鉴权配置。
+ */
+struct AuthSettings
+{
+    /** @brief 是否允许未登录游客访问聊天接口。 */
+    bool enable_guest;
+    /** @brief 访问令牌有效期（秒）。 */
+    uint64_t token_ttl_seconds;
+    /** @brief PBKDF2 密码哈希迭代次数。 */
+    uint32_t password_pbkdf2_iterations;
+    /** @brief 登录后是否将游客会话数据归并到账号主体。 */
+    bool merge_guest_on_login;
+};
+
+/**
  * @brief MySQL/MariaDB 连接配置。
  */
 struct MysqlSettings
@@ -170,6 +185,8 @@ class AiAppConfig
     static AnthropicSettings GetAnthropicSettings();
     /** @brief 获取对话业务配置。 */
     static ChatSettings GetChatSettings();
+    /** @brief 获取账号鉴权配置。 */
+    static AuthSettings GetAuthSettings();
     /** @brief 获取数据库连接配置。 */
     static MysqlSettings GetMysqlSettings();
     /** @brief 获取异步持久化配置。 */

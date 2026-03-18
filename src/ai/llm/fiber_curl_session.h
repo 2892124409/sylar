@@ -85,6 +85,8 @@ class FiberCurlSession
      * @param what libcurl 关注的事件类型（`CURL_POLL_*`）。
      */
     void RegisterSocketWatch(curl_socket_t fd, int what);
+    /** @brief 在 sylar 一次性事件模型下重挂载 fd 监听。 */
+    void RearmSocketWatch(curl_socket_t fd);
     /**
      * @brief 取消指定 fd 的 READ/WRITE 监听。
      * @param fd 要取消监听的 socket fd。
@@ -129,6 +131,8 @@ class FiberCurlSession
     std::deque<std::pair<curl_socket_t, int>> m_pending_actions;
     /** @brief 已注册 fd 及其监听事件掩码。 */
     std::map<curl_socket_t, int> m_watch_events;
+    /** @brief 当前已在 IOManager 挂载的事件掩码（用于避免重复 addEvent）。 */
+    std::map<curl_socket_t, int> m_armed_events;
 
     /** @brief curl 定时器在 IOManager 上的映射对象。 */
     sylar::Timer::ptr m_timer;

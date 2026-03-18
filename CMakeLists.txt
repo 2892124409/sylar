@@ -150,7 +150,9 @@ if(BUILD_AI_CHAT_SERVER)
         src/ai/llm/openai_compatible_client.cc
         src/ai/llm/anthropic_client.cc
         src/ai/llm/fiber_curl_session.cc
+        src/ai/service/auth_service.cc
         src/ai/service/chat_service.cc
+        src/ai/storage/auth_repository.cc
         src/ai/storage/mysql_connection_pool.cc
         src/ai/storage/chat_repository.cc
         src/ai/storage/async_mysql_writer.cc
@@ -158,7 +160,7 @@ if(BUILD_AI_CHAT_SERVER)
     )
 
     add_executable(ai_chat_server ${AI_CHAT_SERVER_SOURCES})
-    target_link_libraries(ai_chat_server PRIVATE sylar ${MYSQLCLIENT_LIBRARY})
+    target_link_libraries(ai_chat_server PRIVATE sylar ${MYSQLCLIENT_LIBRARY} OpenSSL::Crypto)
 
     if(TARGET CURL::libcurl)
         target_link_libraries(ai_chat_server PRIVATE CURL::libcurl)
@@ -190,6 +192,22 @@ if(BUILD_AI_CHAT_SERVER)
     )
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(ai_chat_client PRIVATE -Wall)
+    endif()
+
+    add_executable(ai_auth_chat_client
+        src/ai/client/auth_chat_client.cc
+    )
+    if(TARGET CURL::libcurl)
+        target_link_libraries(ai_auth_chat_client PRIVATE CURL::libcurl)
+    else()
+        target_include_directories(ai_auth_chat_client PRIVATE ${CURL_INCLUDE_DIRS})
+        target_link_libraries(ai_auth_chat_client PRIVATE ${CURL_LIBRARIES})
+    endif()
+    set_target_properties(ai_auth_chat_client PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(ai_auth_chat_client PRIVATE -Wall)
     endif()
 endif()
 

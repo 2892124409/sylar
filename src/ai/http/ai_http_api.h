@@ -1,6 +1,7 @@
 #ifndef __SYLAR_AI_HTTP_AI_HTTP_API_H__
 #define __SYLAR_AI_HTTP_AI_HTTP_API_H__
 
+#include "ai/service/auth_service.h"
 #include "ai/service/chat_service.h"
 
 #include "http/server/http_server.h"
@@ -30,6 +31,7 @@ namespace api
  * @param default_model 默认模型名，当请求未显式指定 model 时使用。
  */
 void RegisterAiHttpApi(const http::HttpServer::ptr& server,
+                       const ai::service::AuthService::ptr& auth_service,
                        const ai::service::ChatService::ptr& chat_service,
                        const ai::config::ChatSettings& chat_settings,
                        const std::string& default_model);

@@ -13,9 +13,11 @@ namespace api
 
 AiHttpHandlers::AiHttpHandlers(
     const ai::service::ChatService::ptr& chat_service,
+    const ai::service::AuthService::ptr& auth_service,
     const ai::config::ChatSettings& chat_settings,
     const std::string& default_model)
     : m_chat_service(chat_service),
+      m_auth_service(auth_service),
       m_chat_settings(chat_settings),
       m_default_model(default_model)
 {
@@ -32,7 +34,11 @@ bool AiHttpHandlers::BuildChatRequest(
     ai::common::ChatCompletionRequest& out,
     std::string& error) const
 {
-    out.sid = ai::common::ExtractSid(request, response);
+    out.sid = request->getHeader("X-Principal-Sid");
+    if (out.sid.empty())
+    {
+        out.sid = ai::common::ExtractSid(request, response);
+    }
 
     nlohmann::json body;
     if (!ai::common::ParseJsonBody(request, body, error))
@@ -92,6 +98,23 @@ void AiHttpHandlers::WriteSuccessJson(
     }
 
     ai::common::WriteJson(response, payload, http::HttpStatus::OK);
+}
+
+std::string AiHttpHandlers::ParseBearerToken(http::HttpRequest::ptr request) const
+{
+    std::string authorization = request->getHeader("Authorization");
+    if (authorization.size() < 8)
+    {
+        return std::string();
+    }
+
+    const std::string prefix = "Bearer ";
+    if (authorization.compare(0, prefix.size(), prefix) != 0)
+    {
+        return std::string();
+    }
+
+    return authorization.substr(prefix.size());
 }
 
 int AiHttpHandlers::HandleHealthz(http::HttpRequest::ptr request,
@@ -200,7 +223,11 @@ int AiHttpHandlers::HandleHistory(http::HttpRequest::ptr request,
 {
     const std::string request_id = GetRequestId(request);
 
-    std::string sid = ai::common::ExtractSid(request, response);
+    std::string sid = request->getHeader("X-Principal-Sid");
+    if (sid.empty())
+    {
+        sid = ai::common::ExtractSid(request, response);
+    }
     const std::string conversation_id = request->getRouteParam("conversation_id");
 
     const std::string limit_text = request->getParam("limit", "");
@@ -236,6 +263,184 @@ int AiHttpHandlers::HandleHistory(http::HttpRequest::ptr request,
         payload["request_id"] = request_id;
     }
 
+    ai::common::WriteJson(response, payload, http::HttpStatus::OK);
+    return 0;
+}
+
+int AiHttpHandlers::HandleAuthRegister(http::HttpRequest::ptr request,
+                                       http::HttpResponse::ptr response,
+                                       http::HttpSession::ptr)
+{
+    const std::string request_id = GetRequestId(request);
+    if (!m_auth_service)
+    {
+        ai::common::WriteJsonError(response, http::HttpStatus::INTERNAL_SERVER_ERROR, "auth service not initialized", request_id);
+        return 0;
+    }
+
+    nlohmann::json body;
+    std::string error;
+    if (!ai::common::ParseJsonBody(request, body, error))
+    {
+        ai::common::WriteJsonError(response, http::HttpStatus::BAD_REQUEST, error, request_id);
+        return 0;
+    }
+
+    if (!body.contains("username") || !body["username"].is_string() ||
+        !body.contains("password") || !body["password"].is_string())
+    {
+        ai::common::WriteJsonError(response, http::HttpStatus::BAD_REQUEST, "username/password must be string", request_id);
+        return 0;
+    }
+
+    const std::string username = body["username"].get<std::string>();
+    const std::string password = body["password"].get<std::string>();
+
+    uint64_t user_id = 0;
+    http::HttpStatus status = http::HttpStatus::OK;
+    if (!m_auth_service->Register(username, password, user_id, error, status))
+    {
+        ai::common::WriteJsonError(response, status, error, request_id);
+        return 0;
+    }
+
+    nlohmann::json payload;
+    payload["ok"] = true;
+    payload["user"] = {
+        {"id", user_id},
+        {"username", username},
+    };
+    if (!request_id.empty())
+    {
+        payload["request_id"] = request_id;
+    }
+    ai::common::WriteJson(response, payload, http::HttpStatus::OK);
+    return 0;
+}
+
+int AiHttpHandlers::HandleAuthLogin(http::HttpRequest::ptr request,
+                                    http::HttpResponse::ptr response,
+                                    http::HttpSession::ptr)
+{
+    const std::string request_id = GetRequestId(request);
+    if (!m_auth_service)
+    {
+        ai::common::WriteJsonError(response, http::HttpStatus::INTERNAL_SERVER_ERROR, "auth service not initialized", request_id);
+        return 0;
+    }
+
+    nlohmann::json body;
+    std::string error;
+    if (!ai::common::ParseJsonBody(request, body, error))
+    {
+        ai::common::WriteJsonError(response, http::HttpStatus::BAD_REQUEST, error, request_id);
+        return 0;
+    }
+
+    if (!body.contains("username") || !body["username"].is_string() ||
+        !body.contains("password") || !body["password"].is_string())
+    {
+        ai::common::WriteJsonError(response, http::HttpStatus::BAD_REQUEST, "username/password must be string", request_id);
+        return 0;
+    }
+
+    const std::string username = body["username"].get<std::string>();
+    const std::string password = body["password"].get<std::string>();
+    const std::string guest_sid = ai::common::ExtractSid(request, response);
+
+    std::string access_token;
+    ai::service::AuthIdentity identity;
+    bool merged_guest_data = false;
+    http::HttpStatus status = http::HttpStatus::OK;
+    if (!m_auth_service->Login(username, password, guest_sid, access_token, identity,
+                               merged_guest_data, error, status))
+    {
+        ai::common::WriteJsonError(response, status, error, request_id);
+        return 0;
+    }
+
+    nlohmann::json payload;
+    payload["ok"] = true;
+    payload["token_type"] = "Bearer";
+    payload["access_token"] = access_token;
+    payload["merged_guest_data"] = merged_guest_data;
+    payload["principal_sid"] = identity.principal_sid;
+    payload["user"] = {
+        {"id", identity.user_id},
+        {"username", identity.username},
+    };
+    if (!request_id.empty())
+    {
+        payload["request_id"] = request_id;
+    }
+
+    ai::common::WriteJson(response, payload, http::HttpStatus::OK);
+    return 0;
+}
+
+int AiHttpHandlers::HandleAuthLogout(http::HttpRequest::ptr request,
+                                     http::HttpResponse::ptr response,
+                                     http::HttpSession::ptr)
+{
+    const std::string request_id = GetRequestId(request);
+    if (!m_auth_service)
+    {
+        ai::common::WriteJsonError(response, http::HttpStatus::INTERNAL_SERVER_ERROR, "auth service not initialized", request_id);
+        return 0;
+    }
+
+    const std::string token = ParseBearerToken(request);
+    std::string error;
+    http::HttpStatus status = http::HttpStatus::OK;
+    if (!m_auth_service->Logout(token, error, status))
+    {
+        ai::common::WriteJsonError(response, status, error, request_id);
+        return 0;
+    }
+
+    nlohmann::json payload;
+    payload["ok"] = true;
+    if (!request_id.empty())
+    {
+        payload["request_id"] = request_id;
+    }
+    ai::common::WriteJson(response, payload, http::HttpStatus::OK);
+    return 0;
+}
+
+int AiHttpHandlers::HandleAuthMe(http::HttpRequest::ptr request,
+                                 http::HttpResponse::ptr response,
+                                 http::HttpSession::ptr)
+{
+    const std::string request_id = GetRequestId(request);
+    if (!m_auth_service)
+    {
+        ai::common::WriteJsonError(response, http::HttpStatus::INTERNAL_SERVER_ERROR, "auth service not initialized", request_id);
+        return 0;
+    }
+
+    const std::string token = ParseBearerToken(request);
+    std::string error;
+    http::HttpStatus status = http::HttpStatus::OK;
+    ai::service::AuthIdentity identity;
+    if (!m_auth_service->AuthenticateBearerToken(token, identity, error, status))
+    {
+        ai::common::WriteJsonError(response, status, error, request_id);
+        return 0;
+    }
+
+    nlohmann::json payload;
+    payload["ok"] = true;
+    payload["authenticated"] = true;
+    payload["principal_sid"] = identity.principal_sid;
+    payload["user"] = {
+        {"id", identity.user_id},
+        {"username", identity.username},
+    };
+    if (!request_id.empty())
+    {
+        payload["request_id"] = request_id;
+    }
     ai::common::WriteJson(response, payload, http::HttpStatus::OK);
     return 0;
 }

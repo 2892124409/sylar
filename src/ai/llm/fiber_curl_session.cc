@@ -77,6 +77,30 @@ int FiberCurlSession::TimerCallback(CURLM*, long timeout_ms, void* userp)
  */
 void FiberCurlSession::OnSocketEvent(curl_socket_t fd, int action)
 {
+    // sylar IOManager 的 fd 事件是一次性触发语义，触发后会自动从 epoll 中移除。
+    // libcurl 的 socket 回调并不会保证“每次触发都重新下发关注事件”。
+    // 因此在收到一次 fd 事件后，需要按当前 watch 配置主动重挂载一次监听。
+    if (fd != CURL_SOCKET_TIMEOUT)
+    {
+        // 先把本次触发的事件位从“已挂载状态”中剔除，再按目标事件位补齐。
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            std::map<curl_socket_t, int>::iterator it = m_armed_events.find(fd);
+            if (it != m_armed_events.end())
+            {
+                if (action & CURL_CSELECT_IN)
+                {
+                    it->second &= ~sylar::IOManager::READ;
+                }
+                if (action & CURL_CSELECT_OUT)
+                {
+                    it->second &= ~sylar::IOManager::WRITE;
+                }
+            }
+        }
+        RearmSocketWatch(fd);
+    }
+
     bool need_schedule = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -113,28 +137,102 @@ void FiberCurlSession::RegisterSocketWatch(curl_socket_t fd, int what)
     const int target_events = ((what == CURL_POLL_IN || what == CURL_POLL_INOUT) ? sylar::IOManager::READ : 0) |
                               ((what == CURL_POLL_OUT || what == CURL_POLL_INOUT) ? sylar::IOManager::WRITE : 0);
 
-    CancelSocketWatch(fd);
-
-    if (target_events & sylar::IOManager::READ)
+    int to_del = 0;
+    int to_add = 0;
     {
-        int rt = m_iom->addEvent(fd, sylar::IOManager::READ, [this, fd]() { OnSocketEvent(fd, CURL_CSELECT_IN); });
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const int armed = m_armed_events[fd];
+        m_watch_events[fd] = target_events;
+        to_del = armed & ~target_events;
+        to_add = target_events & ~armed;
+        // 乐观更新：避免并发回调重复 addEvent 触发断言。
+        m_armed_events[fd] = (armed & ~to_del) | to_add;
+    }
+
+    if (to_del & sylar::IOManager::READ)
+    {
+        m_iom->delEvent(fd, sylar::IOManager::READ);
+    }
+
+    if (to_del & sylar::IOManager::WRITE)
+    {
+        m_iom->delEvent(fd, sylar::IOManager::WRITE);
+    }
+
+    // 注册新增监听位。
+    if (to_add & sylar::IOManager::READ)
+    {
+        int rt = m_iom->addEvent(fd, sylar::IOManager::READ,
+                                 [this, fd]() { OnSocketEvent(fd, CURL_CSELECT_IN); });
         if (rt != 0)
         {
             BASE_LOG_WARN(g_logger) << "add READ event failed for fd=" << fd;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_armed_events[fd] &= ~sylar::IOManager::READ;
         }
     }
 
-    if (target_events & sylar::IOManager::WRITE)
+    if (to_add & sylar::IOManager::WRITE)
     {
-        int rt = m_iom->addEvent(fd, sylar::IOManager::WRITE, [this, fd]() { OnSocketEvent(fd, CURL_CSELECT_OUT); });
+        int rt = m_iom->addEvent(fd, sylar::IOManager::WRITE,
+                                 [this, fd]() { OnSocketEvent(fd, CURL_CSELECT_OUT); });
         if (rt != 0)
         {
             BASE_LOG_WARN(g_logger) << "add WRITE event failed for fd=" << fd;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_armed_events[fd] &= ~sylar::IOManager::WRITE;
+        }
+    }
+}
+
+/**
+ * @brief 在 sylar 一次性事件模型下重挂载 fd 监听。
+ */
+void FiberCurlSession::RearmSocketWatch(curl_socket_t fd)
+{
+    if (!m_iom)
+    {
+        return;
+    }
+
+    int to_add = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::map<curl_socket_t, int>::const_iterator desired_it = m_watch_events.find(fd);
+        if (desired_it == m_watch_events.end())
+        {
+            return;
+        }
+        const int desired = desired_it->second;
+        const int armed = m_armed_events[fd];
+        to_add = desired & ~armed;
+        // 乐观更新：并发回调下让后续线程看到“已计划挂载”的状态，避免重复 addEvent。
+        m_armed_events[fd] = armed | to_add;
+    }
+
+    if (to_add & sylar::IOManager::READ)
+    {
+        int rt = m_iom->addEvent(fd, sylar::IOManager::READ,
+                                 [this, fd]() { OnSocketEvent(fd, CURL_CSELECT_IN); });
+        if (rt != 0)
+        {
+            BASE_LOG_WARN(g_logger) << "rearm READ event failed for fd=" << fd;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_armed_events[fd] &= ~sylar::IOManager::READ;
         }
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_watch_events[fd] = target_events;
+    if (to_add & sylar::IOManager::WRITE)
+    {
+        int rt = m_iom->addEvent(fd, sylar::IOManager::WRITE,
+                                 [this, fd]() { OnSocketEvent(fd, CURL_CSELECT_OUT); });
+        if (rt != 0)
+        {
+            BASE_LOG_WARN(g_logger) << "rearm WRITE event failed for fd=" << fd;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_armed_events[fd] &= ~sylar::IOManager::WRITE;
+        }
+    }
 }
 
 /**
@@ -147,11 +245,27 @@ void FiberCurlSession::CancelSocketWatch(curl_socket_t fd)
         return;
     }
 
-    m_iom->delEvent(fd, sylar::IOManager::READ);
-    m_iom->delEvent(fd, sylar::IOManager::WRITE);
+    int armed = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::map<curl_socket_t, int>::const_iterator it = m_armed_events.find(fd);
+        if (it != m_armed_events.end())
+        {
+            armed = it->second;
+        }
+        m_watch_events.erase(fd);
+        m_armed_events.erase(fd);
+    }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_watch_events.erase(fd);
+    if (armed & sylar::IOManager::READ)
+    {
+        m_iom->delEvent(fd, sylar::IOManager::READ);
+    }
+
+    if (armed & sylar::IOManager::WRITE)
+    {
+        m_iom->delEvent(fd, sylar::IOManager::WRITE);
+    }
 }
 
 /**
@@ -295,6 +409,7 @@ void FiberCurlSession::Cleanup()
                 fds.push_back(it->first);
             }
             m_watch_events.clear();
+            m_armed_events.clear();
             m_pending_actions.clear();
         }
 

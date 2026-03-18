@@ -3,16 +3,16 @@
 ## 项目目标（持续更新）
 - 作为 AI 应用层的阶段化开发日志，持续记录从 V1 最小通路到后续生产化能力建设的全过程。
 - 每个阶段固定记录：目标、实现细节、关键设计取舍、踩坑与复盘。
-- 当前进度：第一阶段（最小通路）与第二阶段（Provider 切换 + 上下文摘要 + 并发能力增强）已完成。
+- 当前进度：第一阶段（最小通路）、第二阶段（Provider 切换 + 上下文摘要 + 并发能力增强）、第三阶段（用户体系与鉴权）已完成。
 
 ---
 
 ## 当前范围声明
 这份笔记是多阶段持续维护文档，不只记录第一阶段。
 
-- 已落地并已详细展开：第一阶段、第二阶段。
-- 已列出但未展开实现细节：第三阶段及之后。
-- 当前未实现能力：用户账户体系、鉴权授权、限流熔断、观测告警、发布治理等。
+- 已落地并已详细展开：第一阶段、第二阶段、第三阶段。
+- 已列出但未展开实现细节：第四阶段及之后。
+- 当前未实现能力：RAG 检索增强、写路径消息队列化、限流熔断、观测告警、发布治理等。
 - 当前运行时支持通过 `ai.provider.type` 切换 `openai_compatible` / `anthropic`。
 
 ---
@@ -301,7 +301,7 @@
 2. 只有单会话窗口裁剪，没有全局会话淘汰策略。
 - 方向（已在后续阶段标注优先级）：
 1. 第二阶段优先升级为“token 预算 + 摘要记忆 + 最近窗口”。
-2. 第三阶段接入检索记忆（RAG）补足长期事实召回。
+2. 第四阶段接入检索记忆（RAG）补足长期事实召回。
 
 ---
 
@@ -821,6 +821,84 @@ Client
 2. 对并发模型收益明显：避免 IO worker 被上游长请求占死。
 3. 与 sylar 架构一致：把应用层 LLM 调用真正纳入 Fiber 调度体系。
 
+##### 线上故障复盘（2026-03-18，已修复）
+**现象：**
+1. 客户端流式/同步调用过程中，服务端偶发直接退出。
+2. 日志关键报错：
+   - `addEvent assert fd=xx event=1 fd_ctx.event=1`
+   - 断言点在 `sylar::IOManager::addEvent(...)`。
+3. 退出信号为 `Aborted (core dumped)`，不是业务返回错误。
+
+**定位过程（证据链）**：
+1. 从客户端症状入手  
+   - 现象是 `Stream status=0`、`Couldn't connect to server`。  
+   - 这类报错本身不能证明“网络不通”，也可能是“服务端刚刚崩溃”。  
+2. 立刻转到服务端日志确认进程状态  
+   - 看到明确断言：`addEvent assert fd=12 event=1 fd_ctx.event=1`。  
+   - 结论：不是上游 API 慢，不是鉴权失败，而是进程内部断言触发导致退出。  
+3. 用回溯地址反查源码行号（关键一步）  
+   - 用 `addr2line -e ./bin/ai_chat_server <addr...>` 把栈里的地址映射到源码。  
+   - 命中 `fiber_curl_session.cc` 的 `RegisterSocketWatch(...)` / `SocketCallback(...)` / `Perform(...)`。  
+   - 证据把问题范围收敛到“curl 协程化桥接层”。  
+4. 结合 sylar 事件模型验证框架约束  
+   - `IOManager::addEvent` 对同一 fd 同一事件位重复注册会断言失败。  
+   - sylar 的 IO 事件是一次性触发语义（触发后位会清掉）。  
+5. 第一次假设：缺失 rearm 导致事件丢失 -> 超时  
+   - 先补了 rearm 后，超时问题缓解，但出现新问题：偶发断言崩溃。  
+   - 说明方向对了一半：确实跟一次性事件模型相关，但实现还有竞态。  
+6. 第二次假设：`SocketCallback` 与 `rearm` 交错，重复 `addEvent`  
+   - 崩溃行固定在 `RegisterSocketWatch` 的 `addEvent(READ)`，且 `fd_ctx.event` 已含 READ。  
+   - 结论成立：重挂载逻辑没有跟踪“已挂载状态”，存在重复注册窗口。  
+7. 最终修复  
+   - 增加 `m_watch_events`（目标位）+ `m_armed_events`（已挂载位）双状态。  
+   - 改成 `to_add / to_del` 增量更新，避免无差别删加。  
+   - 在 `OnSocketEvent` 里先清已触发位，再按目标位补挂载。  
+8. 回归验证  
+   - 连续多轮同步 + 流式请求压测。  
+   - 检查日志无 `addEvent assert` / `ASSERTION`，服务进程持续存活。
+
+**根因：**
+1. `IOManager` 的 fd 事件是一次性触发语义，触发后该事件位会被移除。
+2. `FiberCurlSession` 在“socket 回调 + rearm 重挂载”交错场景下，可能对同一 fd 的同一事件位重复执行 `addEvent`。
+3. 重复注册命中 `IOManager` 的防御性断言，导致进程崩溃。
+
+**修复方案：**
+1. 在 `FiberCurlSession` 增加“目标监听位 + 已挂载位”双状态跟踪：
+   - `m_watch_events`：libcurl 希望监听的目标事件位；
+   - `m_armed_events`：当前已在 IOManager 成功挂载的事件位。
+2. `RegisterSocketWatch(...)` 改为增量更新：
+   - 先算 `to_del / to_add`；
+   - 只删除需要删除的位，只添加需要添加的位；
+   - 避免无差别先删后加导致竞态窗口扩大。
+3. `OnSocketEvent(...)` 在处理触发事件前，先把本次触发位从 `m_armed_events` 清掉，再按目标位做重挂载。
+4. `CancelSocketWatch/Cleanup` 同步清理 `m_watch_events` 和 `m_armed_events`，防止脏状态残留。
+
+**验证结果：**
+1. 回归后同步/流式多轮请求可持续运行。
+2. 未再出现 `addEvent assert` / `ASSERTION` 崩溃日志。
+3. 服务端保持存活，返回链路正常。
+
+##### 面试高频问答：项目里最难排查的 bug
+**Q：你在这个项目里遇到最难解决的 bug 是什么？怎么定位并修复的？**
+
+**A（可直接复述）：**
+最难的是把 `curl_easy_perform` 协程化为 `curl_multi + Fiber` 后出现的线上崩溃问题。  
+当时客户端表现是偶发 `Couldn't connect to server`，但真正原因是服务端被断言打崩：`IOManager::addEvent` 发现同一 fd 的同一事件被重复注册。
+
+我按“证据链”定位：
+1. 先从客户端异常切到服务端日志，确认是进程崩溃而不是业务返回。
+2. 用回溯地址 + `addr2line` 映射到 `fiber_curl_session.cc`，把范围收敛到 curl 协程桥接层。
+3. 结合 sylar 的一次性事件语义和 `addEvent` 断言约束，复盘出竞态窗口：`SocketCallback` 与 rearm 交错导致重复注册。
+
+修复上，我没有继续“补 if”，而是把状态机补全：
+1. 增加“目标监听位 + 已挂载位”双状态；
+2. 重挂载改为 `to_add/to_del` 增量更新；
+3. 触发事件后先清已触发位再补挂载；
+4. 清理路径保证两个状态同步回收。
+
+最后用同步/流式多轮回归验证，确认不再触发断言，服务稳定运行。  
+这个 bug 难点不在 API 调用，而在“把 libcurl 事件模型和 sylar 一次性事件模型正确对齐”。
+
 #### 5. MySQL 连接池化与摘要持久化
 本节按当前学习目标，聚焦“主服务读路径并发能力”，不展开主服务写库流程。
 
@@ -861,7 +939,7 @@ Client
 
 ##### 5.5 后续 MQ 架构声明（写路径迁移）
 1. 当前仓库仍有主服务写库实现代码（如 `AsyncMySqlWriter` 等），但本节不再作为学习重点。
-2. 第三阶段引入 MQ 后，主服务进程目标是“只读库 + 生产消息”，不再使用主服务的 MySQL 连接池执行写库。
+2. 第五阶段引入 MQ 后，主服务进程目标是“只读库 + 生产消息”，不再使用主服务的 MySQL 连接池执行写库。
 3. 写库职责迁移到 MQ 消费者进程，由消费者独立维护自己的 MySQL 连接池并批量落库。
 
 ---
@@ -886,7 +964,12 @@ Client
    - 切换 `ai.provider.type=anthropic` 后服务可启动
    - `GET /api/v1/healthz` 正常返回
 
-5. 数据库结构验证
+5. 崩溃回归验证（FiberCurlSession）
+   - 场景：连续多轮 `/api/v1/chat/completions` 与 `/api/v1/chat/stream`
+   - 目标：验证不会再触发 `IOManager::addEvent` 重复注册断言
+   - 结果：服务端持续存活，日志中未出现 `addEvent assert`/`ASSERTION`
+
+6. 数据库结构验证
    - `conversations` 表已存在 `summary_text`、`summary_updated_at_ms` 字段
 
 说明：
@@ -926,18 +1009,216 @@ Client
 ### 6. 下一阶段
 第三阶段建议优先推进：
 
-1. 写路径消息队列化（MQ）：主服务只负责生产消息，消费者负责批量落库。
+1. 用户体系与鉴权（账号、token、会话归属），优先解决跨端连续性问题。
 2. 记忆检索增强（RAG/向量召回）。
-3. 用户体系与鉴权（账号、token、会话归属）。
+3. 写路径消息队列化（MQ）：主服务只负责读库 + 生产消息，消费者负责批量落库并独立维护连接池。
 4. 稳定性治理（限流、重试、熔断、降级）。
 5. 可观测性（指标、日志、trace、告警）。
 
 ---
 
+## 第三阶段：用户体系与鉴权（游客可升级）
+
+### 0. 第三阶段改动类速览
+#### 0.1 配置与启动装配
+- `src/ai/config/ai_app_config.h/.cc`
+- `src/ai/config/ai_server.example.yml`
+- `src/ai/main.cc`
+
+本阶段新增 `AuthSettings` 与 `ai.auth.*` 配置项，并在 `main.cc` 完成账号仓库、鉴权服务、中间件的装配。
+
+#### 0.2 账号存储层
+- 新增：`src/ai/storage/auth_repository.h/.cc`
+- 调整：`src/ai/sql/init_ai_chat.sql`
+
+新增 `users`、`auth_tokens` 两张表，并提供游客 SID -> 登录主体 SID 的会话归并能力。
+
+#### 0.3 认证业务服务层
+- 新增：`src/ai/service/auth_service.h/.cc`
+
+实现注册、登录、Bearer 鉴权、登出撤销，并统一输出身份主体 `principal_sid`。
+
+#### 0.4 API 路由与中间件接入
+- 调整：`src/ai/http/ai_http_api.h/.cc`
+- 调整：`src/ai/http/ai_http_handlers.h/.cc`
+- 调整：`src/ai/main.cc`
+
+新增 4 条鉴权路由，并把聊天请求的会话主体从“仅 Cookie SID”升级为“优先 `X-Principal-Sid`（登录用户主体）”。
+
+#### 0.5 构建与链接
+- 调整：`CMakeLists.txt`
+
+新增 `auth_service/auth_repository` 编译单元，并补充 `OpenSSL::Crypto` 链接用于 PBKDF2/SHA256。
+
+---
+
+### 1. 本阶段目标
+在第二阶段“可扩展 + 可并发 + 可持续对话”的基础上，第三阶段目标是解决身份连续性问题：
+
+- 引入账号体系，支持用户名密码注册/登录
+- 保留游客模式，兼容当前调试与未登录使用
+- 登录后把会话主体升级为用户维度（`u:<user_id>`），支持跨端延续历史
+- 保持现有 chat/history API 兼容，不破坏第一、二阶段链路
+- 为第四阶段 RAG 和后续权限治理提供统一身份锚点
+
+---
+
+### 2. 本阶段完成项
+
+#### 1. 身份模型升级：`SID` 到 `principal_sid`
+核心语义：
+
+1. 游客请求：
+   - 沿用 Cookie `SID`
+2. 登录请求：
+   - 通过 Bearer token 鉴权后注入 `X-Principal-Sid = u:<user_id>`
+3. ChatService 维度：
+   - 继续使用 `sid + conversation_id` 作为上下文与存储键
+   - 但 `sid` 已升级为“统一主体键”（游客 SID 或用户 SID）
+
+这样做到“业务层代码结构不变、身份语义升级”。
+
+#### 2. 配置体系新增 `ai.auth.*`
+新增并落地：
+
+- `enable_guest`（默认 `true`）
+- `token_ttl_seconds`（默认 `2592000`）
+- `password_pbkdf2_iterations`（默认 `150000`）
+- `merge_guest_on_login`（默认 `true`）
+
+`AiAppConfig::Validate()` 增加了 auth 配置合法性校验（TTL 和 PBKDF2 迭代次数必须大于 0）。
+
+#### 3. 存储层新增账号与令牌仓库
+`AuthRepository` 提供以下能力：
+
+1. 用户创建与查询
+2. 令牌保存、查询、撤销
+3. 登录后游客数据归并（事务）
+
+归并事务流程：
+
+1. 把游客 `conversations` upsert 到用户主体 SID
+2. 把游客 `chat_messages.sid` 批量改写到用户主体 SID
+3. 删除游客侧 `conversations` 残留记录
+
+新增数据表：
+
+1. `users`
+2. `auth_tokens`
+
+#### 4. 认证业务服务落地（`AuthService`）
+实现接口：
+
+1. `Register`
+2. `Login`
+3. `AuthenticateBearerToken`
+4. `Logout`
+
+安全策略（当前实现）：
+
+1. 密码哈希：`PBKDF2-HMAC-SHA256 + 随机 salt`
+2. token 形态：opaque token（随机 32 bytes -> hex）
+3. 数据库存储：仅存 `token_hash`（SHA256），不存 token 明文
+4. 鉴权校验：检查“存在 + 未过期 + 未撤销 + 用户状态有效”
+
+#### 5. API 路由扩展与鉴权中间件
+新增路由：
+
+1. `POST /api/v1/auth/register`
+2. `POST /api/v1/auth/login`
+3. `POST /api/v1/auth/logout`
+4. `GET /api/v1/auth/me`
+
+中间件策略：
+
+1. 公共路由（不鉴权）：
+   - `/api/v1/healthz`
+   - `/api/v1/auth/register`
+   - `/api/v1/auth/login`
+2. 强制鉴权路由：
+   - `/api/v1/auth/me`
+   - `/api/v1/auth/logout`
+3. 业务路由（chat/history）：
+   - 有 Bearer 且合法 -> 走用户主体
+   - 有 Bearer 但非法/过期/撤销 -> 401（不回退游客）
+   - 无 Bearer -> 若 `enable_guest=true` 则游客可用，否则 401
+
+#### 6. 对话链路身份接入升级
+`AiHttpHandlers::BuildChatRequest()` 与 `HandleHistory()` 已改为：
+
+1. 优先读取 `X-Principal-Sid`
+2. 未命中再回退 `ExtractSid()`（Cookie SID）
+
+因此 chat/history 在“登录和游客”两种模式下都能复用同一条服务调用链。
+
+---
+
+### 3. 测试与验证
+本阶段已完成的验证如下：
+
+1. 编译验证
+   - `cmake -S . -B build -DBUILD_AI_CHAT_SERVER=ON`
+   - `cmake --build build -j8 --target ai_chat_server`
+   - 结果：通过
+
+2. 回归单测
+   - `cmake --build build -j8 --target test_ai_chat_service`
+   - `ctest --test-dir build -R test_ai_chat_service --output-on-failure`
+   - 结果：通过
+
+3. 结构验证
+   - `init_ai_chat.sql` 已包含 `users` / `auth_tokens` 建表语句
+   - `main.cc` 已完成 auth 中间件和 auth 路由接入
+
+说明：
+- 本轮主要完成“第三阶段最小闭环”落地，端到端压测与专项安全测试留到后续阶段补强。
+
+---
+
+### 4. 当前实现与后续优化
+#### 当前取舍
+- 采用 Opaque token + DB 校验，优先可撤销与实现简单
+- 密码策略先做长度与字符合法性基础校验，复杂度策略暂未增强
+- 鉴权中间件先按路径规则控制，未引入细粒度 ACL/RBAC
+- 保留游客模式，避免影响现有调试与快速联调流程
+
+#### 已知风险点
+1. 登录归并在会话量很大时可能增加事务耗时，需压测验证
+2. 目前无登录失败限流/锁定机制，抗暴力破解能力有限
+3. token 生命周期管理较基础（无 refresh token、多设备管理能力弱）
+4. `/api/v1/auth/*` 路由目前未单独做安全审计日志落盘
+
+#### 后续可优化方向
+1. 引入 refresh token 与多端会话管理
+2. 增加登录限流、失败惩罚、密码强度策略
+3. 增加 token 活跃刷新与后台清理任务
+4. 基于用户主体增加更细粒度权限控制
+
+---
+
+### 5. 阶段总结
+第三阶段核心价值，是把“会话连续性”从 Cookie 维度提升到用户维度：
+
+- 不破坏现有 chat API 协议，完成账号体系平滑接入
+- 通过 `principal_sid` 把游客与登录两条路径收敛到同一业务编排链路
+- 支持登录后历史归并，解决“换端/清 Cookie 后上下文断裂”的核心问题
+- 为第四阶段 RAG 的“用户级长期记忆”提供了稳定身份锚点
+
+到这里，AI 应用层第三阶段主目标已经完成（最小闭环版本）。
+
+### 6. 下一阶段
+第四阶段建议优先推进：
+
+1. 记忆检索增强（RAG/向量召回），以用户主体维度召回长期事实。
+2. 写路径消息队列化（MQ）工程化设计收敛与迁移准备（按规划在第五阶段落地）。
+3. 稳定性治理（限流、重试、熔断、降级）。
+4. 可观测性（指标、日志、trace、告警）。
+
+---
+
 ## 后续阶段（规划）
-- 第三阶段：写路径消息队列化（MQ），将主服务进程内异步写入升级为外部 MQ（生产者-消费者），实现写路径解耦、削峰与失败重放；消费者侧批量落库并独立维护连接池。
 - 第四阶段：记忆检索增强（RAG/向量召回），在 summary + recent 之外按语义召回历史关键事实。
-- 第五阶段：用户体系与鉴权（账号、Token、会话归属）。
+- 第五阶段：写路径消息队列化（MQ），将主服务进程内异步写入升级为外部 MQ（生产者-消费者），实现写路径解耦、削峰与失败重放；主服务进程只负责读库 + 生产消息，消费者侧批量落库并独立维护连接池。
 - 第六阶段：稳定性治理（限流、重试、熔断、降级）。
 - 第七阶段：可观测性（指标、日志、trace、告警）。
 - 第八阶段：运维发布（灰度、配置分层、备份恢复）。
