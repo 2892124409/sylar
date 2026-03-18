@@ -1091,6 +1091,11 @@ Client
 
 `AiAppConfig::Validate()` 增加了 auth 配置合法性校验（TTL 和 PBKDF2 迭代次数必须大于 0）。
 
+配置语义补充：
+
+1. `token_ttl_seconds` 决定登录 token 的有效期。登录成功后服务端写入过期时间（`expires_at_ms = now + ttl`），超时后受保护接口返回 401；主动 `/logout` 会提前使 token 失效。
+2. `password_pbkdf2_iterations` 决定密码哈希的工作因子。注册与登录校验都会使用该参数；值越大，抗暴力破解能力越强，但登录 CPU 开销也越高。
+
 #### 3. 存储层新增账号与令牌仓库
 `AuthRepository` 提供以下能力：
 
@@ -1102,13 +1107,52 @@ Client
 1. `users`
 2. `auth_tokens`
 
-#### 4. 认证业务服务落地（`AuthService`）
-实现接口：
+数据库执行模型补充（除异步入库 `AsyncMySqlWriter` 外）：
 
-1. `Register`
-2. `Login`
-3. `AuthenticateBearerToken`
-4. `Logout`
+1. `AuthRepository` 的 `CreateUser/GetUserByUsername/SaveToken/GetToken/RevokeToken` 基于 `mysql_query/mysql_store_result`，属于同步阻塞调用。
+2. `ChatRepository` 读路径（`LoadRecentMessages/LoadHistory/LoadSummary`）同样基于同步查询，也是阻塞调用。
+3. 启动阶段 `ChatRepository::EnsureSchema` 与 `AuthRepository::EnsureSchema` 的建表 SQL 为同步执行。
+4. 连接池层的 `mysql_real_connect`（建连）和 `mysql_ping`（连接健康检查）也是同步调用。
+
+当前阶段取舍与后续优化方向：
+
+1. 现阶段保持“写异步（`AsyncMySqlWriter`）+ 读同步（连接池）”的最小复杂度方案，优先保证第三阶段可用性与稳定性。
+2. 若后续读 QPS 上升，可先增加独立 DB 线程池隔离读请求，避免 HTTP worker 被慢 SQL 长时间占用。
+3. 更高并发场景可评估 MySQL 非阻塞接口 + `IOManager` 的协程化 DB I/O（类似 `FiberCurlSession`）。
+4. 连接池可继续优化为预热连接、后台健康检查与分级超时，降低请求路径上的建连/探测抖动。
+
+#### 4. 认证业务服务落地（`AuthService`）
+类概括：
+
+`AuthService` 是第三阶段认证模块的业务编排核心，负责把“账号规则”从 HTTP 协议层中抽离出来。  
+它的职责是：参数校验、密码哈希派生、token 生成与校验、错误语义收敛、身份主体构造；  
+它不直接操作 HTTP 请求/响应，也不直接管理数据库连接，数据读写通过 `AuthRepository` 完成。
+
+实现接口与职责：
+
+1. `Register(username, password, user_id, error, status)`
+   - 作用：注册新用户。
+   - 核心流程：校验用户名/密码格式 -> 生成随机 salt -> `PBKDF2-HMAC-SHA256` 派生哈希 -> 调用 `CreateUser` 落库。
+   - 输出语义：成功返回 `user_id`；用户名冲突映射为 `409`；参数不合法为 `400`。
+
+2. `Login(username, password, access_token, identity, error, status)`
+   - 作用：校验账号密码并签发登录态 token。
+   - 核心流程：按用户名查用户 -> 校验用户状态与密码哈希 -> 生成随机 `access_token` -> 计算 `token_hash` 后落库（含过期时间）。
+   - 输出语义：成功返回 token 明文与 `identity`（含 `principal_sid`）；失败统一返回认证失败语义，避免账号枚举。
+
+3. `AuthenticateBearerToken(token, identity, error, status)`
+   - 作用：对 Bearer token 做服务端鉴权。
+   - 核心流程：对 token 明文做 SHA256 -> 查 `auth_tokens` -> 校验“存在 + 未过期 + 未撤销 + 用户状态有效”。
+   - 输出语义：成功返回身份快照 `identity`；失败返回 `401` 或 `500`（存储异常）。
+
+4. `Logout(token, error, status)`
+   - 作用：使当前 token 失效（主动登出）。
+   - 核心流程：对 token 做 SHA256 -> 调用 `RevokeToken` 写入撤销时间。
+   - 输出语义：撤销成功后该 token 立即不可用于后续鉴权。
+
+5. `BuildPrincipalSid(user_id)`
+   - 作用：构造统一主体标识，格式为 `u:<user_id>`。
+   - 价值：把下游 chat/history 的主体键统一为可跨端复用的用户维度，而不是临时会话维度。
 
 安全策略（当前实现）：
 
@@ -1117,30 +1161,130 @@ Client
 3. 数据库存储：仅存 `token_hash`（SHA256），不存 token 明文
 4. 鉴权校验：检查“存在 + 未过期 + 未撤销 + 用户状态有效”
 
+##### 学习问答记录（登录/注册安全策略）
+**Q：当前是怎么保证登录/注册信息安全的？详细说明当前策略**
+
+**A：**
+
+当前实现从“传输、密码、令牌、鉴权入口、返回与错误语义”五个层面做安全控制：
+
+1. 传输层（防窃听）：
+   - 生产环境要求走 HTTPS/TLS，避免用户名、密码、token 在链路中被明文嗅探。
+   - 本地调试可用 HTTP，但这不属于安全部署形态。
+2. 密码层（防明文落库）：
+   - 注册/登录阶段会接收明文密码参与校验，但不会明文存储。
+   - 注册时使用 `PBKDF2-HMAC-SHA256 + 随机 salt` 生成密码哈希。
+   - 数据库仅保存 `password_hash + password_salt`，不保存明文密码。
+   - PBKDF2 迭代次数由 `ai.auth.password_pbkdf2_iterations` 控制（当前默认 150000）。
+3. 令牌层（防会话泄露扩大）：
+   - 登录成功后签发随机 `access_token`（opaque token，非 JWT，不内嵌用户信息）。
+   - 数据库只存 `token_hash(SHA256)`，不存 token 明文。
+   - 鉴权时校验：token 是否存在、是否过期、是否已撤销、用户状态是否有效。
+4. 鉴权入口层（防未授权访问）：
+   - 非公共接口统一强制 Bearer 鉴权。
+   - 已移除游客回退路径，未登录请求直接 401。
+   - 鉴权成功后由中间件注入 `X-Principal-Sid`，下游业务统一按登录主体处理。
+5. 返回与错误语义层（减少信息泄露）：
+   - 登录失败统一返回“invalid username or password”，避免暴露“用户名是否存在”。
+   - 响应不返回 `password_hash`、`salt`、`token_hash` 等敏感内部字段。
+   - 仅登录成功时返回一次 token 明文给客户端保存。
+
+当前边界（已知待增强）：
+1. 还未实现登录限流/失败锁定。
+2. 还未实现 refresh token 与多端会话治理。
+3. 还需补充更完善的安全审计日志。
+
 #### 5. API 路由扩展与鉴权中间件
-新增路由：
+模块概括：
 
-1. `POST /api/v1/auth/register`
-2. `POST /api/v1/auth/login`
-3. `POST /api/v1/auth/logout`
-4. `GET /api/v1/auth/me`
+第三阶段在 API 层做了两件关键事：
 
-中间件策略：
+1. 路由能力扩展：新增账号体系路由（register/login/logout/me），形成登录态闭环。
+2. 入口鉴权前移：通过中间件在“进入路由前”统一做 request_id 注入与 Bearer 鉴权，避免每个 handler 重复写同类逻辑。
 
-1. 当前中间件清单（均在 `src/ai/middleware`）：
-   - `RequestIdMiddleware`：前置生成并注入 `X-Request-Id`
-   - `AuthMiddleware`：前置鉴权、注入 `X-Principal-Sid` 等身份头
-2. 公共路由（不鉴权）：
-   - `/api/v1/healthz`
-   - `/api/v1/auth/register`
-   - `/api/v1/auth/login`
-3. 强制鉴权路由：
-   - `/api/v1/auth/me`
-   - `/api/v1/auth/logout`
-4. 业务路由（chat/history）：
-   - 有 Bearer 且合法 -> 走用户主体
-   - 有 Bearer 但非法/过期/撤销 -> 401
-   - 无 Bearer -> 401（强制登录）
+代码职责划分：
+
+1. `ai_http_api.cc`：只负责“路由注册与分发绑定”。
+2. `ai_http_handlers.cc`：负责 HTTP 参数解析、调用 Service、组装 JSON/SSE 响应。
+3. `RequestIdMiddleware` / `AuthMiddleware`：负责横切能力（链路追踪、鉴权）。
+
+路由清单与职责：
+
+1. `GET /api/v1/healthz`
+   - 作用：健康检查，返回服务存活状态与时间戳。
+   - 鉴权：公共路由，不要求 Bearer。
+2. `POST /api/v1/auth/register`
+   - 作用：创建账号。
+   - 入参：`username`、`password`（JSON）。
+   - 鉴权：公共路由，不要求 Bearer。
+3. `POST /api/v1/auth/login`
+   - 作用：账号登录并签发 `access_token`。
+   - 出参：`token_type`、`access_token`、`principal_sid`、`user`。
+   - 鉴权：公共路由，不要求 Bearer。
+4. `POST /api/v1/auth/logout`
+   - 作用：撤销当前 token，使其立即失效。
+   - 鉴权：必须 Bearer。
+5. `GET /api/v1/auth/me`
+   - 作用：校验当前 token 并返回当前登录身份信息。
+   - 鉴权：必须 Bearer。
+6. `POST /api/v1/chat/completions`
+   - 作用：同步对话请求。
+   - 鉴权：必须 Bearer，主体来自 `X-Principal-Sid`。
+7. `POST /api/v1/chat/stream`
+   - 作用：SSE 流式对话请求。
+   - 鉴权：必须 Bearer，主体来自 `X-Principal-Sid`。
+8. `GET /api/v1/chat/history/:conversation_id`
+   - 作用：按会话查询历史消息。
+   - 鉴权：必须 Bearer，主体来自 `X-Principal-Sid`。
+
+中间件执行顺序与行为：
+
+1. `RequestIdMiddleware`（先执行）
+   - 为请求生成 `X-Request-Id`，同时写入 request/response。
+   - 作用：统一问题定位锚点。
+2. `AuthMiddleware`（后执行）
+   - 对公共路由直接放行。
+   - 对非公共路由解析 `Authorization: Bearer <token>` 并鉴权。
+   - 鉴权成功后注入 `X-Principal-Sid`、`X-Auth-User-Id`、`X-Auth-Username`。
+   - 鉴权失败时直接返回 401/500，不再进入路由处理。
+
+鉴权矩阵（第三阶段）：
+
+1. 公共路由：`/api/v1/healthz`、`/api/v1/auth/register`、`/api/v1/auth/login`
+   - 无 Bearer：允许访问
+2. 受保护路由：`/api/v1/auth/me`、`/api/v1/auth/logout`、`/api/v1/chat/*`
+   - Bearer 合法：放行到对应 handler
+   - Bearer 非法/过期/撤销：401
+   - 无 Bearer：401
+
+实现细节说明：
+
+1. 中间件已经做了统一鉴权，但 `chat/history` handler 仍保留 `X-Principal-Sid` 为空时返回 401 的防御式检查。
+2. 路由层错误响应统一走 `WriteJsonError`，保证错误结构一致（`ok/code/message/request_id`）。
+
+##### 请求生命周期时序图（第三阶段）
+```text
+Client
+  -> TCP连接进入 HttpServer
+  -> 解析 HTTP 请求 (method/path/header/body)
+  -> Middleware.before #1: RequestIdMiddleware
+       - 生成 X-Request-Id 并写入 request/response
+  -> Middleware.before #2: AuthMiddleware
+       - 公共路由(/healthz,/auth/register,/auth/login)直接放行
+       - 非公共路由:
+           - 解析 Authorization: Bearer <token>
+           - 缺失/非法 -> 401 直接返回（不进路由）
+           - 调用 AuthService::AuthenticateBearerToken
+           - 失败 -> 401/500 直接返回
+           - 成功 -> 注入 X-Principal-Sid / X-Auth-User-Id 等头
+  -> ServletDispatch 按 method + path 匹配路由
+  -> AiHttpHandlers::HandleXXX
+       - /auth/*: 调 AuthService (Register/Login/Logout/Me)
+       - /chat/*: 构建请求 -> ChatService -> LlmClient -> 存储层
+  -> 组装 JSON 或 SSE 响应
+  -> sendResponse 发回客户端
+  -> 连接保持/关闭（取决于 keep-alive/stream）
+```
 
 #### 6. 对话链路身份接入升级
 `AiHttpHandlers::BuildChatRequest()` 与 `HandleHistory()` 已改为：

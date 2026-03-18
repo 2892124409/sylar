@@ -11,18 +11,26 @@ namespace ai
 namespace storage
 {
 
+/**
+ * @file auth_repository.cc
+ * @brief 账号与鉴权仓库实现。
+ */
+
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
+/// @brief 构造函数，保存连接池并初始化状态位。
 AuthRepository::AuthRepository(const MysqlConnectionPool::ptr& pool)
     : m_pool(pool)
     , m_initialized(false)
 {
 }
 
+/// @brief 析构函数（无额外资源释放逻辑）。
 AuthRepository::~AuthRepository()
 {
 }
 
+/// @brief 初始化仓库并确保 users/auth_tokens 表存在。
 bool AuthRepository::Init(std::string& error)
 {
     if (m_initialized)
@@ -45,6 +53,7 @@ bool AuthRepository::Init(std::string& error)
     return true;
 }
 
+/// @brief 写入一条用户记录，返回新用户 ID。
 bool AuthRepository::CreateUser(const std::string& username,
                                 const std::string& password_hash,
                                 const std::string& password_salt,
@@ -92,6 +101,7 @@ bool AuthRepository::CreateUser(const std::string& username,
     return true;
 }
 
+/// @brief 按用户名查询用户记录（供登录鉴权使用）。
 bool AuthRepository::GetUserByUsername(const std::string& username,
                                        UserRecord& out,
                                        std::string& error)
@@ -146,6 +156,7 @@ bool AuthRepository::GetUserByUsername(const std::string& username,
     return true;
 }
 
+/// @brief 保存 token 哈希与过期时间。
 bool AuthRepository::SaveToken(uint64_t user_id,
                                const std::string& token_hash,
                                uint64_t expires_at_ms,
@@ -182,6 +193,7 @@ bool AuthRepository::SaveToken(uint64_t user_id,
     return true;
 }
 
+/// @brief 按 token_hash 查询 token + 用户状态（联表）。
 bool AuthRepository::GetToken(const std::string& token_hash,
                               TokenRecord& out,
                               std::string& error)
@@ -238,6 +250,7 @@ bool AuthRepository::GetToken(const std::string& token_hash,
     return true;
 }
 
+/// @brief 将 token 标记为已撤销。
 bool AuthRepository::RevokeToken(const std::string& token_hash,
                                  uint64_t revoked_at_ms,
                                  std::string& error)
@@ -266,6 +279,7 @@ bool AuthRepository::RevokeToken(const std::string& token_hash,
     return true;
 }
 
+/// @brief 幂等建表：users 与 auth_tokens。
 bool AuthRepository::EnsureSchema(std::string& error)
 {
     ScopedMysqlConn conn(m_pool, 0, error);
@@ -306,6 +320,7 @@ bool AuthRepository::EnsureSchema(std::string& error)
            ExecuteSql(conn.get(), kCreateAuthTokensSql, error);
 }
 
+/// @brief 执行通用 SQL，并在失败时统一记录错误日志。
 bool AuthRepository::ExecuteSql(MYSQL* conn, const std::string& sql, std::string& error)
 {
     if (mysql_query(conn, sql.c_str()) != 0)
@@ -317,6 +332,7 @@ bool AuthRepository::ExecuteSql(MYSQL* conn, const std::string& sql, std::string
     return true;
 }
 
+/// @brief 调用 mysql_real_escape_string 对字符串做 SQL 转义。
 std::string AuthRepository::Escape(MYSQL* conn, const std::string& value)
 {
     std::string escaped;
