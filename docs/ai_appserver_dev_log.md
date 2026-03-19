@@ -1459,6 +1459,380 @@ Client
 4. `RagRetriever` 负责读路径编排，`RagIndexer` 负责写路径编排。
 5. `ChatService` 负责把召回结果真正纳入模型上下文。
 
+### 2.2 核心类详解
+#### 2.2.1 `rag_http_client`（RAG 通用 HTTP 适配层）
+`rag_http_client` 是第四阶段 RAG 子系统最底层的网络适配器，核心目标是：
+
+1. 对上层屏蔽 `libcurl` 细节（`EmbeddingClient` / `VectorStore` 不直接写 curl 代码）。
+2. 统一 RAG 外部依赖（Ollama / Qdrant）的 HTTP 请求入口。
+3. 复用 `FiberCurlSession`，使网络等待不阻塞 IO worker 线程。
+
+##### 类与接口位置
+1. 头文件：`src/ai/rag/rag_http_client.h`
+2. 实现文件：`src/ai/rag/rag_http_client.cc`
+3. 对外唯一函数：
+   - `bool PerformHttpRequest(const HttpRequestOptions& options, long& http_status, std::string& response_body, std::string& error)`
+
+##### `HttpRequestOptions` 参数语义（调用方视角）
+1. `method`
+   - HTTP 方法（`GET/POST/PUT/...`）。
+   - `POST` 走 `CURLOPT_POST`，其他非 GET 方法走 `CURLOPT_CUSTOMREQUEST`。
+2. `url`
+   - 完整 URL（由上层拼好，例如 Ollama `/api/embed`、Qdrant `collections/...`）。
+3. `headers`
+   - 请求头字符串数组（如 `Content-Type: application/json`）。
+4. `body`
+   - 请求体字符串（当前主要是 JSON 序列化文本）。
+5. `connect_timeout_ms` / `request_timeout_ms`
+   - 分别控制建连超时与总超时。
+
+##### `PerformHttpRequest` 执行链路
+1. `EnsureCurlGlobalInit()`
+   - 使用 `std::call_once` 做进程级 `curl_global_init`，避免重复初始化。
+2. `curl_easy_init()`
+   - 创建本次请求的 easy handle。
+3. 组装请求
+   - 填 URL、header、method、body、timeout、写回调。
+4. 执行请求（关键点）
+   - 不直接 `curl_easy_perform`。
+   - 而是 `FiberCurlSession session(curl); code = session.Perform();`
+   - 含义：当前协程在网络等待时挂起，IO 就绪后恢复，线程可去执行其他协程任务。
+5. 收尾
+   - 读取 `CURLINFO_RESPONSE_CODE` 到 `http_status`。
+   - 释放 header 链表与 easy handle。
+6. 返回语义
+   - `code != CURLE_OK`：返回 `false`（网络/执行层失败，如超时、连接失败）。
+   - `code == CURLE_OK`：返回 `true`，并把响应体返回给上层。
+   - 注意：即便 HTTP 是 4xx/5xx，这里也可能返回 `true`，由上层按 `http_status` 做业务判定。
+
+##### 错误边界与职责边界
+1. `rag_http_client` 负责：
+   - “请求是否发出去、网络是否成功、响应体是否拿到”。
+2. `rag_http_client` 不负责：
+   - 业务语义判断（例如 Qdrant 404 是否按空结果处理、409 是否按幂等成功）。
+   - JSON 解析与字段校验（由 `embedding_client` / `vector_store` 处理）。
+3. 这样分层的好处：
+   - 传输层稳定复用；业务策略留在各自上层模块，不耦合。
+
+##### 为什么它是第四阶段关键基础设施
+1. RAG 的两个外部依赖（Ollama/Qdrant）都靠 HTTP 调用。
+2. 若这里仍用阻塞式 `curl_easy_perform`，高并发时容易占死工作线程。
+3. 使用 `FiberCurlSession` 后：
+   - 网络等待期间会让出线程；
+   - 与主服务协程调度模型一致；
+   - RAG 检索/索引链路更容易与主链路并发共存。
+
+##### 面试可用总结（30 秒版本）
+在第四阶段里我们专门抽了 `rag_http_client` 做 RAG 的统一 HTTP 适配层。  
+上层模块只关心“传什么、拿什么”，不关心 curl 细节。底层执行不走阻塞 `curl_easy_perform`，而是通过 `FiberCurlSession` 把网络等待挂到 `IOManager`，所以即使 RAG 访问 Ollama/Qdrant 有网络抖动，也不会长期占死工作线程。  
+它把网络层职责与业务层职责拆开：网络成功/失败由 `rag_http_client` 负责，HTTP 状态语义和 JSON 解析由上层模块负责。
+
+#### 2.2.2 `embedding_client`（文本向量化适配层）
+`embedding_client` 位于 RAG 读写链路的共同入口，核心目标是：
+
+1. 对上层统一暴露“文本 -> 向量”的稳定接口（`EmbeddingClient`）。
+2. 把具体 embedding 服务差异（当前是 Ollama）封装在实现类内部。
+3. 复用 `rag_http_client` 发 HTTP 请求，保持网络层逻辑一致。
+
+##### 类与接口位置
+1. 头文件：`src/ai/rag/embedding_client.h`
+2. 实现文件：`src/ai/rag/embedding_client.cc`
+3. 核心抽象：
+   - `class EmbeddingClient`
+   - `virtual bool Embed(const std::string& input, std::vector<float>& embedding, std::string& error) const = 0;`
+4. 当前实现：
+   - `class OllamaEmbeddingClient : public EmbeddingClient`
+
+##### 配置项语义（`EmbeddingSettings`）
+1. `base_url`
+   - embedding 服务地址（如 `http://127.0.0.1:11434`）。
+2. `model`
+   - embedding 模型名（如 `mxbai-embed-large`）。
+3. `connect_timeout_ms` / `request_timeout_ms`
+   - 分别控制建连超时与总超时。
+
+##### `BuildEmbedUrl()` 做了什么
+1. 把 `base_url` 规范化为可请求的 `/api/embed` 完整地址。
+2. 同时兼容两种配置形式：
+   - `http://host:11434`
+   - `http://host:11434/`
+3. 未配置 `base_url` 时回退：
+   - `http://127.0.0.1:11434/api/embed`
+
+##### `Embed()` 执行链路
+1. 输入校验
+   - `input.empty()` 直接返回失败，避免无意义请求。
+2. 构造请求体
+   - JSON：`{"model": "...", "input": "..."}`
+3. 构造 HTTP 请求参数
+   - `method=POST`、`url=BuildEmbedUrl()`、`Content-Type: application/json`、超时。
+4. 发请求
+   - 调 `PerformHttpRequest(...)`（底层走 `FiberCurlSession` 协程化网络 IO）。
+5. 校验状态码
+   - 非 2xx 直接失败，并把 `status + body` 拼到 `error`。
+6. 解析响应
+   - 要求是合法 JSON，且不存在 `error` 字段异常。
+7. 提取向量
+   - 必须包含 `embeddings` 数组；
+   - 取 `embeddings[0]` 并逐项转为 `float`；
+   - 任意非数字值都判失败。
+
+##### 返回与错误语义
+1. `true`
+   - 成功产出非空/可用向量，写入 `embedding`。
+2. `false`
+   - 输入非法、网络失败、HTTP 非 2xx、JSON 非法、字段缺失、向量元素类型错误。
+3. `error`
+   - 明确携带失败原因，便于上层记录日志和降级处理。
+
+##### 在 RAG 中的调用位置
+1. 检索读链路（query-time）
+   - `RagRetriever::Retrieve()` 里先 `Embed(query)` 再向量检索。
+2. 索引写链路（index-time）
+   - `RagIndexer::FlushBatch()` 里对每条消息 `Embed(content)` 后 upsert。
+3. 结论
+   - `embedding_client` 是读写共用的向量化入口，属于 RAG 的“基础能力层”。
+
+##### 面试可用总结（30 秒版本）
+`embedding_client` 是我们 RAG 里的“文本向量化门面层”：上层只调用 `Embed()`，不用关心 Ollama 协议细节。  
+实现上它把请求参数和响应校验做了完整收口（状态码、JSON 结构、数值类型），并通过 `rag_http_client` 复用协程化网络调用能力。  
+这样无论是检索链路还是索引链路，都能用同一套向量化接口，便于后续替换 embedding 服务提供方。
+
+#### 2.2.3 `vector_store`（向量存储与检索适配层）
+`vector_store` 是 RAG 中“向量落库 + 语义检索”的协议适配层，核心目标是：
+
+1. 对上层统一暴露存储接口（`EnsureCollection / Upsert / Search`）。
+2. 屏蔽 Qdrant HTTP/JSON 协议细节。
+3. 把检索边界控制在“用户主体 SID”范围内，避免跨用户召回污染。
+
+##### 类与接口位置
+1. 头文件：`src/ai/rag/vector_store.h`
+2. 实现文件：`src/ai/rag/vector_store.cc`
+3. 核心抽象：
+   - `class VectorStore`
+   - `EnsureCollection(...) / Upsert(...) / Search(...)`
+4. 当前实现：
+   - `class QdrantVectorStore : public VectorStore`
+
+##### 配置与数据结构语义
+1. `VectorStoreSettings`
+   - `base_url`：Qdrant 地址（默认回退 `http://127.0.0.1:6333`）。
+   - `collection`：集合名。
+   - `request_timeout_ms`：请求超时。
+2. `MemoryPayload`
+   - 业务元数据：`sid / conversation_id / role / content / created_at_ms`。
+3. `VectorPoint`
+   - 写入点：`id + vector + payload`。
+4. `SearchHit`
+   - 命中结果：`id + score + payload`。
+
+##### `EnsureCollection()` 执行链路（建集合）
+1. 校验 `vector_size > 0`。
+2. 组装 Qdrant 请求体：
+   - `vectors.size = vector_size`
+   - `vectors.distance = Cosine`
+3. 请求：
+   - `PUT /collections/{collection}`
+4. 状态码策略：
+   - `2xx`：成功
+   - `409`：已存在，也按成功处理（幂等）
+   - 其他：失败并带上响应体错误信息
+
+##### `Upsert()` 执行链路（批量写入）
+1. 空点集直接成功返回（避免无意义请求）。
+2. 组装 points 数组：
+   - 每个点包含 `id/vector/payload`。
+3. 请求：
+   - `PUT /collections/{collection}/points?wait=false`
+4. 状态码策略：
+   - `2xx`：成功
+   - 其他：失败并返回 `qdrant upsert http status ...`
+
+##### `Search()` 执行链路（核心）
+1. 输入保护
+   - `sid` 空、`query` 空、`top_k=0` 时直接返回空结果成功。
+2. 构造检索请求
+   - `vector = query`
+   - `limit = top_k`
+   - `with_payload = true`
+   - `filter.must` 加 `sid` 精确匹配（用户隔离关键点）
+   - 可选 `score_threshold`（>0 才携带）
+3. 发请求
+   - `POST /collections/{collection}/points/search`
+4. 状态码策略
+   - `404`：集合不存在，按空结果成功（fail-open）
+   - `2xx`：继续解析
+   - 其他：失败
+5. 结果解析
+   - 解析 `result[]`，逐项抽取 `id/score/payload`。
+   - 额外本地二次阈值过滤：`score < threshold` 再次剔除。
+   - `payload.content` 为空的命中剔除（避免无意义注入）。
+6. 输出
+   - 产出 `std::vector<SearchHit>` 给上层 `RagRetriever/ChatService` 使用。
+
+##### 返回与错误语义
+1. `true`
+   - 包括“成功但无结果”（例如空入参、404、命中为空）。
+2. `false`
+   - 网络失败、HTTP 非预期、JSON 非法等。
+3. 设计意图
+   - 尽量不因“无检索结果”阻断主对话链路；
+   - 仅在“真实故障”时返回失败。
+
+##### 为什么它是第四阶段关键基础设施
+1. 它是“长期记忆”的真正落点（索引写入）与读点（语义召回）。
+2. `sid` 过滤是在该层固化的，保证多用户隔离。
+3. `409/404` 的幂等与 fail-open 策略，显著提升了工程可用性。
+
+##### 面试可用总结（30 秒版本）
+`vector_store` 是 RAG 的向量存储门面层：对上游只暴露 `EnsureCollection/Upsert/Search` 三个稳定接口，对下游封装 Qdrant 的 HTTP/JSON 协议细节。  
+它在检索时强制带 `sid` 过滤，确保召回结果不会跨用户串数据；在工程策略上把 `409 已存在` 和 `404 集合缺失` 做成幂等/降级处理，尽量保证主聊天链路可用。  
+因此它既承担“向量能力落地”，又承担“可用性与隔离性边界”的实现责任。
+
+#### 2.2.4 `rag_retriever`（检索编排层）
+`rag_retriever` 负责把“自然语言问题”串成完整语义检索链路，核心目标是：
+
+1. 把 query 先向量化（调用 `EmbeddingClient`）。
+2. 再按 `sid` 边界做向量检索（调用 `VectorStore`）。
+3. 向上游返回结构化命中结果（`SearchHit`），不关心 prompt 拼装细节。
+
+##### 类与接口位置
+1. 头文件：`src/ai/rag/rag_retriever.h`
+2. 实现文件：`src/ai/rag/rag_retriever.cc`
+3. 核心接口：
+   - `bool Retrieve(const std::string& sid, const std::string& query, size_t top_k, double score_threshold, std::vector<SearchHit>& out, std::string& error) const`
+
+##### `Retrieve()` 执行链路（核心）
+1. 初始化输出
+   - 先 `out.clear()`，避免调用方读到脏数据。
+2. 输入短路
+   - `sid/query/top_k` 任一无效时，返回“成功但无结果”。
+3. 依赖检查
+   - `EmbeddingClient` / `VectorStore` 任一未注入则返回失败。
+4. 文本向量化
+   - `Embed(query, query_embedding, error)`。
+5. 向量检索
+   - `Search(sid, query_embedding, top_k, score_threshold, out, error)`。
+6. 返回
+   - 上游拿到的是纯检索结果，不带格式化文本。
+
+##### 为什么要单独抽 `rag_retriever`
+1. 把“检索编排逻辑”从 `ChatService` 解耦出来，业务层不直接操作 embedding/vector store 细节。
+2. 后续若替换向量库或 embedding 提供方，只要接口兼容，`ChatService` 基本不改。
+3. 检索策略（例如是否触发、top_k、阈值）可在上层配置，检索执行留在本层收口。
+
+##### 在主调用链中的位置
+1. 入口调用点：
+   - `ChatService::BuildRagMemoryMessages()` 中调用 `m_rag_retriever->Retrieve(...)`。
+2. 上游职责：
+   - `ChatService` 负责“何时召回、如何拼成 memory prompt、如何进预算裁剪”。
+3. 本层职责：
+   - 仅负责“把 query 转成 hits”，不做内容拼装策略。
+
+##### 返回与错误语义
+1. `true`
+   - 检索执行成功（包括空结果）。
+2. `false`
+   - 依赖缺失、embedding 失败、vector search 失败。
+3. 工程取舍
+   - “空结果”是业务常态，不应作为错误；
+   - “链路故障”才作为失败向上传递。
+
+##### 面试可用总结（30 秒版本）
+`rag_retriever` 是我们 RAG 的读路径编排器：它只做两件事——先把 query 向量化，再按 `sid` 去向量库检索，最后返回结构化命中结果。  
+这样 `ChatService` 不需要关心 embedding 和向量库协议细节，只负责策略与上下文拼装。  
+这种分层让系统在换 embedding 模型、换向量库时改动范围更小，也更方便做检索链路的单测和故障定位。
+
+#### 2.2.5 `rag_indexer`（异步索引编排层）
+`rag_indexer` 是第四阶段写路径的核心：把“持久化消息事件”异步转换为向量点并写入 Qdrant。核心目标是：
+
+1. 不阻塞主请求链路（异步后台线程处理）。
+2. 对消息做筛选与去重，减少无效向量写入。
+3. 统一“消息 -> embedding -> upsert”流水线，形成稳定索引能力。
+
+##### 类与接口位置
+1. 头文件：`src/ai/rag/rag_indexer.h`
+2. 实现文件：`src/ai/rag/rag_indexer.cc`
+3. 入口接口：
+   - `Start(error)`：启动后台索引线程。
+   - `Enqueue(message, error)`：投递索引任务。
+   - `Stop()`：停止线程并收尾。
+
+##### 配置项语义（`RagIndexerSettings`）
+1. `queue_capacity`
+   - 入队上限，防止内存无限增长。
+2. `batch_size`
+   - 每次 flush 最大处理条数。
+3. `flush_interval_ms`
+   - 空闲等待周期（无新消息时定时唤醒）。
+4. `assistant_index_mode`
+   - `all / fact_like / none`，控制 assistant 消息是否索引。
+5. `assistant_min_chars`
+   - `fact_like` 模式下最小长度门槛。
+6. `dedup_ttl_ms / dedup_max_entries`
+   - 去重窗口与缓存容量控制。
+
+##### 生命周期：`Start -> Enqueue -> Run -> FlushBatch -> Stop`
+1. `Start()`
+   - 校验依赖（embedding/vector store）与配置有效性。
+   - 设置 `m_running=true`，启动后台线程执行 `Run()`。
+2. `Enqueue()`
+   - 先做消息筛选（`ShouldIndexMessage`）。
+   - 再做去重判断（`ShouldSkipByDedup`）。
+   - 队列满则返回错误；否则入队并 `notify_one`。
+3. `Run()`
+   - 后台循环按 `batch_size` 拉取任务。
+   - 队列空时 `wait_for(flush_interval_ms)`。
+   - 每批调用 `FlushBatch()`；单批失败只记日志，不让线程退出。
+4. `FlushBatch()`
+   - 对每条消息执行 `Embed(content)`。
+   - 首次成功 embedding 时 `EnsureCollection(vector_dim)` 并缓存维度。
+   - 维度不一致的点直接跳过。
+   - 最后批量 `Upsert(points)` 写入 Qdrant。
+5. `Stop()`
+   - 设置 `m_running=false`，唤醒等待线程，`join` 回收线程。
+
+##### 消息筛选策略（为什么能减少无效索引）
+1. `user` 消息默认入索引。
+2. `assistant` 消息按模式控制：
+   - `none`：不索引 assistant；
+   - `all`：全部索引；
+   - `fact_like`：只索引“信息密度高”的回答。
+3. `fact_like` 判定信号：
+   - 噪声短语过滤（寒暄模板）；
+   - 事实信号词命中（配置/接口/代码块/技术词）；
+   - 包含数字或列表结构时倾向保留。
+
+##### 去重策略（`ShouldSkipByDedup`）
+1. 归一化文本：小写 + 空白折叠。
+2. 去重维度：`sid + normalized_content`。
+3. 哈希缓存：
+   - `unordered_map` 记录最近出现时间；
+   - `deque` 维护顺序用于 TTL/容量淘汰。
+4. 命中 TTL 窗口内重复内容：
+   - 直接跳过，不重复写向量库。
+
+##### 与 `ChatService` 的对接点
+1. 调用入口：
+   - `ChatService::PersistMessage()` 中，先入异步 MySQL 写队列，再尝试 `m_rag_indexer->Enqueue(...)`。
+2. 失败语义：
+   - RAG 入队失败只打 `WARN`，不阻断主对话成功路径（fail-open）。
+3. 工程意义：
+   - 主链路可用性优先，RAG 是增强能力，不是硬依赖。
+
+##### 返回与错误语义
+1. `Enqueue` 返回 `true`
+   - 代表“入队成功”或“被策略性跳过”。
+2. `Enqueue` 返回 `false`
+   - 仅在索引器未运行或队列已满等真实异常场景。
+3. `Run/FlushBatch`
+   - 单批失败记录日志，后续批次继续处理，避免线程自杀。
+
+##### 面试可用总结（30 秒版本）
+`rag_indexer` 是我们 RAG 写路径的异步编排器：主线程只负责把消息投递进去，后台线程按批做 embedding 并 upsert 到 Qdrant。  
+它做了三层治理：消息筛选（减少低价值 assistant 文本）、去重（sid + 归一化文本 + TTL）、以及批处理（控制吞吐与资源）。  
+并且我们采用 fail-open 策略：索引失败不影响主对话链路，保障可用性优先。
+
 ---
 
 ### 3. 当前上下文策略（重点）

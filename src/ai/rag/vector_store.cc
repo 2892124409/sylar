@@ -14,10 +14,14 @@ namespace rag
 namespace
 {
 
+/**
+ * @brief 规范化 base_url，保证不以 `/` 结尾。
+ */
 std::string NormalizeBaseUrl(const std::string& base_url)
 {
     if (base_url.empty())
     {
+        // 未配置时使用本地默认 Qdrant 地址。
         return "http://127.0.0.1:6333";
     }
 
@@ -30,27 +34,44 @@ std::string NormalizeBaseUrl(const std::string& base_url)
 
 } // namespace
 
+/**
+ * @brief 初始化 Qdrant 向量库配置。
+ */
 QdrantVectorStore::QdrantVectorStore(const VectorStoreSettings& settings)
     : m_settings(settings)
 {
     m_settings.base_url = NormalizeBaseUrl(settings.base_url);
 }
 
+/**
+ * @brief 返回集合 URL：`{base}/collections/{collection}`。
+ */
 std::string QdrantVectorStore::BuildCollectionUrl() const
 {
     return m_settings.base_url + "/collections/" + m_settings.collection;
 }
 
+/**
+ * @brief 返回 points Upsert URL。
+ */
 std::string QdrantVectorStore::BuildPointsUrl() const
 {
     return BuildCollectionUrl() + "/points?wait=false";
 }
 
+/**
+ * @brief 返回向量检索 URL。
+ */
 std::string QdrantVectorStore::BuildSearchUrl() const
 {
     return BuildCollectionUrl() + "/points/search";
 }
 
+/**
+ * @brief 确保向量集合存在，不存在则创建。
+ * @details
+ * 这里采用幂等策略：若 Qdrant 返回 `409 Already Exists`，也视为成功。
+ */
 bool QdrantVectorStore::EnsureCollection(size_t vector_size, std::string& error)
 {
     if (vector_size == 0)
@@ -63,6 +84,7 @@ bool QdrantVectorStore::EnsureCollection(size_t vector_size, std::string& error)
     body["vectors"]["size"] = vector_size;
     body["vectors"]["distance"] = "Cosine";
 
+    // 发送创建集合请求（PUT）。
     HttpRequestOptions req;
     req.method = "PUT";
     req.url = BuildCollectionUrl();
@@ -77,6 +99,7 @@ bool QdrantVectorStore::EnsureCollection(size_t vector_size, std::string& error)
         return false;
     }
 
+    // 已存在时直接成功返回，避免重复创建导致启动失败。
     if (http_status == 409)
     {
         return true;
@@ -97,6 +120,9 @@ bool QdrantVectorStore::EnsureCollection(size_t vector_size, std::string& error)
     return true;
 }
 
+/**
+ * @brief 批量写入/更新向量点。
+ */
 bool QdrantVectorStore::Upsert(const std::vector<VectorPoint>& points, std::string& error)
 {
     if (points.empty())
@@ -104,6 +130,7 @@ bool QdrantVectorStore::Upsert(const std::vector<VectorPoint>& points, std::stri
         return true;
     }
 
+    // 组装 Qdrant points payload。
     nlohmann::json body;
     body["points"] = nlohmann::json::array();
     for (size_t i = 0; i < points.size(); ++i)
@@ -119,6 +146,7 @@ bool QdrantVectorStore::Upsert(const std::vector<VectorPoint>& points, std::stri
         body["points"].push_back(point);
     }
 
+    // 发送 upsert 请求（PUT）。
     HttpRequestOptions req;
     req.method = "PUT";
     req.url = BuildPointsUrl();
@@ -133,6 +161,7 @@ bool QdrantVectorStore::Upsert(const std::vector<VectorPoint>& points, std::stri
         return false;
     }
 
+    // Qdrant 非 2xx 统一视为失败。
     if (http_status < 200 || http_status >= 300)
     {
         std::ostringstream ss;
@@ -148,6 +177,9 @@ bool QdrantVectorStore::Upsert(const std::vector<VectorPoint>& points, std::stri
     return true;
 }
 
+/**
+ * @brief 执行按用户 SID 过滤的向量检索。
+ */
 bool QdrantVectorStore::Search(const std::string& sid,
                                const std::vector<float>& query,
                                size_t top_k,
@@ -156,11 +188,13 @@ bool QdrantVectorStore::Search(const std::string& sid,
                                std::string& error)
 {
     out.clear();
+    // 空输入直接返回空结果，避免无意义请求。
     if (sid.empty() || query.empty() || top_k == 0)
     {
         return true;
     }
 
+    // 组装检索请求：向量 + top_k + payload + sid 过滤 + 分数阈值。
     nlohmann::json body;
     body["vector"] = query;
     body["limit"] = top_k;
@@ -177,6 +211,7 @@ bool QdrantVectorStore::Search(const std::string& sid,
         body["score_threshold"] = score_threshold;
     }
 
+    // 发送检索请求（POST）。
     HttpRequestOptions req;
     req.method = "POST";
     req.url = BuildSearchUrl();
@@ -191,6 +226,7 @@ bool QdrantVectorStore::Search(const std::string& sid,
         return false;
     }
 
+    // 集合不存在时按空结果处理，避免阻断主流程。
     if (http_status == 404)
     {
         return true;
@@ -208,6 +244,7 @@ bool QdrantVectorStore::Search(const std::string& sid,
         return false;
     }
 
+    // 解析 JSON 响应。
     nlohmann::json parsed = nlohmann::json::parse(response_body, nullptr, false);
     if (parsed.is_discarded())
     {
@@ -220,6 +257,7 @@ bool QdrantVectorStore::Search(const std::string& sid,
         return true;
     }
 
+    // 抽取命中列表。
     const nlohmann::json& result = parsed["result"];
     for (size_t i = 0; i < result.size(); ++i)
     {
@@ -240,11 +278,13 @@ bool QdrantVectorStore::Search(const std::string& sid,
             hit.score = item["score"].get<double>();
         }
 
+        // 额外兜底：即使后端已按阈值过滤，这里再防一层。
         if (score_threshold > 0 && hit.score < score_threshold)
         {
             continue;
         }
 
+        // 解析 payload 里的业务字段。
         if (item.contains("payload") && item["payload"].is_object())
         {
             const nlohmann::json& payload = item["payload"];
@@ -270,6 +310,7 @@ bool QdrantVectorStore::Search(const std::string& sid,
             }
         }
 
+        // content 为空的点不参与召回注入。
         if (hit.payload.content.empty())
         {
             continue;

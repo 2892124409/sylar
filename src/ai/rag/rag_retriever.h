@@ -14,18 +14,36 @@ namespace rag
 {
 
 /**
- * @brief Semantic retriever for user long-term memory.
+ * @brief 用户长期记忆语义检索器。
+ *
+ * @details
+ * 负责把用户 query 串成完整检索链路：
+ * 1) query -> embedding
+ * 2) embedding -> vector search（按 sid 过滤）
+ * 3) 返回命中片段给上层进行 prompt 注入
  */
 class RagRetriever
 {
   public:
     typedef std::shared_ptr<RagRetriever> ptr;
 
+    /**
+     * @brief 构造检索器。
+     */
     RagRetriever(const EmbeddingClient::ptr& embedding_client,
                  const VectorStore::ptr& vector_store);
 
     /**
-     * @brief Retrieve top-k semantic memory snippets for one user.
+     * @brief 检索指定用户的语义记忆片段。
+     *
+     * @param sid 用户主体 SID。
+     * @param query 当前问题文本。
+     * @param top_k 召回条数上限。
+     * @param score_threshold 分数阈值（<=0 表示不启用阈值）。
+     * @param[out] out 检索命中结果。
+     * @param[out] error 错误信息。
+     * @return true 成功（包含“无命中”的成功）；
+     * @return false 失败（依赖未初始化/embedding失败/vector search失败）。
      */
     bool Retrieve(const std::string& sid,
                   const std::string& query,

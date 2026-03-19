@@ -9,16 +9,26 @@
 #include "ai/common/ai_utils.h"
 #include "log/logger.h"
 
+/**
+ * @file chat_service.cc
+ * @brief ChatService 业务编排实现：上下文管理、LLM 调用、持久化与 RAG 接入。
+ */
+
 namespace ai
 {
 namespace service
 {
 
+/** @brief ChatService 运行日志器。 */
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
 namespace
 {
 
+/**
+ * @brief 仅对 ASCII 字符做小写化转换。
+ * @details 用于英文关键词匹配与轻量归一化。
+ */
 std::string ToLowerAscii(const std::string& input)
 {
     std::string output = input;
@@ -30,6 +40,9 @@ std::string ToLowerAscii(const std::string& input)
     return output;
 }
 
+/**
+ * @brief 判断文本是否包含任意关键词。
+ */
 bool ContainsAny(const std::string& text, const std::vector<std::string>& keywords)
 {
     for (size_t i = 0; i < keywords.size(); ++i)
@@ -44,6 +57,9 @@ bool ContainsAny(const std::string& text, const std::vector<std::string>& keywor
 
 } // namespace
 
+/**
+ * @brief 构造 ChatService，注入依赖与策略配置。
+ */
 ChatService::ChatService(const config::ChatSettings& settings,
                          const llm::LlmClient::ptr& llm_client,
                          const ChatStore::ptr& store,
@@ -61,11 +77,18 @@ ChatService::ChatService(const config::ChatSettings& settings,
 {
 }
 
+/**
+ * @brief 同步对话主流程。
+ * @details
+ * 主要步骤：校验 -> 上下文加载 -> 构建 prompt（含 RAG）-> LLM 调用 ->
+ *          持久化 + RAG 索引入队 -> 上下文更新 -> 摘要刷新。
+ */
 bool ChatService::Complete(const common::ChatCompletionRequest& request,
                            common::ChatCompletionResponse& response,
                            std::string& error,
                            http::HttpStatus& status)
 {
+    // Step 1: 基础参数校验。
     if (request.sid.empty() && m_settings.require_sid)
     {
         status = http::HttpStatus::BAD_REQUEST;
@@ -87,6 +110,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
         return false;
     }
 
+    // Step 2: 生成/复用会话 ID，并确保上下文已加载。
     std::string conversation_id = request.conversation_id.empty() ? common::GenerateConversationId() : request.conversation_id;
 
     if (!EnsureContextLoaded(request.sid, conversation_id, error, status))
@@ -96,6 +120,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
 
     ConversationContext context = SnapshotContext(request.sid, conversation_id);
 
+    // Step 3: 组装用户消息与 LLM 请求基础参数。
     common::ChatMessage user_message;
     user_message.role = "user";
     user_message.content = request.message;
@@ -114,11 +139,13 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
         llm_request.messages.push_back(system_message);
     }
 
+    // Step 4: 构建 RAG 召回记忆并做预算裁剪。
     std::vector<common::ChatMessage> rag_memory_messages = BuildRagMemoryMessages(request.sid, user_message);
     std::vector<common::ChatMessage> budgeted_context = BuildBudgetedContextMessages(context, rag_memory_messages, user_message);
     llm_request.messages.insert(llm_request.messages.end(), budgeted_context.begin(), budgeted_context.end());
     llm_request.messages.push_back(user_message);
 
+    // Step 5: 调用 LLM 完成补全。
     llm::LlmCompletionResult llm_response;
     if (!m_llm_client->Complete(llm_request, llm_response, error))
     {
@@ -126,6 +153,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
         return false;
     }
 
+    // Step 6: 组装 assistant 消息与持久化对象。
     common::ChatMessage assistant_message;
     assistant_message.role = "assistant";
     assistant_message.content = llm_response.content;
@@ -145,12 +173,14 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
     assistant_persist.content = assistant_message.content;
     assistant_persist.created_at_ms = assistant_message.created_at_ms;
 
+    // Step 7: 写入持久化通道（并触发 RAG 索引入队）。
     if (!PersistMessage(user_persist, error) || !PersistMessage(assistant_persist, error))
     {
         status = http::HttpStatus::SERVICE_UNAVAILABLE;
         return false;
     }
 
+    // Step 8: 更新内存上下文并尝试刷新摘要。
     AppendContextMessages(request.sid, conversation_id, user_message, assistant_message);
 
     std::string summary_error;
@@ -161,6 +191,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
                                 << " error=" << summary_error;
     }
 
+    // Step 9: 回填响应对象。
     response.conversation_id = conversation_id;
     response.reply = assistant_message.content;
     response.model = llm_response.model;
@@ -171,12 +202,21 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
     return true;
 }
 
+/**
+ * @brief 流式对话主流程（SSE）。
+ * @details
+ * 与 Complete 的差异：
+ * - LLM 调用采用流式回调；
+ * - 通过 emit 输出 start/delta/error/done 事件；
+ * - 完成后同样执行持久化、上下文更新与摘要刷新。
+ */
 bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
                                  const StreamEventEmitter& emit,
                                  common::ChatCompletionResponse& response,
                                  std::string& error,
                                  http::HttpStatus& status)
 {
+    // Step 1: 参数校验与依赖校验。
     if (request.sid.empty() && m_settings.require_sid)
     {
         status = http::HttpStatus::BAD_REQUEST;
@@ -198,6 +238,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         return false;
     }
 
+    // Step 2: 上下文准备（会话 ID、缓存预热、快照）。
     std::string conversation_id = request.conversation_id.empty() ? common::GenerateConversationId() : request.conversation_id;
 
     if (!EnsureContextLoaded(request.sid, conversation_id, error, status))
@@ -207,6 +248,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
 
     ConversationContext context = SnapshotContext(request.sid, conversation_id);
 
+    // Step 3: 构建请求消息（system + budgeted_context + user）。
     common::ChatMessage user_message;
     user_message.role = "user";
     user_message.content = request.message;
@@ -225,11 +267,13 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         llm_request.messages.push_back(system_message);
     }
 
+    // 注入 RAG 召回消息，并与 recent/summary 一起参与预算裁剪。
     std::vector<common::ChatMessage> rag_memory_messages = BuildRagMemoryMessages(request.sid, user_message);
     std::vector<common::ChatMessage> budgeted_context = BuildBudgetedContextMessages(context, rag_memory_messages, user_message);
     llm_request.messages.insert(llm_request.messages.end(), budgeted_context.begin(), budgeted_context.end());
     llm_request.messages.push_back(user_message);
 
+    // Step 4: 发送 start 事件，通知客户端流式开始。
     nlohmann::json start;
     start["conversation_id"] = conversation_id;
     start["created_at_ms"] = user_message.created_at_ms;
@@ -241,6 +285,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         return false;
     }
 
+    // Step 5: 流式拉取 delta，并实时透传 SSE chunk。
     std::string assembled;
     llm::LlmCompletionResult llm_response;
     bool ok = m_llm_client->StreamComplete(
@@ -254,6 +299,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         },
         llm_response, error);
 
+    // Step 6: 流式失败，发送 error 事件并返回。
     if (!ok)
     {
         nlohmann::json event_error;
@@ -263,6 +309,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         return false;
     }
 
+    // 部分 provider 会回填完整 content，优先采用完整值。
     if (!llm_response.content.empty())
     {
         assembled = llm_response.content;
@@ -273,6 +320,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     assistant_message.content = assembled;
     assistant_message.created_at_ms = common::NowMs();
 
+    // Step 7: 落持久化（user+assistant），失败则发 error 事件。
     common::PersistMessage user_persist;
     user_persist.sid = request.sid;
     user_persist.conversation_id = conversation_id;
@@ -296,6 +344,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         return false;
     }
 
+    // Step 8: 更新上下文并尝试刷新摘要（失败不阻断）。
     AppendContextMessages(request.sid, conversation_id, user_message, assistant_message);
 
     std::string summary_error;
@@ -306,6 +355,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
                                 << " error=" << summary_error;
     }
 
+    // Step 9: 发送 done 事件（包含 usage/finish_reason）。
     nlohmann::json done;
     done["conversation_id"] = conversation_id;
     done["model"] = llm_response.model;
@@ -320,6 +370,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         BASE_LOG_WARN(g_logger) << "stream done event send failed";
     }
 
+    // Step 10: 回填响应对象，便于上层统一处理。
     response.conversation_id = conversation_id;
     response.reply = assistant_message.content;
     response.model = llm_response.model;
@@ -330,6 +381,11 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     return true;
 }
 
+/**
+ * @brief 获取会话历史。
+ * @details
+ * 读取顺序：先内存上下文快照，未命中再回源存储层。
+ */
 bool ChatService::GetHistory(const std::string& sid,
                              const std::string& conversation_id,
                              size_t limit,
@@ -337,6 +393,7 @@ bool ChatService::GetHistory(const std::string& sid,
                              std::string& error,
                              http::HttpStatus& status)
 {
+    // Step 1: 参数与依赖校验。
     if (sid.empty() && m_settings.require_sid)
     {
         status = http::HttpStatus::BAD_REQUEST;
@@ -358,6 +415,7 @@ bool ChatService::GetHistory(const std::string& sid,
         return false;
     }
 
+    // Step 2: 优先使用内存上下文（低延迟）。
     ConversationContext context = SnapshotContext(sid, conversation_id);
     if (!context.messages.empty())
     {
@@ -373,6 +431,7 @@ bool ChatService::GetHistory(const std::string& sid,
         return true;
     }
 
+    // Step 3: 内存未命中时回源 DB。
     if (!m_store->LoadHistory(sid, conversation_id, limit, messages, error))
     {
         status = http::HttpStatus::INTERNAL_SERVER_ERROR;
@@ -383,12 +442,21 @@ bool ChatService::GetHistory(const std::string& sid,
     return true;
 }
 
+/**
+ * @brief 生成上下文缓存键：`sid#conversation_id`。
+ */
 std::string ChatService::BuildContextKey(const std::string& sid,
                                          const std::string& conversation_id) const
 {
     return sid + "#" + conversation_id;
 }
 
+/**
+ * @brief 确保会话上下文已加载到内存缓存。
+ * @details
+ * - 命中缓存：直接返回；
+ * - 未命中：加载 recent 消息与摘要并写入缓存。
+ */
 bool ChatService::EnsureContextLoaded(const std::string& sid,
                                       const std::string& conversation_id,
                                       std::string& error,
@@ -397,12 +465,14 @@ bool ChatService::EnsureContextLoaded(const std::string& sid,
     const std::string key = BuildContextKey(sid, conversation_id);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        // 缓存命中直接返回。
         if (m_contexts.find(key) != m_contexts.end())
         {
             return true;
         }
     }
 
+    // 缓存未命中：回源加载 recent 消息。
     std::vector<common::ChatMessage> loaded_messages;
     if (!m_store->LoadRecentMessages(sid, conversation_id,
                                      m_settings.history_load_limit,
@@ -412,6 +482,7 @@ bool ChatService::EnsureContextLoaded(const std::string& sid,
         return false;
     }
 
+    // 加载会话摘要（若有）。
     std::string summary;
     uint64_t summary_updated_at_ms = 0;
     if (!m_store->LoadConversationSummary(sid, conversation_id, summary, summary_updated_at_ms, error))
@@ -420,6 +491,7 @@ bool ChatService::EnsureContextLoaded(const std::string& sid,
         return false;
     }
 
+    // 写入上下文缓存。
     ConversationContext context;
     context.messages.swap(loaded_messages);
     context.summary = summary;
@@ -431,8 +503,12 @@ bool ChatService::EnsureContextLoaded(const std::string& sid,
     return true;
 }
 
-ChatService::ConversationContext ChatService::SnapshotContext(const std::string& sid,
-                                                              const std::string& conversation_id)
+/**
+ * @brief 获取会话上下文快照，并刷新最近触达时间。
+ */
+ChatService::ConversationContext ChatService::SnapshotContext(
+    const std::string& sid,
+    const std::string& conversation_id)
 {
     const std::string key = BuildContextKey(sid, conversation_id);
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -447,10 +523,14 @@ ChatService::ConversationContext ChatService::SnapshotContext(const std::string&
     return it->second;
 }
 
-void ChatService::AppendContextMessages(const std::string& sid,
-                                        const std::string& conversation_id,
-                                        const common::ChatMessage& user_message,
-                                        const common::ChatMessage& assistant_message)
+/**
+ * @brief 追加 user/assistant 到内存上下文并按窗口裁剪。
+ */
+void ChatService::AppendContextMessages(
+    const std::string& sid,
+    const std::string& conversation_id,
+    const common::ChatMessage& user_message,
+    const common::ChatMessage& assistant_message)
 {
     const std::string key = BuildContextKey(sid, conversation_id);
 
@@ -460,6 +540,7 @@ void ChatService::AppendContextMessages(const std::string& sid,
     context.messages.push_back(assistant_message);
     context.touched_at_ms = common::NowMs();
 
+    // 超过上限时移除最旧消息，控制内存占用。
     if (context.messages.size() > m_settings.max_context_messages)
     {
         size_t remove_count = context.messages.size() - m_settings.max_context_messages;
@@ -467,11 +548,18 @@ void ChatService::AppendContextMessages(const std::string& sid,
     }
 }
 
+/**
+ * @brief 按 token 预算构建最终上下文消息列表。
+ * @details
+ * 优先保留 summary，再从近到远选择 recent + recall，
+ * 并为当前 user 消息预留预算。
+ */
 std::vector<common::ChatMessage> ChatService::BuildBudgetedContextMessages(
     const ConversationContext& context,
     const std::vector<common::ChatMessage>& extra_messages,
     const common::ChatMessage& pending_user_message) const
 {
+    // Step 1: 把摘要封装为 system 消息（若存在）。
     common::ChatMessage summary_message;
     bool has_summary = false;
     if (!context.summary.empty())
@@ -482,10 +570,12 @@ std::vector<common::ChatMessage> ChatService::BuildBudgetedContextMessages(
         has_summary = true;
     }
 
+    // Step 2: 合并候选上下文源（recent + recall）。
     std::vector<common::ChatMessage> source;
     source.insert(source.end(), context.messages.begin(), context.messages.end());
     source.insert(source.end(), extra_messages.begin(), extra_messages.end());
 
+    // Step 3: 未启用预算限制时直接返回全部候选（可选附带 summary）。
     if (m_settings.max_context_tokens == 0)
     {
         if (has_summary)
@@ -495,12 +585,14 @@ std::vector<common::ChatMessage> ChatService::BuildBudgetedContextMessages(
         return source;
     }
 
+    // Step 4: 预留 pending user message 的 token 预算。
     const size_t reserve_user_tokens = EstimateMessageTokens(pending_user_message) + 16;
     if (reserve_user_tokens >= m_settings.max_context_tokens)
     {
         return std::vector<common::ChatMessage>();
     }
 
+    // Step 5: 在剩余预算内挑选消息。
     const size_t budget = m_settings.max_context_tokens - reserve_user_tokens;
     size_t used = 0;
     std::vector<common::ChatMessage> picked;
@@ -516,6 +608,7 @@ std::vector<common::ChatMessage> ChatService::BuildBudgetedContextMessages(
         }
     }
 
+    // Step 6: 从尾到头选择（优先最近消息）。
     std::vector<common::ChatMessage> picked_tail;
     for (std::vector<common::ChatMessage>::reverse_iterator it = source.rbegin();
          it != source.rend(); ++it)
@@ -530,14 +623,22 @@ std::vector<common::ChatMessage> ChatService::BuildBudgetedContextMessages(
         picked_tail.push_back(*it);
     }
 
+    // Step 7: 反转回正序，拼接最终结果。
     std::reverse(picked_tail.begin(), picked_tail.end());
     picked.insert(picked.end(), picked_tail.begin(), picked_tail.end());
     return picked;
 }
 
+/**
+ * @brief 执行 RAG 召回并组装为一条 system 记忆消息。
+ * @details
+ * 若未触发 recall、召回失败或无命中，返回空数组；
+ * 命中后将片段聚合为可直接注入 prompt 的 memory 内容。
+ */
 std::vector<common::ChatMessage> ChatService::BuildRagMemoryMessages(const std::string& sid,
                                                                      const common::ChatMessage& pending_user_message)
 {
+    // Step 1: RAG 开关、依赖和输入校验。
     if (!m_rag_settings.enabled || !m_rag_retriever)
     {
         return std::vector<common::ChatMessage>();
@@ -546,11 +647,14 @@ std::vector<common::ChatMessage> ChatService::BuildRagMemoryMessages(const std::
     {
         return std::vector<common::ChatMessage>();
     }
+
+    // Step 2: 先判定本轮是否需要触发 recall。
     if (!ShouldTriggerRagRecall(pending_user_message))
     {
         return std::vector<common::ChatMessage>();
     }
 
+    // Step 3: 执行检索（query -> embedding -> vector search）。
     std::vector<rag::SearchHit> hits;
     std::string error;
     if (!m_rag_retriever->Retrieve(sid, pending_user_message.content,
@@ -563,11 +667,13 @@ std::vector<common::ChatMessage> ChatService::BuildRagMemoryMessages(const std::
         return std::vector<common::ChatMessage>();
     }
 
+    // Step 4: 无命中直接返回空。
     if (hits.empty())
     {
         return std::vector<common::ChatMessage>();
     }
 
+    // Step 5: 把命中结果拼成系统记忆片段。
     std::ostringstream content;
     content << "Long-term memory snippets for current user (use only when relevant):\n";
 
@@ -581,6 +687,7 @@ std::vector<common::ChatMessage> ChatService::BuildRagMemoryMessages(const std::
             snippet.append("...");
         }
 
+        // 附带 score/conv/role/ts，提升模型使用这些记忆时的可解释性。
         content << "[" << (i + 1) << "] "
                 << "score=" << std::fixed << std::setprecision(4) << hits[i].score
                 << ", conv=" << hits[i].payload.conversation_id
@@ -590,6 +697,7 @@ std::vector<common::ChatMessage> ChatService::BuildRagMemoryMessages(const std::
                 << snippet << "\n";
     }
 
+    // Step 6: 作为 system 消息返回给预算裁剪器。
     common::ChatMessage memory_message;
     memory_message.role = "system";
     memory_message.content = content.str();
@@ -598,6 +706,13 @@ std::vector<common::ChatMessage> ChatService::BuildRagMemoryMessages(const std::
     return std::vector<common::ChatMessage>(1, memory_message);
 }
 
+/**
+ * @brief 判断当前消息是否触发 RAG recall。
+ * @details
+ * 支持：
+ * - always：每轮都召回；
+ * - intent：命中“历史/记忆”意图关键词才召回。
+ */
 bool ChatService::ShouldTriggerRagRecall(const common::ChatMessage& pending_user_message) const
 {
     if (!m_rag_settings.enabled)
@@ -629,17 +744,22 @@ bool ChatService::ShouldTriggerRagRecall(const common::ChatMessage& pending_user
     return ContainsAny(query_lower, kEnIntentKeywords);
 }
 
+/**
+ * @brief 在上下文超过阈值时刷新摘要并回写存储。
+ */
 bool ChatService::MaybeRefreshSummary(const std::string& sid,
                                       const std::string& conversation_id,
                                       const std::string& model,
                                       std::string& error)
 {
+    // Step 1: 读取快照并判定是否超过“触发摘要”门槛。
     ConversationContext snapshot = SnapshotContext(sid, conversation_id);
     if (snapshot.messages.size() <= m_settings.recent_window_messages)
     {
         return true;
     }
 
+    // Step 2: 估算当前上下文 token 总量。
     size_t total_tokens = 0;
     if (!snapshot.summary.empty())
     {
@@ -653,11 +773,13 @@ bool ChatService::MaybeRefreshSummary(const std::string& sid,
         total_tokens += EstimateMessageTokens(snapshot.messages[i]);
     }
 
+    // 未超过阈值：无需更新摘要。
     if (total_tokens <= m_settings.summary_trigger_tokens)
     {
         return true;
     }
 
+    // Step 3: 切分“待摘要旧消息”和“保留 recent 消息”。
     const size_t keep_recent = std::min(m_settings.recent_window_messages, snapshot.messages.size());
     const size_t summarize_count = snapshot.messages.size() - keep_recent;
     if (summarize_count == 0)
@@ -665,6 +787,7 @@ bool ChatService::MaybeRefreshSummary(const std::string& sid,
         return true;
     }
 
+    // Step 4: 构造摘要输入（旧摘要 + 待摘要旧消息）。
     std::ostringstream summary_input;
     summary_input << "现有摘要:\n";
     if (snapshot.summary.empty())
@@ -685,6 +808,7 @@ bool ChatService::MaybeRefreshSummary(const std::string& sid,
 
     summary_input << "\n输出要求：保留关键信息、事实、用户偏好、约束条件和未完成任务。";
 
+    // Step 5: 调用 LLM 生成新摘要。
     llm::LlmCompletionRequest req;
     req.model = model;
     req.temperature = 0.2;
@@ -708,11 +832,13 @@ bool ChatService::MaybeRefreshSummary(const std::string& sid,
         return false;
     }
 
+    // 空结果不更新摘要。
     if (result.content.empty())
     {
         return true;
     }
 
+    // Step 6: 更新内存上下文（刷新 summary 并裁剪 old messages）。
     const uint64_t updated_at_ms = common::NowMs();
 
     {
@@ -733,6 +859,7 @@ bool ChatService::MaybeRefreshSummary(const std::string& sid,
         }
     }
 
+    // Step 7: 回写摘要到存储层，保证冷启动可恢复。
     if (!m_store->SaveConversationSummary(sid, conversation_id, result.content, updated_at_ms, error))
     {
         return false;
@@ -741,6 +868,12 @@ bool ChatService::MaybeRefreshSummary(const std::string& sid,
     return true;
 }
 
+/**
+ * @brief 轻量 token 估算（启发式）。
+ * @details
+ * 估算规则：`(role+content 字节数 / 4) + 固定开销`。
+ * 用于预算裁剪，不追求 tokenizer 级精确。
+ */
 size_t ChatService::EstimateMessageTokens(const common::ChatMessage& message) const
 {
     const size_t bytes = message.role.size() + message.content.size();
@@ -753,15 +886,23 @@ size_t ChatService::EstimateMessageTokens(const common::ChatMessage& message) co
     return payload_tokens + 4;
 }
 
+/**
+ * @brief 持久化消息，并尝试触发 RAG 索引。
+ * @details
+ * - m_sink 写入失败：返回 false（主流程失败）；
+ * - rag_indexer 入队失败：仅 WARN（fail-open，不阻断主流程）。
+ */
 bool ChatService::PersistMessage(const common::PersistMessage& message,
                                  std::string& error)
 {
+    // Step 1: 进入异步持久化写通道。
     if (!m_sink->Enqueue(message, error))
     {
         BASE_LOG_ERROR(g_logger) << "enqueue persist message failed: " << error;
         return false;
     }
 
+    // Step 2: 若启用 RAG，额外入队索引任务（增强链路）。
     if (m_rag_settings.enabled && m_rag_indexer)
     {
         std::string index_error;
