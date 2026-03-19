@@ -4,6 +4,8 @@
 #include "ai/common/ai_types.h"
 #include "ai/config/ai_app_config.h"
 #include "ai/llm/llm_client.h"
+#include "ai/rag/rag_indexer.h"
+#include "ai/rag/rag_retriever.h"
 #include "ai/service/chat_interfaces.h"
 #include "http/core/http.h"
 
@@ -38,8 +40,7 @@ class ChatService
   public:
     typedef std::shared_ptr<ChatService> ptr;
     /** @brief 流式事件发送器，参数分别为 `event` 与 `data`。 */
-    typedef std::function<bool(const std::string& event, const std::string& data)>
-        StreamEventEmitter;
+    typedef std::function<bool(const std::string& event, const std::string& data)> StreamEventEmitter;
 
     /**
      * @brief 构造 ChatService。
@@ -49,8 +50,12 @@ class ChatService
      * @param sink 持久化写接口（MessageSink）。
      */
     ChatService(const config::ChatSettings& settings,
-                const llm::LlmClient::ptr& llm_client,
-                const ChatStore::ptr& store, const MessageSink::ptr& sink);
+        const llm::LlmClient::ptr& llm_client,
+        const ChatStore::ptr& store,
+        const MessageSink::ptr& sink,
+        const config::RagSettings& rag_settings = config::RagSettings(),
+        const rag::RagRetriever::ptr& rag_retriever = rag::RagRetriever::ptr(),
+        const rag::RagIndexer::ptr& rag_indexer = rag::RagIndexer::ptr());
 
     /**
      * @brief 同步对话调用。
@@ -61,8 +66,9 @@ class ChatService
      * @return true 成功；false 失败。
      */
     bool Complete(const common::ChatCompletionRequest& request,
-                  common::ChatCompletionResponse& response, std::string& error,
-                  http::HttpStatus& status);
+        common::ChatCompletionResponse& response,
+        std::string& error,
+        http::HttpStatus& status);
 
     /**
      * @brief 流式对话调用（SSE 事件驱动）。
@@ -74,9 +80,10 @@ class ChatService
      * @return true 成功；false 失败。
      */
     bool StreamComplete(const common::ChatCompletionRequest& request,
-                        const StreamEventEmitter& emit,
-                        common::ChatCompletionResponse& response,
-                        std::string& error, http::HttpStatus& status);
+        const StreamEventEmitter& emit,
+        common::ChatCompletionResponse& response,
+        std::string& error,
+        http::HttpStatus& status);
 
     /**
      * @brief 查询会话历史消息。
@@ -88,9 +95,12 @@ class ChatService
      * @param[out] status 建议返回的 HTTP 状态码。
      * @return true 成功；false 失败。
      */
-    bool GetHistory(const std::string& sid, const std::string& conversation_id,
-                    size_t limit, std::vector<common::ChatMessage>& messages,
-                    std::string& error, http::HttpStatus& status);
+    bool GetHistory(const std::string& sid,
+        const std::string& conversation_id,
+        size_t limit,
+        std::vector<common::ChatMessage>& messages,
+        std::string& error,
+        http::HttpStatus& status);
 
   private:
     /**
@@ -113,16 +123,14 @@ class ChatService
      * @brief 构建上下文缓存 key。
      * @return 形如 `sid#conversation_id` 的字符串。
      */
-    std::string BuildContextKey(const std::string& sid,
-                                const std::string& conversation_id) const;
+    std::string BuildContextKey(const std::string& sid, const std::string& conversation_id) const;
 
     /**
      * @brief 确保会话上下文已加载到内存缓存。
      * @details 若缓存未命中，则从存储读取 recent messages 并写入缓存。
      */
-    bool EnsureContextLoaded(const std::string& sid,
-                             const std::string& conversation_id,
-                             std::string& error, http::HttpStatus& status);
+    bool EnsureContextLoaded(
+        const std::string& sid, const std::string& conversation_id, std::string& error, http::HttpStatus& status);
 
     /**
      * @brief 获取上下文快照。
@@ -134,23 +142,33 @@ class ChatService
      * @brief 追加 user/assistant 消息到上下文缓存并执行窗口裁剪。
      */
     void AppendContextMessages(const std::string& sid,
-                               const std::string& conversation_id,
-                               const common::ChatMessage& user_message,
-                               const common::ChatMessage& assistant_message);
+        const std::string& conversation_id,
+        const common::ChatMessage& user_message,
+        const common::ChatMessage& assistant_message);
 
     /**
      * @brief 依据 token 预算构建最终发送给模型的上下文消息。
      */
     std::vector<common::ChatMessage> BuildBudgetedContextMessages(const ConversationContext& context,
-                                                                  const common::ChatMessage& pending_user_message) const;
+        const std::vector<common::ChatMessage>& extra_messages,
+        const common::ChatMessage& pending_user_message) const;
+
+    /**
+     * @brief 基于用户长时记忆执行语义召回，并生成可注入模型的 memory 消息。
+     */
+    std::vector<common::ChatMessage> BuildRagMemoryMessages(
+        const std::string& sid, const common::ChatMessage& pending_user_message);
+
+    /**
+     * @brief 判断当前问题是否需要触发语义召回。
+     */
+    bool ShouldTriggerRagRecall(const common::ChatMessage& pending_user_message) const;
 
     /**
      * @brief 在上下文超阈值时生成/更新摘要记忆。
      */
-    bool MaybeRefreshSummary(const std::string& sid,
-                             const std::string& conversation_id,
-                             const std::string& model,
-                             std::string& error);
+    bool MaybeRefreshSummary(
+        const std::string& sid, const std::string& conversation_id, const std::string& model, std::string& error);
 
     /**
      * @brief 启发式估算一条消息的 token 数量。
@@ -160,8 +178,7 @@ class ChatService
     /**
      * @brief 将单条消息提交到异步持久化通道。
      */
-    bool PersistMessage(const common::PersistMessage& message,
-                        std::string& error);
+    bool PersistMessage(const common::PersistMessage& message, std::string& error);
 
   private:
     /** @brief 业务配置快照。 */
@@ -172,6 +189,12 @@ class ChatService
     ChatStore::ptr m_store;
     /** @brief 异步写入接口。 */
     MessageSink::ptr m_sink;
+    /** @brief RAG 策略配置。 */
+    config::RagSettings m_rag_settings;
+    /** @brief RAG 语义召回器。 */
+    rag::RagRetriever::ptr m_rag_retriever;
+    /** @brief RAG 异步索引器。 */
+    rag::RagIndexer::ptr m_rag_indexer;
 
     /** @brief 上下文缓存互斥锁。 */
     std::mutex m_mutex;

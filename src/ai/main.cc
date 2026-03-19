@@ -4,6 +4,10 @@
 #include "ai/middleware/request_id_middleware.h"
 #include "ai/llm/anthropic_client.h"
 #include "ai/llm/openai_compatible_client.h"
+#include "ai/rag/embedding_client.h"
+#include "ai/rag/rag_indexer.h"
+#include "ai/rag/rag_retriever.h"
+#include "ai/rag/vector_store.h"
 #include "ai/service/auth_service.h"
 #include "ai/service/chat_service.h"
 #include "ai/storage/async_mysql_writer.h"
@@ -167,6 +171,10 @@ int main(int argc, char** argv)
     const ai::config::AuthSettings auth_settings = ai::config::AiAppConfig::GetAuthSettings();
     const ai::config::MysqlSettings mysql_settings = ai::config::AiAppConfig::GetMysqlSettings();
     const ai::config::PersistSettings persist_settings = ai::config::AiAppConfig::GetPersistSettings();
+    ai::config::RagSettings rag_settings = ai::config::AiAppConfig::GetRagSettings();
+    const ai::config::EmbeddingSettings embedding_settings = ai::config::AiAppConfig::GetEmbeddingSettings();
+    const ai::config::QdrantSettings qdrant_settings = ai::config::AiAppConfig::GetQdrantSettings();
+    const ai::config::RagIndexerSettings rag_indexer_settings = ai::config::AiAppConfig::GetRagIndexerSettings();
 
     /// @brief Step 3: 初始化 MySQL 连接池（读写共享）。
     ai::storage::MysqlConnectionPool::ptr mysql_pool(new ai::storage::MysqlConnectionPool());
@@ -231,9 +239,54 @@ int main(int argc, char** argv)
     /// @brief Step 8: 组装账号与对话业务服务。
     ai::service::AuthService::ptr auth_service(new ai::service::AuthService(auth_settings, auth_repository));
 
+    ai::rag::EmbeddingClient::ptr embedding_client;
+    ai::rag::VectorStore::ptr vector_store;
+    ai::rag::RagRetriever::ptr rag_retriever;
+    ai::rag::RagIndexer::ptr rag_indexer;
+
+    if (rag_settings.enabled)
+    {
+        ai::rag::EmbeddingSettings rag_embedding_settings;
+        rag_embedding_settings.base_url = embedding_settings.base_url;
+        rag_embedding_settings.model = embedding_settings.model;
+        rag_embedding_settings.connect_timeout_ms = embedding_settings.connect_timeout_ms;
+        rag_embedding_settings.request_timeout_ms = embedding_settings.request_timeout_ms;
+        embedding_client.reset(new ai::rag::OllamaEmbeddingClient(rag_embedding_settings));
+
+        ai::rag::VectorStoreSettings rag_vector_store_settings;
+        rag_vector_store_settings.base_url = qdrant_settings.base_url;
+        rag_vector_store_settings.collection = qdrant_settings.collection;
+        rag_vector_store_settings.request_timeout_ms = qdrant_settings.request_timeout_ms;
+        vector_store.reset(new ai::rag::QdrantVectorStore(rag_vector_store_settings));
+
+        rag_retriever.reset(new ai::rag::RagRetriever(embedding_client, vector_store));
+
+        ai::rag::RagIndexerSettings rag_idx_settings;
+        rag_idx_settings.queue_capacity = rag_indexer_settings.queue_capacity;
+        rag_idx_settings.batch_size = rag_indexer_settings.batch_size;
+        rag_idx_settings.flush_interval_ms = rag_indexer_settings.flush_interval_ms;
+        rag_idx_settings.assistant_index_mode = rag_indexer_settings.assistant_index_mode;
+        rag_idx_settings.assistant_min_chars = rag_indexer_settings.assistant_min_chars;
+        rag_idx_settings.dedup_ttl_ms = rag_indexer_settings.dedup_ttl_ms;
+        rag_idx_settings.dedup_max_entries = rag_indexer_settings.dedup_max_entries;
+        rag_indexer.reset(new ai::rag::RagIndexer(embedding_client, vector_store, rag_idx_settings));
+
+        std::vector<float> probe_embedding;
+        if (!embedding_client->Embed("rag_startup_probe", probe_embedding, error) ||
+            probe_embedding.empty() ||
+            !vector_store->EnsureCollection(probe_embedding.size(), error) ||
+            !rag_indexer->Start(error))
+        {
+            BASE_LOG_WARN(g_logger) << "init rag components failed, disable rag: " << error;
+            rag_settings.enabled = false;
+            rag_retriever.reset();
+            rag_indexer.reset();
+        }
+    }
+
     /// @brief 组装业务编排核心 ChatService。
     ai::service::ChatService::ptr chat_service(
-        new ai::service::ChatService(chat_settings, llm_client, chat_repository, async_writer));
+        new ai::service::ChatService(chat_settings, llm_client, chat_repository, async_writer, rag_settings, rag_retriever, rag_indexer));
 
     /// @brief Step 9: 按配置创建 HTTP worker（benchmark 同款模式）。
     /// @details
@@ -373,6 +426,10 @@ int main(int argc, char** argv)
     /// 1) 先停异步写线程，尽量把已入队消息刷盘完成；
     /// 2) 再关闭连接池，释放数据库连接资源。
     async_writer->Stop();
+    if (rag_indexer)
+    {
+        rag_indexer->Stop();
+    }
     mysql_pool->Shutdown();
     return 0;
 }

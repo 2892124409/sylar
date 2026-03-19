@@ -51,6 +51,32 @@ ai:
     queue_capacity: 10000
     flush_interval_ms: 200
     batch_size: 128
+  rag:
+    enabled: true
+    recall_trigger_mode: intent   # always | intent
+    recall_intent_min_chars: 6
+    top_k: 6
+    score_threshold: 0.45
+    max_snippet_chars: 400
+  embedding:
+    provider: ollama
+    base_url: http://127.0.0.1:11434
+    model: mxbai-embed-large
+    connect_timeout_ms: 3000
+    request_timeout_ms: 30000
+  vector_store:
+    qdrant:
+      base_url: http://127.0.0.1:6333
+      collection: chat_memory
+      request_timeout_ms: 5000
+  rag_indexer:
+    queue_capacity: 10000
+    batch_size: 32
+    flush_interval_ms: 200
+    assistant_index_mode: fact_like   # all | fact_like | none
+    assistant_min_chars: 24
+    dedup_ttl_ms: 600000              # 0 与 dedup_max_entries=0 一起可关闭去重
+    dedup_max_entries: 50000
 
 # Scheduler/IO defaults:
 # - iomanager.use_caller: true  -> single IOM mode in ai/main.cc (io=accept)

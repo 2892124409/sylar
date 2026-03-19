@@ -152,6 +152,11 @@ if(BUILD_AI_CHAT_SERVER)
         src/ai/llm/openai_compatible_client.cc
         src/ai/llm/anthropic_client.cc
         src/ai/llm/fiber_curl_session.cc
+        src/ai/rag/rag_http_client.cc
+        src/ai/rag/embedding_client.cc
+        src/ai/rag/vector_store.cc
+        src/ai/rag/rag_retriever.cc
+        src/ai/rag/rag_indexer.cc
         src/ai/service/auth_service.cc
         src/ai/service/chat_service.cc
         src/ai/storage/auth_repository.cc
@@ -276,4 +281,19 @@ if(BUILD_TESTING)
         target_compile_options(test_ai_chat_service PRIVATE -Wall)
     endif()
     add_test(NAME test_ai_chat_service COMMAND test_ai_chat_service)
+
+    add_executable(test_rag_indexer
+        tests/test_rag_indexer.cc
+        src/ai/rag/rag_indexer.cc
+    )
+    target_link_libraries(test_rag_indexer PRIVATE sylar)
+    set_target_properties(test_rag_indexer PROPERTIES
+        ENABLE_EXPORTS ON
+        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test_rag_indexer PRIVATE -Wall)
+    endif()
+    add_test(NAME test_rag_indexer COMMAND test_rag_indexer)
 endif()

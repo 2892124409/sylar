@@ -3,16 +3,16 @@
 ## 项目目标（持续更新）
 - 作为 AI 应用层的阶段化开发日志，持续记录从 V1 最小通路到后续生产化能力建设的全过程。
 - 每个阶段固定记录：目标、实现细节、关键设计取舍、踩坑与复盘。
-- 当前进度：第一阶段（最小通路）、第二阶段（Provider 切换 + 上下文摘要 + 并发能力增强）、第三阶段（用户体系与鉴权）已完成。
+- 当前进度：第一阶段（最小通路）、第二阶段（Provider 切换 + 上下文摘要 + 并发能力增强）、第三阶段（用户体系与鉴权）、第四阶段（记忆检索增强 RAG）已完成。
 
 ---
 
 ## 当前范围声明
 这份笔记是多阶段持续维护文档，不只记录第一阶段。
 
-- 已落地并已详细展开：第一阶段、第二阶段、第三阶段。
-- 已列出但未展开实现细节：第四阶段及之后。
-- 当前未实现能力：RAG 检索增强、写路径消息队列化、限流熔断、观测告警、发布治理等。
+- 已落地并已详细展开：第一阶段、第二阶段、第三阶段、第四阶段。
+- 已列出但未展开实现细节：第五阶段及之后。
+- 当前未实现能力：写路径消息队列化、限流熔断、观测告警、发布治理等。
 - 当前运行时支持通过 `ai.provider.type` 切换 `openai_compatible` / `anthropic`。
 
 ---
@@ -1349,7 +1349,7 @@ Client
 到这里，AI 应用层第三阶段主目标已经完成（最小闭环版本）。
 
 ### 6. 下一阶段
-第四阶段建议优先推进：
+第四阶段建议优先推进（现已完成落地，详见下文第四阶段章节）：
 
 1. 记忆检索增强（RAG/向量召回），以用户主体维度召回长期事实。
 2. 写路径消息队列化（MQ）工程化设计收敛与迁移准备（按规划在第五阶段落地）。
@@ -1358,8 +1358,392 @@ Client
 
 ---
 
+## 第四阶段：记忆检索增强（RAG/向量召回）
+
+### 1. 阶段目标
+第四阶段目标是把“只看当前会话短期上下文”的能力升级为“用户级长时记忆召回”：
+
+1. 在不破坏现有 chat API 协议的前提下，补齐语义检索记忆能力。
+2. 让同一登录用户在不同 `conversation_id` 下也能召回历史事实。
+3. 保持主请求链路稳定，索引写入采用异步增量，不阻塞对话响应。
+
+---
+
+### 2. 代码改动总览
+本阶段新增模块：`src/ai/rag/*`
+
+1. `rag_http_client.*`
+   - 统一封装 RAG 依赖服务（Ollama / Qdrant）的 HTTP 调用。
+   - 复用 `FiberCurlSession`，保证网络 IO 走协程化调度。
+
+2. `embedding_client.*`
+   - 新增 `EmbeddingClient` 抽象。
+   - 新增 `OllamaEmbeddingClient`（调用 `/api/embed`）。
+
+3. `vector_store.*`
+   - 新增 `VectorStore` 抽象。
+   - 新增 `QdrantVectorStore`（建集合、Upsert、按 `sid` 过滤检索）。
+
+4. `rag_retriever.*`
+   - 负责“问题 -> embedding -> 向量检索 -> 返回命中片段”。
+
+5. `rag_indexer.*`
+   - 负责异步索引流水线：`PersistMessage -> embedding -> qdrant upsert`。
+
+---
+
+### 2.1 RAG 工具栈与职责
+第四阶段这套 RAG 不是“单组件实现”，而是由多个工具协同完成。当前实际使用的工具如下：
+
+1. Embedding 工具：`Ollama`
+   - 作用：把文本（query / 历史消息）转换成向量。
+   - 在调用链中的位置：
+     - 检索时：`query -> embedding`
+     - 建索引时：`message -> embedding`
+   - 本项目接入点：
+     - `OllamaEmbeddingClient` 调用 `/api/embed`。
+   - 没有它时的影响：
+     - 无法把文本映射到向量空间，检索和索引都无法进行。
+
+2. 向量数据库：`Qdrant`
+   - 作用：存储向量点并执行近邻检索（ANN）。
+   - 在调用链中的位置：
+     - 写路径：`Upsert(points)`
+     - 读路径：`Search(query_vector, filter=sid, top_k, score_threshold)`
+   - 本项目接入点：
+     - `QdrantVectorStore` 封装建集合、Upsert、Search。
+   - 没有它时的影响：
+     - 只能做会话内记忆，无法做用户级跨会话语义召回。
+
+3. 网络调用工具：`libcurl + FiberCurlSession`
+   - 作用：承载 Ollama/Qdrant 的 HTTP 请求，并把网络 IO 挂到协程调度器上。
+   - 在调用链中的位置：
+     - `rag_http_client` 统一发 HTTP
+     - 通过 `FiberCurlSession` 避免工作线程被阻塞
+   - 设计价值：
+     - RAG 读写链路与主服务协程模型一致，提升并发场景下的吞吐稳定性。
+
+4. 检索编排工具：`RagRetriever`
+   - 作用：把“自然语言问题”串成完整检索流程。
+   - 流程：
+     - 先用 EmbeddingClient 计算 query 向量
+     - 再调用 VectorStore 按 `sid` 过滤检索
+     - 返回命中片段给 `ChatService` 注入上下文
+   - 角色定位：
+     - 读路径编排器（query-time）。
+
+5. 索引编排工具：`RagIndexer`
+   - 作用：把“持久化消息”异步转成向量索引点。
+   - 流程：
+     - `PersistMessage` 入队
+     - 后台批处理 embedding
+     - 批量 upsert 到 Qdrant
+   - 当前增强点：
+     - 支持 assistant 选择性入库（`all/fact_like/none`）
+     - 支持去重窗口（`dedup_ttl_ms + dedup_max_entries`）
+   - 角色定位：
+     - 写路径编排器（index-time）。
+
+6. 业务拼装工具：`ChatService`
+   - 作用：把 RAG 检索结果转成可注入 prompt 的 memory 消息。
+   - 在调用链中的位置：
+     - `BuildRagMemoryMessages()` 中执行召回并格式化片段
+     - 再与 `summary + recent` 一起进入预算裁剪
+   - 角色定位：
+     - 上下文最终装配器（prompt assembly）。
+
+#### 小结（工具协作关系）
+1. `Ollama` 解决“文本 -> 向量”。
+2. `Qdrant` 解决“向量存储 + 近邻检索”。
+3. `libcurl + FiberCurlSession` 解决“协程化网络 IO”。
+4. `RagRetriever` 负责读路径编排，`RagIndexer` 负责写路径编排。
+5. `ChatService` 负责把召回结果真正纳入模型上下文。
+
+---
+
+### 3. 当前上下文策略（重点）
+第四阶段后，发送给 LLM 的上下文策略从“摘要 + 最近窗口”升级为：
+
+`system_prompt + summary + recent + semantic_recall + 当前用户消息`
+
+其中每个部分的职责与实现细节如下：
+
+#### 3.0.1 `system_prompt`（全局行为约束层）
+1. 数据来源：
+   - 配置项 `ai.chat.system_prompt`。
+2. 触发条件：
+   - 非空才注入；为空则跳过。
+3. 注入位置：
+   - 固定放在请求最前面，优先级最高。
+4. 作用边界：
+   - 用于定义回复风格、边界、安全规则等“全局规则”。
+   - 不承担记忆功能，不参与摘要更新和向量检索。
+5. 预算关系：
+   - 作为请求消息的一部分，会占用模型上下文窗口（虽然当前预算函数主要对 `summary/recent/recall` 做裁剪）。
+
+#### 3.0.2 `summary`（会话长期压缩记忆层）
+1. 数据来源：
+   - 当前会话 `conversations.summary_text`（持久化层）+ 内存镜像。
+2. 触发更新时机：
+   - 当会话消息超过 `recent_window_messages`，且估算 token 超过 `summary_trigger_tokens` 时触发。
+3. 生成机制：
+   - 由 `MaybeRefreshSummary()` 额外发起一次 LLM 调用生成/更新摘要。
+   - 输入由“现有摘要 + 旧对话片段”构成，输出新摘要文本。
+4. 更新后处理：
+   - 内存中的 `context.summary` 与 `summary_updated_at_ms` 立即更新。
+   - 旧消息会被裁剪，仅保留最近 `recent_window_messages` 条原文。
+   - 新摘要写回数据库，后续冷启动可恢复。
+5. 核心价值：
+   - 以较小 token 成本保留“人物偏好、事实、约束、未完成任务”等高价值信息。
+6. 当前取舍：
+   - 摘要质量依赖模型；这是当前策略里唯一会额外消耗一次模型调用的环节。
+
+#### 3.0.3 `recent`（会话短期连续性层）
+1. 数据来源：
+   - 首选内存上下文 `m_contexts[sid#conversation_id].messages`。
+   - 若未命中或冷启动，`EnsureContextLoaded()` 从存储层加载 `history_load_limit` 条 recent 消息补齐。
+2. 更新方式：
+   - 每次对话成功后，`AppendContextMessages()` 追加 user/assistant 两条消息。
+3. 长度控制：
+   - 内存消息上限由 `max_context_messages` 控制，超过后从最旧端裁剪。
+4. 核心价值：
+   - 保证“刚刚说了什么”不丢失，是连贯多轮对话的主要来源。
+5. 与 `summary` 的分工：
+   - `recent` 保留原文细节，`summary` 保留跨窗口的长期高价值事实。
+
+#### 3.0.4 `semantic_recall`（用户级跨会话记忆层）
+1. 数据来源：
+   - `RagRetriever` 基于当前问题做 embedding，并在 Qdrant 里检索历史向量。
+   - 检索以 `sid` 为过滤条件，实现“同一用户跨会话召回”。
+2. 触发策略（当前实现）：
+   - `ai.rag.recall_trigger_mode = always`：每轮请求都尝试召回。
+   - `ai.rag.recall_trigger_mode = intent`：仅当用户问题命中“历史/记忆意图”时触发召回（默认）。
+   - `intent` 模式下，还要求问题长度达到 `ai.rag.recall_intent_min_chars`。
+3. 召回参数：
+   - `top_k`：最多召回条数。
+   - `score_threshold`：最低相似度阈值。
+   - `max_snippet_chars`：单条片段字符截断上限。
+4. 入模形态：
+   - 多条命中会被整理为一条 `system` memory 消息，包含 `score/conv/role/ts/snippet`。
+5. 降级行为：
+   - 检索失败或无命中时，直接返回空，不阻断主对话链路（fail-open）。
+6. 核心价值：
+   - 补足 `summary + recent` 的会话内局限，支持跨 `conversation_id` 的长期事实复用。
+
+#### 3.1 详细执行顺序（`ChatService`）
+以 `Complete/StreamComplete` 为例：
+
+1. 入口参数校验：
+   - 校验 `sid`（若配置要求）和 `message` 非空。
+   - 生成或沿用 `conversation_id`。
+2. 会话上下文预热：
+   - `EnsureContextLoaded(sid, conversation_id)`。
+   - 同步得到 `summary + recent` 的内存快照。
+3. 组装当前轮输入：
+   - 构造 `user_message`。
+   - 若配置了 `system_prompt`，先入请求队列。
+4. 条件触发跨会话检索：
+   - `BuildRagMemoryMessages(sid, user_message)` 先判断是否满足 recall 触发策略。
+   - 满足时执行 embedding + 向量检索，得到 0 或 1 条 memory system 消息。
+   - 不满足时直接跳过本轮 recall。
+5. 预算裁剪：
+   - `BuildBudgetedContextMessages(context, rag_memory, user_message)`。
+   - 在 token 预算内选择可带入本轮的 `summary/recent/recall`。
+6. 最终消息拼装：
+   - `system_prompt`（可选） + 预算后的上下文 + `user_message`。
+7. 调用模型：
+   - `Complete`（同步）或 `StreamComplete`（流式）。
+8. 写后动作（不阻塞主推理链）：
+   - user/assistant 消息入异步持久化队列。
+   - 同时入 `RagIndexer` 索引队列，后台做 embedding/upsert。
+9. 回写会话态：
+   - 把新消息 append 到内存上下文。
+   - 视阈值触发摘要刷新（可能额外发起一次摘要模型请求）。
+
+#### 3.2 预算裁剪规则（当前实现）
+预算函数关键规则如下：
+
+1. 先做用户输入预留：
+   - `reserve_user_tokens = estimate(user_message) + 16`。
+   - 目的：确保当前用户问题一定有空间进入模型。
+2. 计算可用预算：
+   - `budget = max_context_tokens - reserve_user_tokens`。
+3. `summary` 预保留（新逻辑）：
+   - 若存在摘要，先计算 `summary_tokens`。
+   - 仅当 `summary_tokens <= budget` 时，先把 `summary` 放入结果并扣减预算。
+   - 这一步解决了“摘要在逆序裁剪里被最先丢弃”的问题。
+4. 构造剩余候选池：
+   - 当前会话 `recent` 消息序列
+   - `semantic_recall` memory 消息
+5. 剩余预算逆序挑选：
+   - 从候选池末尾开始挑选，优先保留“离当前轮最近”的信息。
+   - 若某条加入后会超预算，则跳过该条，继续尝试更早消息。
+6. 结果整理：
+   - 候选池挑中的消息先反转回正序，再拼接到 `summary` 后。
+7. 启发式估算说明：
+   - `EstimateMessageTokens()` 采用字节近似估算，并非模型官方 tokenizer 精确值。
+   - 当前策略目标是工程可控与稳定，而非 token 计算绝对精确。
+8. 边界条件说明：
+   - 如果摘要本身已经超过 `budget`，当前实现会放弃该摘要，避免请求超出总预算。
+   - 该场景通常较少出现（摘要本身一般比原始历史短很多）。
+
+#### 3.3 和第二阶段策略的关系
+不是替换，而是增强：
+
+1. 第二阶段核心（`summary + recent + token budget`）仍保留。
+2. 第四阶段在预算体系内额外加入 `semantic_recall`。
+3. 摘要与最近窗口继续承担“当前会话连续性”，语义召回承担“跨会话长期事实”。
+
+---
+
+### 4. RAG 数据流与异步索引
+#### 4.1 写路径（索引）
+当前写路径有两条并行异步链：
+
+1. 业务持久化链：`AsyncMySqlWriter` 入库。
+2. 记忆索引链：`RagIndexer` 入向量库。
+
+`RagIndexer` 规则：
+
+1. `user` 消息默认入索引；`assistant` 消息按模式选择性入索引：
+   - `assistant_index_mode = all`：assistant 全量入索引
+   - `assistant_index_mode = fact_like`：仅“事实型/配置型/参数型”assistant文本入索引（默认）
+   - `assistant_index_mode = none`：assistant 全不入索引
+2. 去重保护（新增）：
+   - 基于 `sid + 规范化content` 做去重哈希
+   - 在 `dedup_ttl_ms` 窗口内重复内容跳过 embedding/upsert
+   - 用 `dedup_max_entries` 控制去重缓存内存上限
+3. 消息入队后后台线程批量处理。
+4. 每条通过筛选的消息执行 embedding。
+5. 首次成功 embedding 后按向量维度建/校验 Qdrant collection。
+6. Upsert 点位 payload：`sid / conversation_id / role / content / created_at_ms`。
+
+#### 4.2 读路径（检索）
+检索调用链：
+
+1. `RagRetriever::Retrieve(...)`
+2. `EmbeddingClient::Embed(query)`
+3. `QdrantVectorStore::Search(sid, query_vector, top_k, score_threshold)`
+4. `ChatService` 把命中片段序列化成 memory system 消息注入 prompt
+
+---
+
+### 5. 配置项（第四阶段新增）
+新增配置段：
+
+1. `ai.rag.*`
+   - `enabled`
+   - `recall_trigger_mode`（`always` / `intent`）
+   - `recall_intent_min_chars`
+   - `top_k`
+   - `score_threshold`
+   - `max_snippet_chars`
+
+2. `ai.embedding.*`
+   - `provider`（当前仅 `ollama`）
+   - `base_url`
+   - `model`
+   - `connect_timeout_ms`
+   - `request_timeout_ms`
+
+3. `ai.vector_store.qdrant.*`
+   - `base_url`
+   - `collection`
+   - `request_timeout_ms`
+
+4. `ai.rag_indexer.*`
+   - `queue_capacity`
+   - `batch_size`
+   - `flush_interval_ms`
+   - `assistant_index_mode`（`all` / `fact_like` / `none`）
+   - `assistant_min_chars`
+   - `dedup_ttl_ms`
+   - `dedup_max_entries`
+
+启动期校验已补齐：字段为空、数值非法会 fail-fast。
+
+---
+
+### 6. 启动装配与降级策略
+`main.cc` 中新增 RAG 装配流程：
+
+1. 读取 RAG/Embedding/Qdrant/Indexer 配置。
+2. 构建 `OllamaEmbeddingClient + QdrantVectorStore + RagRetriever + RagIndexer`。
+3. 启动探测：
+   - 用探测文本做一次 embedding
+   - 按向量维度 EnsureCollection
+   - 启动 `RagIndexer` 线程
+4. 任一步失败则：
+   - 记录 warning
+   - 自动关闭 RAG（fail-open）
+   - 主服务继续可用（退化为无 RAG）
+
+---
+
+### 7. 测试与验证
+本阶段已完成的验证：
+
+1. 编译验证
+   - `cmake --build build --target ai_chat_server -j8`
+   - 结果：通过
+
+2. 本地自动化单测（新增）
+   - `cmake --build build --target test_rag_indexer -j8`
+   - `./bin/test_rag_indexer`
+   - 覆盖点：
+     - 重复 user 消息在去重窗口内只索引一次
+     - `assistant_index_mode=fact_like` 下会过滤寒暄类 assistant 消息
+     - `assistant_index_mode=all` 下会放行 assistant 消息
+   - 结果：通过（`test_rag_indexer ok`）
+
+3. 启动烟测
+   - 服务启动成功，`/api/v1/healthz` 返回 `ok=true`
+
+4. 端到端记忆验证（登录用户跨会话）
+   - 会话 A：输入“记住我最喜欢的编程语言是 C++”
+   - 会话 B：提问“我最喜欢的编程语言是什么你还记得吗”
+   - 结果：成功召回 `C++`
+
+5. 向量库状态验证
+   - `GET /collections/chat_memory`
+   - `points_count` 增长，说明异步索引写入生效
+
+---
+
+### 8. 当前取舍与已知限制（第四阶段）
+#### 当前取舍
+1. 先走单路语义召回（embedding + 向量检索），不做多路混合检索。
+2. 先不引入 reranker，优先保证链路最小闭环。
+3. 召回片段以 `system` memory 文本注入，先保证可解释与可观测。
+4. 保持 fail-open：RAG 异常不阻断主对话服务。
+
+#### 已知限制
+1. 召回质量仍是 V1：暂无关键词检索融合、重排模型、冲突消解。
+2. 暂无离线回填工具：历史数据索引主要依赖增量写入后逐步累积。
+3. `assistant=fact_like` 仍是启发式规则，存在误收/漏收概率，后续可升级为结构化事实抽取。
+4. 暂无 RAG 专项指标（召回命中率、误召回率、延迟分位）。
+
+---
+
+### 9. 阶段总结
+第四阶段把上下文能力从“会话内短时连续”扩展到了“用户级跨会话长时记忆”：
+
+1. 架构上完成了本地 RAG 子系统闭环（Embedding / VectorStore / Retriever / Indexer）。
+2. 业务上完成了上下文策略升级：`summary + recent + semantic_recall`。
+3. 工程上保持了稳定性：索引异步、启动可降级、主链路可持续服务。
+
+到这里，第四阶段主目标已完成（可用版闭环）。
+
+### 10. 下一阶段
+第五阶段建议优先推进：
+
+1. 写路径消息队列化（MQ），把进程内异步写入升级为外部队列消费。
+2. 稳定性治理（限流、重试、熔断、降级）。
+3. 可观测性建设（指标、日志、trace、告警）。
+
+---
+
 ## 后续阶段（规划）
-- 第四阶段：记忆检索增强（RAG/向量召回），在 summary + recent 之外按语义召回历史关键事实。
 - 第五阶段：写路径消息队列化（MQ），将主服务进程内异步写入升级为外部 MQ（生产者-消费者），实现写路径解耦、削峰与失败重放；主服务进程只负责读库 + 生产消息，消费者侧批量落库并独立维护连接池。
 - 第六阶段：稳定性治理（限流、重试、熔断、降级）。
 - 第七阶段：可观测性（指标、日志、trace、告警）。

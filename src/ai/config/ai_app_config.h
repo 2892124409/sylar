@@ -163,6 +163,76 @@ struct PersistSettings
 };
 
 /**
+ * @brief RAG 检索策略配置。
+ */
+struct RagSettings
+{
+    /** @brief 是否启用 RAG。 */
+    bool enabled = false;
+    /** @brief 召回触发模式：`always`（每轮检索）或 `intent`（按记忆意图触发）。 */
+    std::string recall_trigger_mode = "intent";
+    /** @brief `intent` 模式下，触发判定的最小问题长度（字符数）。 */
+    size_t recall_intent_min_chars = 6;
+    /** @brief 向量召回条数。 */
+    size_t top_k = 6;
+    /** @brief 最低相似度分数阈值（<=0 表示不启用阈值过滤）。 */
+    double score_threshold = 0.45;
+    /** @brief 单条召回片段最大字符数。 */
+    size_t max_snippet_chars = 400;
+};
+
+/**
+ * @brief Embedding 服务配置。
+ */
+struct EmbeddingSettings
+{
+    /** @brief Embedding provider 类型，当前仅支持 `ollama`。 */
+    std::string provider;
+    /** @brief Embedding 服务基础地址。 */
+    std::string base_url;
+    /** @brief Embedding 模型名。 */
+    std::string model;
+    /** @brief 连接超时（毫秒）。 */
+    uint64_t connect_timeout_ms = 3000;
+    /** @brief 请求超时（毫秒）。 */
+    uint64_t request_timeout_ms = 30000;
+};
+
+/**
+ * @brief Qdrant 向量库配置。
+ */
+struct QdrantSettings
+{
+    /** @brief Qdrant HTTP 基础地址。 */
+    std::string base_url;
+    /** @brief 向量集合名。 */
+    std::string collection;
+    /** @brief 请求超时（毫秒）。 */
+    uint64_t request_timeout_ms = 5000;
+};
+
+/**
+ * @brief RAG 索引异步队列配置。
+ */
+struct RagIndexerSettings
+{
+    /** @brief 索引队列容量。 */
+    size_t queue_capacity = 10000;
+    /** @brief 单批次最大索引消息数。 */
+    size_t batch_size = 32;
+    /** @brief 刷盘间隔（毫秒）。 */
+    uint64_t flush_interval_ms = 200;
+    /** @brief assistant 入库模式：`all` / `fact_like` / `none`。 */
+    std::string assistant_index_mode = "fact_like";
+    /** @brief `fact_like` 模式下 assistant 文本最小长度（字符数）。 */
+    size_t assistant_min_chars = 24;
+    /** @brief 去重窗口（毫秒），0 表示关闭去重。 */
+    uint64_t dedup_ttl_ms = 600000;
+    /** @brief 去重缓存最大条目数，0 表示关闭去重。 */
+    size_t dedup_max_entries = 50000;
+};
+
+/**
  * @brief AI 应用配置读取与校验入口。
  *
  * 负责把配置中心中的 `ai.*` 键转换为强类型 Settings，
@@ -187,6 +257,14 @@ class AiAppConfig
     static MysqlSettings GetMysqlSettings();
     /** @brief 获取异步持久化配置。 */
     static PersistSettings GetPersistSettings();
+    /** @brief 获取 RAG 配置。 */
+    static RagSettings GetRagSettings();
+    /** @brief 获取 Embedding 配置。 */
+    static EmbeddingSettings GetEmbeddingSettings();
+    /** @brief 获取 Qdrant 配置。 */
+    static QdrantSettings GetQdrantSettings();
+    /** @brief 获取 RAG 索引器配置。 */
+    static RagIndexerSettings GetRagIndexerSettings();
 
     /**
      * @brief 解析 OpenAI-Compatible API Key。

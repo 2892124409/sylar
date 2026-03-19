@@ -148,6 +148,69 @@ http::ConfigVar<uint64_t>::ptr g_ai_persist_flush_interval_ms =
 http::ConfigVar<uint64_t>::ptr g_ai_persist_batch_size =
     http::Config::Lookup<uint64_t>("ai.persist.batch_size", 128, "persist batch size");
 
+http::ConfigVar<bool>::ptr g_ai_rag_enabled =
+    http::Config::Lookup<bool>("ai.rag.enabled", true, "whether rag retrieval is enabled");
+
+http::ConfigVar<std::string>::ptr g_ai_rag_recall_trigger_mode =
+    http::Config::Lookup<std::string>("ai.rag.recall_trigger_mode", "intent", "rag recall trigger mode: always/intent");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_recall_intent_min_chars =
+    http::Config::Lookup<uint64_t>("ai.rag.recall_intent_min_chars", 6, "rag intent trigger min query chars");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_top_k =
+    http::Config::Lookup<uint64_t>("ai.rag.top_k", 6, "rag retrieval top-k");
+
+http::ConfigVar<double>::ptr g_ai_rag_score_threshold =
+    http::Config::Lookup<double>("ai.rag.score_threshold", 0.45, "rag retrieval score threshold");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_max_snippet_chars =
+    http::Config::Lookup<uint64_t>("ai.rag.max_snippet_chars", 400, "rag snippet max chars");
+
+http::ConfigVar<std::string>::ptr g_ai_embedding_provider =
+    http::Config::Lookup<std::string>("ai.embedding.provider", "ollama", "embedding provider");
+
+http::ConfigVar<std::string>::ptr g_ai_embedding_base_url =
+    http::Config::Lookup<std::string>("ai.embedding.base_url", "http://127.0.0.1:11434", "embedding base url");
+
+http::ConfigVar<std::string>::ptr g_ai_embedding_model =
+    http::Config::Lookup<std::string>("ai.embedding.model", "mxbai-embed-large", "embedding model");
+
+http::ConfigVar<uint64_t>::ptr g_ai_embedding_connect_timeout_ms =
+    http::Config::Lookup<uint64_t>("ai.embedding.connect_timeout_ms", 3000, "embedding connect timeout ms");
+
+http::ConfigVar<uint64_t>::ptr g_ai_embedding_request_timeout_ms =
+    http::Config::Lookup<uint64_t>("ai.embedding.request_timeout_ms", 30000, "embedding request timeout ms");
+
+http::ConfigVar<std::string>::ptr g_ai_qdrant_base_url =
+    http::Config::Lookup<std::string>("ai.vector_store.qdrant.base_url", "http://127.0.0.1:6333", "qdrant base url");
+
+http::ConfigVar<std::string>::ptr g_ai_qdrant_collection =
+    http::Config::Lookup<std::string>("ai.vector_store.qdrant.collection", "chat_memory", "qdrant collection name");
+
+http::ConfigVar<uint64_t>::ptr g_ai_qdrant_request_timeout_ms =
+    http::Config::Lookup<uint64_t>("ai.vector_store.qdrant.request_timeout_ms", 5000, "qdrant request timeout ms");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_queue_capacity =
+    http::Config::Lookup<uint64_t>("ai.rag_indexer.queue_capacity", 10000, "rag indexer queue capacity");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_batch_size =
+    http::Config::Lookup<uint64_t>("ai.rag_indexer.batch_size", 32, "rag indexer batch size");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_flush_interval_ms =
+    http::Config::Lookup<uint64_t>("ai.rag_indexer.flush_interval_ms", 200, "rag indexer flush interval ms");
+
+http::ConfigVar<std::string>::ptr g_ai_rag_indexer_assistant_index_mode =
+    http::Config::Lookup<std::string>("ai.rag_indexer.assistant_index_mode", "fact_like", "rag indexer assistant index mode");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_assistant_min_chars =
+    http::Config::Lookup<uint64_t>("ai.rag_indexer.assistant_min_chars", 24, "rag indexer assistant min chars");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_dedup_ttl_ms =
+    http::Config::Lookup<uint64_t>("ai.rag_indexer.dedup_ttl_ms", 600000, "rag indexer dedup ttl ms");
+
+http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_dedup_max_entries =
+    http::Config::Lookup<uint64_t>("ai.rag_indexer.dedup_max_entries", 50000, "rag indexer dedup max entries");
+
 } // namespace
 
 ServerSettings AiAppConfig::GetServerSettings()
@@ -239,6 +302,51 @@ PersistSettings AiAppConfig::GetPersistSettings()
     settings.queue_capacity = static_cast<size_t>(g_ai_persist_queue_capacity->getValue());
     settings.flush_interval_ms = g_ai_persist_flush_interval_ms->getValue();
     settings.batch_size = static_cast<size_t>(g_ai_persist_batch_size->getValue());
+    return settings;
+}
+
+RagSettings AiAppConfig::GetRagSettings()
+{
+    RagSettings settings;
+    settings.enabled = g_ai_rag_enabled->getValue();
+    settings.recall_trigger_mode = g_ai_rag_recall_trigger_mode->getValue();
+    settings.recall_intent_min_chars = static_cast<size_t>(g_ai_rag_recall_intent_min_chars->getValue());
+    settings.top_k = static_cast<size_t>(g_ai_rag_top_k->getValue());
+    settings.score_threshold = g_ai_rag_score_threshold->getValue();
+    settings.max_snippet_chars = static_cast<size_t>(g_ai_rag_max_snippet_chars->getValue());
+    return settings;
+}
+
+EmbeddingSettings AiAppConfig::GetEmbeddingSettings()
+{
+    EmbeddingSettings settings;
+    settings.provider = g_ai_embedding_provider->getValue();
+    settings.base_url = g_ai_embedding_base_url->getValue();
+    settings.model = g_ai_embedding_model->getValue();
+    settings.connect_timeout_ms = g_ai_embedding_connect_timeout_ms->getValue();
+    settings.request_timeout_ms = g_ai_embedding_request_timeout_ms->getValue();
+    return settings;
+}
+
+QdrantSettings AiAppConfig::GetQdrantSettings()
+{
+    QdrantSettings settings;
+    settings.base_url = g_ai_qdrant_base_url->getValue();
+    settings.collection = g_ai_qdrant_collection->getValue();
+    settings.request_timeout_ms = g_ai_qdrant_request_timeout_ms->getValue();
+    return settings;
+}
+
+RagIndexerSettings AiAppConfig::GetRagIndexerSettings()
+{
+    RagIndexerSettings settings;
+    settings.queue_capacity = static_cast<size_t>(g_ai_rag_indexer_queue_capacity->getValue());
+    settings.batch_size = static_cast<size_t>(g_ai_rag_indexer_batch_size->getValue());
+    settings.flush_interval_ms = g_ai_rag_indexer_flush_interval_ms->getValue();
+    settings.assistant_index_mode = g_ai_rag_indexer_assistant_index_mode->getValue();
+    settings.assistant_min_chars = static_cast<size_t>(g_ai_rag_indexer_assistant_min_chars->getValue());
+    settings.dedup_ttl_ms = g_ai_rag_indexer_dedup_ttl_ms->getValue();
+    settings.dedup_max_entries = static_cast<size_t>(g_ai_rag_indexer_dedup_max_entries->getValue());
     return settings;
 }
 
@@ -414,6 +522,86 @@ bool AiAppConfig::Validate(std::string& error)
     {
         error = "ai.persist settings queue_capacity/batch_size/flush_interval_ms must be > 0";
         return false;
+    }
+
+    const RagSettings rag = GetRagSettings();
+    if (rag.enabled)
+    {
+        if (rag.recall_trigger_mode != "always" && rag.recall_trigger_mode != "intent")
+        {
+            error = "ai.rag.recall_trigger_mode must be one of: always, intent";
+            return false;
+        }
+        if (rag.recall_trigger_mode == "intent" && rag.recall_intent_min_chars == 0)
+        {
+            error = "ai.rag.recall_intent_min_chars must be > 0 when recall_trigger_mode=intent";
+            return false;
+        }
+        if (rag.top_k == 0)
+        {
+            error = "ai.rag.top_k must be > 0";
+            return false;
+        }
+        if (rag.max_snippet_chars == 0)
+        {
+            error = "ai.rag.max_snippet_chars must be > 0";
+            return false;
+        }
+
+        const EmbeddingSettings embedding = GetEmbeddingSettings();
+        if (embedding.provider != "ollama")
+        {
+            error = "ai.embedding.provider currently only supports ollama";
+            return false;
+        }
+        if (embedding.base_url.empty() || embedding.model.empty())
+        {
+            error = "ai.embedding.base_url/model can not be empty";
+            return false;
+        }
+        if (embedding.connect_timeout_ms == 0 || embedding.request_timeout_ms == 0)
+        {
+            error = "ai.embedding.connect_timeout_ms/request_timeout_ms must be > 0";
+            return false;
+        }
+
+        const QdrantSettings qdrant = GetQdrantSettings();
+        if (qdrant.base_url.empty() || qdrant.collection.empty())
+        {
+            error = "ai.vector_store.qdrant.base_url/collection can not be empty";
+            return false;
+        }
+        if (qdrant.request_timeout_ms == 0)
+        {
+            error = "ai.vector_store.qdrant.request_timeout_ms must be > 0";
+            return false;
+        }
+
+        const RagIndexerSettings rag_indexer = GetRagIndexerSettings();
+        if (rag_indexer.queue_capacity == 0 ||
+            rag_indexer.batch_size == 0 ||
+            rag_indexer.flush_interval_ms == 0)
+        {
+            error = "ai.rag_indexer queue_capacity/batch_size/flush_interval_ms must be > 0";
+            return false;
+        }
+        if (rag_indexer.assistant_index_mode != "all" &&
+            rag_indexer.assistant_index_mode != "fact_like" &&
+            rag_indexer.assistant_index_mode != "none")
+        {
+            error = "ai.rag_indexer.assistant_index_mode must be one of: all, fact_like, none";
+            return false;
+        }
+        if (rag_indexer.assistant_index_mode == "fact_like" && rag_indexer.assistant_min_chars == 0)
+        {
+            error = "ai.rag_indexer.assistant_min_chars must be > 0 when assistant_index_mode=fact_like";
+            return false;
+        }
+        if ((rag_indexer.dedup_ttl_ms == 0) != (rag_indexer.dedup_max_entries == 0))
+        {
+            error = "ai.rag_indexer.dedup_ttl_ms and dedup_max_entries should both be 0 or both > 0";
+            return false;
+        }
     }
 
     return true;

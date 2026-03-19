@@ -1,7 +1,10 @@
 #include "ai/service/chat_service.h"
 
 #include <algorithm>
+#include <cctype>
+#include <iomanip>
 #include <nlohmann/json.hpp>
+#include <sstream>
 
 #include "ai/common/ai_utils.h"
 #include "log/logger.h"
@@ -13,14 +16,48 @@ namespace service
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
+namespace
+{
+
+std::string ToLowerAscii(const std::string& input)
+{
+    std::string output = input;
+    for (size_t i = 0; i < output.size(); ++i)
+    {
+        unsigned char c = static_cast<unsigned char>(output[i]);
+        output[i] = static_cast<char>(std::tolower(c));
+    }
+    return output;
+}
+
+bool ContainsAny(const std::string& text, const std::vector<std::string>& keywords)
+{
+    for (size_t i = 0; i < keywords.size(); ++i)
+    {
+        if (!keywords[i].empty() && text.find(keywords[i]) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 ChatService::ChatService(const config::ChatSettings& settings,
                          const llm::LlmClient::ptr& llm_client,
                          const ChatStore::ptr& store,
-                         const MessageSink::ptr& sink)
+                         const MessageSink::ptr& sink,
+                         const config::RagSettings& rag_settings,
+                         const rag::RagRetriever::ptr& rag_retriever,
+                         const rag::RagIndexer::ptr& rag_indexer)
     : m_settings(settings)
     , m_llm_client(llm_client)
     , m_store(store)
     , m_sink(sink)
+    , m_rag_settings(rag_settings)
+    , m_rag_retriever(rag_retriever)
+    , m_rag_indexer(rag_indexer)
 {
 }
 
@@ -77,7 +114,8 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
         llm_request.messages.push_back(system_message);
     }
 
-    std::vector<common::ChatMessage> budgeted_context = BuildBudgetedContextMessages(context, user_message);
+    std::vector<common::ChatMessage> rag_memory_messages = BuildRagMemoryMessages(request.sid, user_message);
+    std::vector<common::ChatMessage> budgeted_context = BuildBudgetedContextMessages(context, rag_memory_messages, user_message);
     llm_request.messages.insert(llm_request.messages.end(), budgeted_context.begin(), budgeted_context.end());
     llm_request.messages.push_back(user_message);
 
@@ -187,7 +225,8 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         llm_request.messages.push_back(system_message);
     }
 
-    std::vector<common::ChatMessage> budgeted_context = BuildBudgetedContextMessages(context, user_message);
+    std::vector<common::ChatMessage> rag_memory_messages = BuildRagMemoryMessages(request.sid, user_message);
+    std::vector<common::ChatMessage> budgeted_context = BuildBudgetedContextMessages(context, rag_memory_messages, user_message);
     llm_request.messages.insert(llm_request.messages.end(), budgeted_context.begin(), budgeted_context.end());
     llm_request.messages.push_back(user_message);
 
@@ -430,22 +469,29 @@ void ChatService::AppendContextMessages(const std::string& sid,
 
 std::vector<common::ChatMessage> ChatService::BuildBudgetedContextMessages(
     const ConversationContext& context,
+    const std::vector<common::ChatMessage>& extra_messages,
     const common::ChatMessage& pending_user_message) const
 {
-    std::vector<common::ChatMessage> source;
+    common::ChatMessage summary_message;
+    bool has_summary = false;
     if (!context.summary.empty())
     {
-        common::ChatMessage summary_message;
         summary_message.role = "system";
         summary_message.content = std::string("Conversation summary:\n") + context.summary;
         summary_message.created_at_ms = context.summary_updated_at_ms;
-        source.push_back(summary_message);
+        has_summary = true;
     }
 
+    std::vector<common::ChatMessage> source;
     source.insert(source.end(), context.messages.begin(), context.messages.end());
+    source.insert(source.end(), extra_messages.begin(), extra_messages.end());
 
-    if (m_settings.max_context_tokens == 0 || source.empty())
+    if (m_settings.max_context_tokens == 0)
     {
+        if (has_summary)
+        {
+            source.insert(source.begin(), summary_message);
+        }
         return source;
     }
 
@@ -459,25 +505,128 @@ std::vector<common::ChatMessage> ChatService::BuildBudgetedContextMessages(
     size_t used = 0;
     std::vector<common::ChatMessage> picked;
 
+    // 先尝试保留 summary（信息密度最高），再让 recent/recall 竞争剩余额度。
+    if (has_summary)
+    {
+        const size_t summary_tokens = EstimateMessageTokens(summary_message);
+        if (summary_tokens <= budget)
+        {
+            used += summary_tokens;
+            picked.push_back(summary_message);
+        }
+    }
+
+    std::vector<common::ChatMessage> picked_tail;
     for (std::vector<common::ChatMessage>::reverse_iterator it = source.rbegin();
          it != source.rend(); ++it)
     {
         const size_t tokens = EstimateMessageTokens(*it);
-        if (!picked.empty() && used + tokens > budget)
-        {
-            continue;
-        }
-        if (picked.empty() && tokens > budget)
+        if (used + tokens > budget)
         {
             continue;
         }
 
         used += tokens;
-        picked.push_back(*it);
+        picked_tail.push_back(*it);
     }
 
-    std::reverse(picked.begin(), picked.end());
+    std::reverse(picked_tail.begin(), picked_tail.end());
+    picked.insert(picked.end(), picked_tail.begin(), picked_tail.end());
     return picked;
+}
+
+std::vector<common::ChatMessage> ChatService::BuildRagMemoryMessages(const std::string& sid,
+                                                                     const common::ChatMessage& pending_user_message)
+{
+    if (!m_rag_settings.enabled || !m_rag_retriever)
+    {
+        return std::vector<common::ChatMessage>();
+    }
+    if (sid.empty() || pending_user_message.content.empty())
+    {
+        return std::vector<common::ChatMessage>();
+    }
+    if (!ShouldTriggerRagRecall(pending_user_message))
+    {
+        return std::vector<common::ChatMessage>();
+    }
+
+    std::vector<rag::SearchHit> hits;
+    std::string error;
+    if (!m_rag_retriever->Retrieve(sid, pending_user_message.content,
+                                   m_rag_settings.top_k,
+                                   m_rag_settings.score_threshold,
+                                   hits, error))
+    {
+        BASE_LOG_WARN(g_logger) << "rag retrieve failed sid=" << sid
+                                << " error=" << error;
+        return std::vector<common::ChatMessage>();
+    }
+
+    if (hits.empty())
+    {
+        return std::vector<common::ChatMessage>();
+    }
+
+    std::ostringstream content;
+    content << "Long-term memory snippets for current user (use only when relevant):\n";
+
+    for (size_t i = 0; i < hits.size(); ++i)
+    {
+        std::string snippet = hits[i].payload.content;
+        if (m_rag_settings.max_snippet_chars > 0 &&
+            snippet.size() > m_rag_settings.max_snippet_chars)
+        {
+            snippet.resize(m_rag_settings.max_snippet_chars);
+            snippet.append("...");
+        }
+
+        content << "[" << (i + 1) << "] "
+                << "score=" << std::fixed << std::setprecision(4) << hits[i].score
+                << ", conv=" << hits[i].payload.conversation_id
+                << ", role=" << hits[i].payload.role
+                << ", ts=" << hits[i].payload.created_at_ms
+                << "\n"
+                << snippet << "\n";
+    }
+
+    common::ChatMessage memory_message;
+    memory_message.role = "system";
+    memory_message.content = content.str();
+    memory_message.created_at_ms = common::NowMs();
+
+    return std::vector<common::ChatMessage>(1, memory_message);
+}
+
+bool ChatService::ShouldTriggerRagRecall(const common::ChatMessage& pending_user_message) const
+{
+    if (!m_rag_settings.enabled)
+    {
+        return false;
+    }
+    if (m_rag_settings.recall_trigger_mode == "always")
+    {
+        return true;
+    }
+
+    // 默认 intent 模式：只有“用户明确在问历史/记忆”时才触发 recall。
+    const std::string& query = pending_user_message.content;
+    if (query.size() < m_rag_settings.recall_intent_min_chars)
+    {
+        return false;
+    }
+
+    static const std::vector<std::string> kZhIntentKeywords = {
+        "记得", "还记得", "之前", "上次", "刚才", "以前", "曾经", "历史", "聊过", "说过", "提过"};
+    if (ContainsAny(query, kZhIntentKeywords))
+    {
+        return true;
+    }
+
+    const std::string query_lower = ToLowerAscii(query);
+    static const std::vector<std::string> kEnIntentKeywords = {
+        "remember", "earlier", "previous", "before", "history", "we discussed", "you said", "i said"};
+    return ContainsAny(query_lower, kEnIntentKeywords);
 }
 
 bool ChatService::MaybeRefreshSummary(const std::string& sid,
@@ -611,6 +760,17 @@ bool ChatService::PersistMessage(const common::PersistMessage& message,
     {
         BASE_LOG_ERROR(g_logger) << "enqueue persist message failed: " << error;
         return false;
+    }
+
+    if (m_rag_settings.enabled && m_rag_indexer)
+    {
+        std::string index_error;
+        if (!m_rag_indexer->Enqueue(message, index_error))
+        {
+            BASE_LOG_WARN(g_logger) << "enqueue rag index task failed sid=" << message.sid
+                                    << " conv=" << message.conversation_id
+                                    << " error=" << index_error;
+        }
     }
     return true;
 }
