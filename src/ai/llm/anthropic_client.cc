@@ -513,6 +513,11 @@ std::string AnthropicClient::BuildMessagesUrl() const
 
 /**
  * @brief Anthropic 同步补全实现。
+ * @details
+ * 第五阶段后流程与 OpenAI-Compatible 路径保持一致：
+ * - 优先走 provider 级 key 池候选；
+ * - 候选为空时回退配置单 key；
+ * - 失败按错误类型上报，驱动 key 冷却与重试决策。
  */
 bool AnthropicClient::Complete(const LlmCompletionRequest& request,
                                LlmCompletionResult& result,
@@ -647,6 +652,9 @@ bool AnthropicClient::Complete(const LlmCompletionRequest& request,
 
 /**
  * @brief Anthropic 流式补全实现。
+ * @details
+ * 与同步模式相同支持 key 池切换；当已输出部分 delta 后若发生错误，
+ * 直接终止并返回失败，避免对客户端产生重复流式片段。
  */
 bool AnthropicClient::StreamComplete(const LlmCompletionRequest& request,
                                      const DeltaCallback& on_delta,

@@ -17,6 +17,7 @@ ai:
         request_timeout_ms: 180000
         key_pool:
           enabled: false
+          hot_reload_enabled: true
           reload_interval_ms: 5000
           max_retry_per_request: 2
           cooldown_short_ms: 60000
@@ -32,6 +33,7 @@ ai:
         request_timeout_ms: 120000
         key_pool:
           enabled: false
+          hot_reload_enabled: true
           reload_interval_ms: 5000
           max_retry_per_request: 2
           cooldown_short_ms: 60000

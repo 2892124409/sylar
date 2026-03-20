@@ -62,6 +62,9 @@ http::ConfigVar<uint64_t>::ptr g_ai_openai_request_timeout_ms =
 http::ConfigVar<bool>::ptr g_ai_openai_key_pool_enabled =
     http::Config::Lookup<bool>("ai.openai_compatible.key_pool.enabled", false, "openai-compatible key pool enabled");
 
+http::ConfigVar<bool>::ptr g_ai_openai_key_pool_hot_reload_enabled =
+    http::Config::Lookup<bool>("ai.openai_compatible.key_pool.hot_reload_enabled", true, "openai-compatible key pool hot reload enabled");
+
 http::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_reload_interval_ms =
     http::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.reload_interval_ms", 5000, "openai-compatible key pool reload interval ms");
 
@@ -313,6 +316,10 @@ ApiKeyPoolSettings ParseApiKeyPoolSettings(const YAML::Node& node)
     {
         settings.enabled = node["enabled"].as<bool>();
     }
+    if (node["hot_reload_enabled"] && node["hot_reload_enabled"].IsScalar())
+    {
+        settings.hot_reload_enabled = node["hot_reload_enabled"].as<bool>();
+    }
     if (node["reload_interval_ms"] && node["reload_interval_ms"].IsScalar())
     {
         settings.reload_interval_ms = node["reload_interval_ms"].as<uint64_t>();
@@ -447,6 +454,7 @@ ApiKeyPoolSettings AiAppConfig::GetApiKeyPoolSettings()
 {
     ApiKeyPoolSettings settings;
     settings.enabled = g_ai_openai_key_pool_enabled->getValue();
+    settings.hot_reload_enabled = g_ai_openai_key_pool_hot_reload_enabled->getValue();
     settings.reload_interval_ms = g_ai_openai_key_pool_reload_interval_ms->getValue();
     settings.max_retry_per_request = g_ai_openai_key_pool_max_retry_per_request->getValue();
     settings.cooldown_short_ms = g_ai_openai_key_pool_cooldown_short_ms->getValue();
@@ -682,7 +690,7 @@ bool AiAppConfig::Validate(std::string& error)
             }
             if (key_pool.enabled)
             {
-                if (key_pool.reload_interval_ms == 0)
+                if (key_pool.hot_reload_enabled && key_pool.reload_interval_ms == 0)
                 {
                     error = "openai key_pool.reload_interval_ms must be > 0 for provider: " + provider.id;
                     return false;
@@ -725,7 +733,7 @@ bool AiAppConfig::Validate(std::string& error)
             }
             if (key_pool.enabled)
             {
-                if (key_pool.reload_interval_ms == 0)
+                if (key_pool.hot_reload_enabled && key_pool.reload_interval_ms == 0)
                 {
                     error = "anthropic key_pool.reload_interval_ms must be > 0 for provider: " + provider.id;
                     return false;

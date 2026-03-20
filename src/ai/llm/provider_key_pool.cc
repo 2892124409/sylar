@@ -14,6 +14,9 @@ namespace llm
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
+/**
+ * @brief 构造 ProviderKeyPool。
+ */
 ProviderKeyPool::ProviderKeyPool(const storage::ApiKeyPoolRepository::ptr& repository,
                                  const config::ApiKeyPoolSettings& settings,
                                  const std::string& provider_id)
@@ -24,11 +27,19 @@ ProviderKeyPool::ProviderKeyPool(const storage::ApiKeyPoolRepository::ptr& repos
 {
 }
 
+/**
+ * @brief 析构时确保后台线程退出。
+ */
 ProviderKeyPool::~ProviderKeyPool()
 {
     Stop();
 }
 
+/**
+ * @brief 启动 Key 池。
+ * @details
+ * 必须先完成一次同步 Reload，确保 `Start` 返回后即可获取候选 key。
+ */
 bool ProviderKeyPool::Start(std::string& error)
 {
     if (m_running)
@@ -50,6 +61,9 @@ bool ProviderKeyPool::Start(std::string& error)
     return true;
 }
 
+/**
+ * @brief 停止 Key 池并等待重载线程退出。
+ */
 void ProviderKeyPool::Stop()
 {
     {
@@ -66,6 +80,11 @@ void ProviderKeyPool::Stop()
     }
 }
 
+/**
+ * @brief 获取候选 key 序列。
+ * @param max_candidates 最多返回候选数量。
+ * @return 候选 key 列表。
+ */
 std::vector<ApiKeyCandidate> ProviderKeyPool::AcquireCandidates(size_t max_candidates)
 {
     if (max_candidates == 0)
@@ -78,6 +97,13 @@ std::vector<ApiKeyCandidate> ProviderKeyPool::AcquireCandidates(size_t max_candi
     return BuildCandidatesLocked(max_candidates, now_ms);
 }
 
+/**
+ * @brief 上报 key 成功。
+ * @details
+ * 成功后会：
+ * 1) 清空内存快照中的冷却截止时间；
+ * 2) 回写 DB（重置 fail_count/last_error/cooldown）。
+ */
 void ProviderKeyPool::ReportSuccess(uint64_t key_id)
 {
     if (key_id == 0)
@@ -105,6 +131,11 @@ void ProviderKeyPool::ReportSuccess(uint64_t key_id)
     }
 }
 
+/**
+ * @brief 上报 key 失败并设置冷却。
+ * @param key_id 失败 key ID。
+ * @param type 失败类型（决定短冷却/长冷却）。
+ */
 void ProviderKeyPool::ReportFailure(uint64_t key_id, ApiKeyFailureType type)
 {
     if (key_id == 0)
@@ -142,6 +173,12 @@ void ProviderKeyPool::ReportFailure(uint64_t key_id, ApiKeyFailureType type)
     }
 }
 
+/**
+ * @brief 后台重载循环。
+ * @details
+ * 每个周期从 DB 重新加载启用 key，并替换内存快照；
+ * 若加载失败仅记录告警，不终止线程。
+ */
 void ProviderKeyPool::ReloadLoop()
 {
     while (true)
@@ -165,6 +202,13 @@ void ProviderKeyPool::ReloadLoop()
     }
 }
 
+/**
+ * @brief 执行一次 key 刷新。
+ * @details
+ * 刷新策略说明：
+ * - 新快照来源于 DB 当前启用记录；
+ * - 若旧快照里某 key 冷却更长，则保留更长冷却，防止冷却倒退。
+ */
 bool ProviderKeyPool::ReloadOnce(std::string& error)
 {
     std::vector<storage::ApiKeyPoolRepository::ApiKeyRecord> records;
@@ -205,6 +249,9 @@ bool ProviderKeyPool::ReloadOnce(std::string& error)
     return true;
 }
 
+/**
+ * @brief 获取当前时间（毫秒）。
+ */
 uint64_t ProviderKeyPool::NowMs() const
 {
     return static_cast<uint64_t>(
@@ -213,6 +260,12 @@ uint64_t ProviderKeyPool::NowMs() const
             .count());
 }
 
+/**
+ * @brief 按失败类型映射冷却时长。
+ * @details
+ * 认证类错误通常表示 key 失效或权限问题，使用长冷却；
+ * 其他错误默认使用短冷却。
+ */
 uint64_t ProviderKeyPool::GetCooldownMs(ApiKeyFailureType type) const
 {
     if (type == ApiKeyFailureType::AUTH_ERROR)
@@ -222,6 +275,10 @@ uint64_t ProviderKeyPool::GetCooldownMs(ApiKeyFailureType type) const
     return m_settings.cooldown_short_ms;
 }
 
+/**
+ * @brief 在内存快照中标记失败冷却。
+ * @note 使用 `max(old, new)` 避免并发/重复上报导致冷却回退。
+ */
 void ProviderKeyPool::MarkFailureInMemory(uint64_t key_id, uint64_t cooldown_until_ms)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -235,6 +292,17 @@ void ProviderKeyPool::MarkFailureInMemory(uint64_t key_id, uint64_t cooldown_unt
     }
 }
 
+/**
+ * @brief 构建本次请求候选 key（持锁调用）。
+ * @param max_candidates 候选上限。
+ * @param now_ms 当前毫秒时间。
+ * @return 可尝试候选序列。
+ * @details
+ * 算法分三步：
+ * 1) 过滤空 key 与冷却中 key；
+ * 2) 按 priority 分组（高优先级优先）；
+ * 3) 组内基于 weight 扩展调度表，并按游标轮转取样，避免热点 key 固化。
+ */
 std::vector<ApiKeyCandidate> ProviderKeyPool::BuildCandidatesLocked(size_t max_candidates, uint64_t now_ms)
 {
     std::map<int, std::vector<size_t>, std::greater<int> > groups;
@@ -270,6 +338,7 @@ std::vector<ApiKeyCandidate> ProviderKeyPool::BuildCandidatesLocked(size_t max_c
         for (size_t i = 0; i < indexes.size(); ++i)
         {
             const RuntimeKey& key = m_keys[indexes[i]];
+            // 通过重复下标实现权重：weight 越大，在调度表里出现次数越多。
             for (int w = 0; w < std::max(1, key.weight); ++w)
             {
                 schedule.push_back(indexes[i]);
@@ -282,6 +351,7 @@ std::vector<ApiKeyCandidate> ProviderKeyPool::BuildCandidatesLocked(size_t max_c
 
         size_t& cursor = m_priority_rr_cursor[priority];
         const size_t start = cursor % schedule.size();
+        // 从上次游标位置开始轮询，提升同优先级 key 的负载均衡效果。
         for (size_t i = 0; i < schedule.size() && out.size() < max_candidates; ++i)
         {
             const RuntimeKey& key = m_keys[schedule[(start + i) % schedule.size()]];
@@ -295,6 +365,7 @@ std::vector<ApiKeyCandidate> ProviderKeyPool::BuildCandidatesLocked(size_t max_c
                 out.push_back(candidate);
             }
         }
+        // 每次调用后游标后移，下一次请求换一个起点。
         cursor = (start + 1) % schedule.size();
 
         if (out.size() >= max_candidates)

@@ -415,6 +415,12 @@ std::string OpenAICompatibleClient::BuildCompletionsUrl() const
 
 /**
  * @brief 同步补全实现。
+ * @details
+ * 第五阶段后该流程支持 provider 级 Key 池：
+ * 1) 优先向 `m_key_provider` 拉取候选 key；
+ * 2) 若无候选则回退配置中的单 `api_key`；
+ * 3) 按候选顺序尝试，请求失败时依据错误类型上报并决定是否重试；
+ * 4) 成功后上报成功状态，供 Key 池更新冷却与统计。
  */
 bool OpenAICompatibleClient::Complete(const LlmCompletionRequest& request, LlmCompletionResult& result, std::string& error)
 {
@@ -564,6 +570,10 @@ bool OpenAICompatibleClient::Complete(const LlmCompletionRequest& request, LlmCo
 
 /**
  * @brief 流式补全实现。
+ * @details
+ * 与同步路径一致支持 provider 级 Key 池与失败上报；差异在于：
+ * - 通过 SSE chunk 持续输出 delta；
+ * - 若已输出部分 token，禁止自动换 key 重试，避免重复输出。
  */
 bool OpenAICompatibleClient::StreamComplete(const LlmCompletionRequest& request, const DeltaCallback& on_delta, LlmCompletionResult& result, std::string& error)
 {

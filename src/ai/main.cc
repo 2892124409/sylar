@@ -205,9 +205,12 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // 第五阶段：Provider 级 Key 池仓库与运行时池实例集合。
+    // key: provider_id, value: ProviderKeyPool
     ai::storage::ApiKeyPoolRepository::ptr api_key_pool_repository;
     std::unordered_map<std::string, ai::llm::ProviderKeyPool::ptr> provider_key_pools;
 
+    // 只有至少一个启用 provider 开启了 key_pool，才初始化 key_pool repository。
     bool need_key_pool_repo = false;
     for (size_t i = 0; i < llm_settings.providers.size(); ++i)
     {
@@ -237,6 +240,12 @@ int main(int argc, char** argv)
     }
 
     /// @brief Step 7: 按 provider.type 通过注册工厂装配多 Provider 客户端。
+    /// @details
+    /// 启动装配链路：
+    /// 1) 可选创建 provider 级 key 池并注入 BuildOptions；
+    /// 2) 由 Factory 按 provider.type 创建具体协议客户端；
+    /// 3) 注册到 Registry（provider_id -> client entry）；
+    /// 4) 最终构建 Router 供请求期动态路由。
     ai::llm::LlmClientFactory llm_factory = ai::llm::LlmClientFactory::BuildDefault();
     ai::llm::LlmClientRegistry::ptr llm_registry(new ai::llm::LlmClientRegistry());
 
@@ -248,12 +257,14 @@ int main(int argc, char** argv)
             continue;
         }
 
+        // BuildOptions 是协议无关注入点：key provider、重试预算等。
         ai::llm::LlmClientFactory::BuildOptions build_options;
         if (provider.key_pool.enabled)
         {
             build_options.max_retry_per_request = provider.key_pool.max_retry_per_request;
             if (api_key_pool_repository)
             {
+                // 第五阶段：key pool 绑定 provider_id，避免跨 provider 污染状态。
                 ai::llm::ProviderKeyPool::ptr key_pool(new ai::llm::ProviderKeyPool(api_key_pool_repository,
                                                                                      provider.key_pool,
                                                                                      provider.id));
@@ -265,6 +276,7 @@ int main(int argc, char** argv)
                 }
                 else
                 {
+                    // 注入到具体客户端后，客户端会在每次请求前动态取 key 候选。
                     build_options.api_key_provider = key_pool;
                     provider_key_pools[provider.id] = key_pool;
                 }

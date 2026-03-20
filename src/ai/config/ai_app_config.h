@@ -61,6 +61,8 @@ struct ApiKeyPoolSettings
 {
     /** @brief 是否启用全局 Key 池。 */
     bool enabled = false;
+    /** @brief 是否启用后台热加载线程（可在运行时暂停/恢复轮询）。 */
+    bool hot_reload_enabled = true;
     /** @brief Key 池热加载周期（毫秒）。 */
     uint64_t reload_interval_ms = 5000;
     /** @brief 单请求最大重试次数（不含首次尝试）。 */

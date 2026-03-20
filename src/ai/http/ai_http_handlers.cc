@@ -31,6 +31,7 @@ bool AiHttpHandlers::BuildChatRequest(
     ai::common::ChatCompletionRequest& out,
     std::string& error) const
 {
+    // 鉴权中间件会把主体标识写入 X-Principal-Sid，业务层据此做会话隔离。
     out.sid = request->getHeader("X-Principal-Sid");
 
     nlohmann::json body;
@@ -56,6 +57,7 @@ bool AiHttpHandlers::BuildChatRequest(
     {
         out.model = body["model"].get<std::string>();
     }
+    // 第五阶段新增：支持请求显式指定 provider_id（请求级路由）。
     if (body.contains("provider") && body["provider"].is_string())
     {
         out.provider = body["provider"].get<std::string>();
@@ -86,6 +88,7 @@ void AiHttpHandlers::WriteSuccessJson(
     payload["conversation_id"] = chat_response.conversation_id;
     payload["reply"] = chat_response.reply;
     payload["model"] = chat_response.model;
+    // 第五阶段新增：响应中回填命中的 provider_id，便于观测路由结果。
     payload["provider"] = chat_response.provider;
     payload["finish_reason"] = chat_response.finish_reason;
     payload["created_at_ms"] = chat_response.created_at_ms;

@@ -2120,168 +2120,440 @@ Client
 ## 第五阶段：多 Provider 路由与注册式工厂（含协议无关 provider_id 级 Key 池）
 
 ### 1. 阶段目标
-第五阶段从“单 Provider 启动模式”升级为“单实例多 Provider 并存模式”，核心目标：
+第五阶段目标是把“单 Provider 启动期固定选择”升级为“多 Provider 请求期动态路由”：
 
-1. 同一个 `ai_chat_server` 进程同时接入多个上游 Provider。
-2. 请求级路由：每次请求按 `provider/model` 动态选择客户端。
-3. 引入协议无关 key 池容灾能力（OpenAI/Anthropic 都可按需启用）。
-4. key 池按 provider 实例维度隔离（`provider_id`）。
-
----
-
-### 2. 架构升级（设计模式）
-#### 2.1 Strategy（策略模式）
-保留 `LlmClient` 抽象，具体协议实现继续由策略类承担：
-
-1. `OpenAICompatibleClient`
-2. `AnthropicClient`
-
-业务层不感知协议细节，只依赖统一接口。
-
-#### 2.2 Factory + Registry（注册式工厂）
-新增注册工厂体系：
-
-1. `LlmClientFactory`
-   - 以 `provider.type` 为键注册构造器。
-   - 根据类型创建具体客户端实例。
-2. `LlmClientRegistry`
-   - 以 `provider.id` 存储已创建客户端。
-   - 对外提供按 `provider.id` 查找能力。
-
-#### 2.3 Router（请求分发）
-新增 `LlmRouter`，路由优先级：
-
-1. 请求显式 `provider`（最高优先级）
-2. `model -> provider_id` 映射
-3. `default_provider_id`
-
-这样可以做到“启动一次，运行期每个请求走不同 Provider”。
+1. 同一服务实例可并存多个 Provider（OpenAI-Compatible / Anthropic）。
+2. 每个请求可显式指定 `provider`，或由路由规则自动决策。
+3. 把 API Key 池能力从 OpenAI 特化升级为协议无关能力。
+4. 保持现有 chat 接口语义稳定（对上游业务层尽量无侵入）。
 
 ---
 
-### 3. 配置体系重构（`ai.provider.type` -> `ai.llm.*`）
-#### 3.1 新配置结构
-将单 Provider 配置切换为多 Provider：
+### 2. 代码改动总览
+本阶段涉及的主要模块：
+
+1. `src/ai/llm/llm_client_factory.*`
+   - 按 `provider.type` 注册构造器并创建具体客户端。
+2. `src/ai/llm/llm_client_registry.*`
+   - 以 `provider.id` 管理已装配客户端实例。
+3. `src/ai/llm/llm_router.*`
+   - 在请求期完成 `provider/model` 到客户端实例的路由解析。
+4. `src/ai/llm/api_key_provider.h`
+   - 定义协议无关 key 提供接口（候选获取、成功/失败上报）。
+5. `src/ai/llm/provider_key_pool.*`
+   - 通用 key 池实现（DB 热加载 + 运行时选择 + 冷却机制）。
+6. `src/ai/storage/api_key_pool_repository.*`
+   - `llm_api_keys` 表读写与状态回写。
+7. `src/ai/service/chat_service.*`
+   - 业务层从“单 client”切到“router 动态取 client”。
+8. `src/ai/http/ai_http_handlers.*` + `src/ai/client/auth_chat_client.cc`
+   - 请求/响应新增 `provider` 字段透传与联调入口。
+
+---
+
+### 2.1 多 Provider 工具栈与职责
+第五阶段的核心不是单个类，而是“装配 + 路由 + 调用”三段式：
+
+1. 装配段（启动期）
+   - `Factory` 负责“按类型构造”；
+   - `Registry` 负责“按实例 ID 存放”。
+2. 路由段（请求期）
+   - `Router` 按规则解析本次请求命中的 `provider/model/client`。
+3. 调用段（业务期）
+   - `ChatService` 使用路由结果执行同步/流式请求，并回填命中 provider。
+
+这套结构对应的设计模式：
+
+1. Strategy：`LlmClient` 抽象统一协议行为。
+2. Factory：创建策略对象，不在 `main` 写死 `if/else`。
+3. Registry：管理已装配实例，供路由与业务层查找。
+4. Router：把“请求参数 + 配置规则”转成“可执行目标”。
+
+---
+
+### 2.2 核心类详解
+#### 2.2.1 `llm_client_factory`（Provider 客户端构造层）
+职责：
+
+1. 以 `provider.type` 为键注册构造器。
+2. 根据配置与构建选项创建具体 `LlmClient`。
+3. 对上层隐藏“不同协议构造参数差异”。
+
+当前默认注册：
+
+1. `openai_compatible -> OpenAICompatibleClient`
+2. `anthropic -> AnthropicClient`
+
+关键价值：
+
+1. 主流程装配不再写协议分支硬编码。
+2. 新协议扩展时只需新增 Client 并注册构造器。
+
+##### 新协议厂商接入步骤（工程落地）
+当厂商协议**不兼容 OpenAI/Anthropic** 时，按以下顺序接入：
+
+1. 新增协议客户端类
+   - 在 `src/ai/llm/` 下新增 `xxx_client.h/.cc`，继承 `LlmClient`。
+   - 实现 `Complete(...)` / `StreamComplete(...)`，完成该协议的请求构建、响应解析、错误分类。
+2. 扩展配置结构
+   - 在 `LlmProviderSettings` 中新增对应协议配置块（如 `gemini`）。
+   - 同步扩展 YAML 解析与配置校验（必填字段、超时、版本等）。
+3. 在工厂注册构造器
+   - 在 `LlmClientFactory::BuildDefault()` 中新增 `Register("xxx", creator)`。
+   - `creator` 负责把 `provider.xxx` 配置映射为该客户端构造参数，并注入 `BuildOptions`（`api_key_provider`、重试次数）。
+4. 在配置中声明 provider 实例
+   - `ai.llm.providers[]` 新增一项：`id/type/enabled/default_model/...`。
+   - `type` 必须与工厂注册名一致（例如 `type: gemini`）。
+5. （可选）接入 provider 级 key 池
+   - 若该协议也支持单 key 重试切换，可直接复用 `ApiKeyProvider/ProviderKeyPool` 注入机制。
+
+补充：若新厂商本身兼容 OpenAI 协议，则无需新建协议客户端，直接新增一个 `type=openai_compatible` 的 provider 配置即可。
+
+##### `llm_client_factory` 关键方法作用
+1. `BuildDefault()`
+   - 构建“默认注册表”，把内置协议类型映射到对应构造器。
+   - 当前默认包含 `openai_compatible` 与 `anthropic`。
+2. `Register(provider_type, creator)`
+   - 向工厂写入 `provider_type -> creator` 映射。
+   - 新协议扩展的核心入口（不改 `main` 分支逻辑）。
+3. `Create(provider, options, error)`
+   - 根据 `provider.type` 查找构造器并创建 `LlmClient` 实例。
+   - 查不到构造器时返回 `unsupported provider type`，启动期 fail-fast。
+
+##### 面试问答记录（仅 2.2.1 的设计模式）
+**Q：`llm_client_factory` 这一节用了哪些设计模式？**
+
+**A（可直接回答）：**
+
+`llm_client_factory` 这一节核心是“注册式工厂”，主要包含两层模式：
+
+1. Factory（工厂模式）
+   - `Create(provider, options, error)` 负责按 `provider.type` 创建具体 `LlmClient`。
+   - 作用：把对象创建逻辑从 `main` 中抽离，避免大量协议分支判断。
+
+2. Registry（注册表模式，工厂内部）
+   - `Register(provider_type, creator)` 把构造器保存到 `provider_type -> creator` 映射表。
+   - 作用：新增协议时只需注册新构造器，不改主创建流程。
+
+一句话总结：  
+这一节是“Factory + 内部 Registry”的注册式工厂实现，目标是让协议扩展可插拔、主流程无分支膨胀。
+
+#### 2.2.2 `llm_client_registry`（Provider 实例注册层）
+职责：
+
+1. 维护运行时目录：`provider_id -> LlmProviderEntry`。
+2. 提供 `Register(entry, error)`：启动期写入一个 provider 实例条目。
+3. 提供 `Find(provider_id, out)`：请求期按 ID 查找目标 provider。
+4. 提供 `Size()`：用于启动期“至少有一个可用 provider”校验。
+5. 提供基础防御校验：
+   - `provider_id` 不能为空；
+   - `client` 不能为空；
+   - `provider_id` 不能重复（避免路由歧义）。
+
+条目内容（`LlmProviderEntry`）：
+
+1. `provider_id`：路由主键。
+2. `provider_type`：协议类型（观测与调试字段）。
+3. `default_model`：请求未显式指定模型时的兜底值。
+4. `client`：真正执行请求的客户端对象。
+
+在调用链中的位置：
+
+1. 启动期：`main` 先通过 `factory.Create(...)` 创建 client，再 `registry.Register(...)` 存入目录。
+2. 请求期：`llm_router.Route(...)` 通过 `registry.Find(...)` 取出目标条目，返回给 `ChatService` 执行。
+
+关键价值：
+
+1. 启动期创建一次，运行期多请求复用。
+2. 路由层和业务层都只依赖 registry，不依赖 `main` 局部变量。
+
+为什么这个类“看起来简单但必须存在”：
+
+1. 消除“对象创建”和“对象查找”的耦合。
+   - `Factory` 负责“怎么创建”，`Registry` 负责“创建后放哪、怎么查”。
+2. 避免把 provider 容器塞进 `main` 并向下层传递。
+   - 若没有 registry，`Router/Service` 要依赖 `main` 的局部数据结构，层次会反向耦合。
+3. 给路由层一个稳定抽象边界。
+   - `Router` 不关心 client 怎么创建，只关心 `provider_id -> entry` 是否可解析。
+4. 便于后续演进。
+   - 后续要加热更新、禁用 provider、多租户视图时，可以在 registry 层扩展，而不改 `Factory/Router` 主体逻辑。
+5. 启动期 fail-fast 更清晰。
+   - 重复 ID、空 client 这类配置错误在注册阶段就能失败，不会拖到请求期才暴露。
+
+#### 2.2.3 `llm_router`（请求级路由决策层）
+路由优先级：
+
+1. 请求显式 `provider`（最高优先级）。
+2. `model -> provider_id` 映射（`model_map`）。
+3. `default_provider_id`（最终兜底）。
+
+路由输出：
+
+1. 命中 `provider_id`
+2. 命中 `provider_type`
+3. 最终 `model`
+4. 对应 `client` 指针
+
+它和 HTTP 路由的关系（便于理解）：
+
+1. HTTP 路由解决“哪个接口处理请求”（例如 `/api/v1/chat/completions`）。
+2. `LlmRouter` 解决“这个接口内部由哪个模型通道执行请求”。
+3. 可以理解为：在应用层新增了一层“模型通道选择路由”。
+
+核心方法：
+
+1. `Route(requested_provider_id, requested_model, out, error)`
+   - 完整决策入口：
+     - 先选 provider（显式 provider > model_map > default_provider）；
+     - 再查 registry 获取 provider 条目；
+     - 最后确定 model（请求 model 或 provider.default_model）。
+   - 输出 `LlmRouteResult`，供 `ChatService` 直接执行。
+2. `ResolveProvider(provider_id, out)`
+   - 工具查询入口，只按 ID 查 provider 条目；
+   - 不做 model_map/default_provider 决策，不产出完整路由结果。
+
+在调用链中的位置：
+
+1. 同步路径：
+   - `ChatService::Complete(...)` 先调用 `m_llm_router->Route(...)`；
+   - 路由成功后再调用 `route.client->Complete(...)`。
+2. 流式路径：
+   - `ChatService::StreamComplete(...)` 同样先 `Route(...)`；
+   - 成功后调用 `route.client->StreamComplete(...)`；
+   - `start` 事件里回填命中的 `provider/model`，便于前端观测。
+
+失败分支（会快速返回 4xx）：
+
+1. registry 为空：`llm registry is null`。
+2. 最终 provider 为空：`provider is empty`。
+3. provider 未注册：`provider not found: ...`。
+4. 最终 model 为空：`model is empty for provider: ...`。
+
+关键价值：
+
+1. 把“配置决策逻辑”集中在一处，避免散落到业务代码。
+2. 为后续按租户、按成本、按灰度做更复杂路由留出扩展位。
+3. 让业务编排层（`ChatService`）只关心“调用谁”，不关心“怎么选谁”。
+
+#### 2.2.4 `api_key_provider + provider_key_pool`（协议无关 Key 池层）
+`ApiKeyProvider` 抽象接口：
+
+1. `AcquireCandidates(max_candidates)`
+2. `ReportSuccess(key_id)`
+3. `ReportFailure(key_id, failure_type)`
+
+`ProviderKeyPool` 实现能力：
+
+1. 按 `provider_id` 加载可用 key。
+2. 按 `priority + weight` 选择候选 key。
+3. 失败后按类型做冷却（短冷却/长冷却）。
+4. 周期热加载 DB（reload loop）。
+5. 成功/失败状态实时回写 DB。
+
+接口语义（请求内视角）：
+
+1. `AcquireCandidates(max_candidates)`
+   - 在一次 LLM 请求开始前返回“候选 key 序列”。
+   - 该序列是有顺序的，客户端会按顺序尝试（失败可换 key 重试）。
+2. `ReportSuccess(key_id)`
+   - 某个 key 本次成功，清理其失败态/冷却态。
+3. `ReportFailure(key_id, failure_type)`
+   - 某个 key 本次失败，按失败类型打上冷却并回写状态。
+
+`ProviderKeyPool` 生命周期：
+
+1. 启动 `Start()`
+   - 先 `ReloadOnce()` 同步加载一次，确保启动后立即可用；
+   - 再启动后台线程 `ReloadLoop()` 周期刷新。
+2. 运行期
+   - 请求线程并发调用 `AcquireCandidates/ReportSuccess/ReportFailure`；
+   - 通过互斥锁保护运行时快照与轮询游标。
+3. 停机 `Stop()`
+   - 设置 `m_running=false` 并 `join` 后台线程，保证干净退出。
+
+候选选择算法（`BuildCandidatesLocked`）：
+
+1. 先过滤不可用 key
+   - 空 key；
+   - 仍在冷却窗口内的 key。
+2. 再按 `priority` 分组（高优先级先出）。
+3. 组内按 `weight` 扩展调度表（权重大出现次数多）。
+4. 组内用游标轮转起点，避免每次都打到同一把 key。
+5. 跨组按优先级依次填满 `max_candidates`。
+
+失败类型与冷却策略：
+
+1. `AUTH_ERROR` 走长冷却（通常代表 key 无效/权限问题）。
+2. 其余错误默认短冷却（网络、限流、服务端抖动等）。
+3. 冷却写入采用“取最大值”策略，防止并发回报把冷却时间回退。
+
+与协议客户端的衔接（统一实现）：
+
+1. OpenAI-Compatible 与 Anthropic 在请求前都先拿候选 key。
+2. 请求成功都上报 `ReportSuccess`。
+3. 可重试失败都上报 `ReportFailure` 并进入下一候选。
+4. 流式场景若已输出部分 token，会禁止自动换 key 重试，避免重复输出。
+
+主流程装配关系（`main`）：
+
+1. 仅当 provider 开启 `key_pool.enabled` 才尝试创建 `ProviderKeyPool`。
+2. 且 `ProviderKeyPool` 绑定 `provider_id`，不同 provider 之间状态隔离。
+3. `Start()` 成功后通过 `BuildOptions.api_key_provider` 注入到对应 client。
+4. 注入失败或仓库初始化失败会降级到单 `api_key`，不阻塞其他 provider。
+
+关键价值：
+
+1. OpenAI-Compatible 与 Anthropic 共用同一 key 池机制。
+2. key 池从“协议特化”升级为“provider 实例特化”。
+3. 为后续新增协议（如 Gemini）提供直接复用能力。
+4. 把“key 选择/冷却/重试反馈”从协议实现中抽离，提升可维护性。
+
+#### 2.2.5 `api_key_pool_repository`（Key 池持久化层）
+职责：
+
+1. 维护 `llm_api_keys` 表结构（`CREATE TABLE IF NOT EXISTS`）。
+2. 加载指定 `provider_id` 的启用 key。
+3. 回写 key 成功/失败状态（`fail_count / last_error / cooldown`）。
+
+说明：
+
+1. `llm_api_keys.provider` 列语义为 `provider_id`。
+2. 表为空时 key 池不会报错，但无候选 key；会回退到单 `api_key`（若配置了）。
+
+##### API Key 池补充：SQL 存储结构、调度过程、调度算法
+1. SQL 存储结构（`llm_api_keys`）
+   - 主键与归属：`id`、`provider(provider_id)`、`name`
+   - key 基础配置：`api_key`、`enabled`、`priority`、`weight`
+   - 运行时健康状态：`cooldown_until_ms`、`fail_count`、`last_error_code`、`last_error_at_ms`
+   - 审计时间：`created_at_ms`、`updated_at_ms`
+   - 索引：`(provider, enabled, priority)`、`(provider, cooldown_until_ms)`
+2. 调度过程（单次请求完整链路）
+   - 启动阶段：`ProviderKeyPool::Start()` 首次 `ReloadOnce` 从 DB 拉取该 `provider_id` 的 key 快照。
+   - 请求开始：协议客户端调用 `AcquireCandidates(max_candidates)` 获取候选序列。
+   - 候选尝试：按顺序发请求，失败时根据错误类型决定是否重试下一候选。
+   - 失败回报：调用 `ReportFailure(key_id, type)`，内存打冷却并回写 DB 状态。
+   - 成功回报：调用 `ReportSuccess(key_id)`，清理冷却并回写成功状态。
+   - 后台维护：`ReloadLoop` 按间隔刷新 key 列表，保持与 DB 配置同步。
+3. 调度算法（`BuildCandidatesLocked`）
+   - 第一步：过滤空 key 与冷却中的 key。
+   - 第二步：按 `priority` 分组，高优先级优先出队。
+   - 第三步：同优先级按 `weight` 扩展调度表（权重大出现次数多）。
+   - 第四步：通过组内游标轮转起点，避免长期命中同一 key。
+   - 第五步：跨优先级组依次填充，直到达到 `max_candidates`。
+4. 失败冷却策略
+   - `AUTH_ERROR` 使用长冷却（通常代表 key 无效/权限问题）。
+   - 其他错误默认短冷却（网络/限流/服务抖动等）。
+   - 冷却回写使用 `GREATEST(old, new)`，避免并发上报导致冷却回退。
+
+---
+
+### 3. 当前请求链路（第五阶段）
+以 `/api/v1/chat/completions` 为例：
+
+1. HTTP 层解析 `provider/model/message`。
+2. `ChatService` 调 `LlmRouter::Route(...)` 得到路由结果。
+3. 用 `route.client` 执行 `Complete/StreamComplete`。
+4. 响应体回填 `provider/model`（可观测本次命中）。
+5. 摘要刷新调用复用同一条路由结果对应 client。
+
+相比第四阶段的变化点：
+
+1. 业务层增加“请求期 provider 决策”，其余上下文策略（summary/recent/recall）不变。
+2. 路由决策独立成模块，不把 provider 逻辑塞进 `ChatService`。
+
+---
+
+### 4. 配置体系重构（`ai.provider.type` -> `ai.llm.*`）
+#### 4.1 新配置结构
 
 1. `ai.llm.providers[]`
-   - 每项包含 `id/type/enabled/default_model`
-   - OpenAI-Compatible 项包含：`base_url/api_key/timeout/key_pool`
-   - Anthropic 项包含：`base_url/api_key/api_version/timeout/key_pool`
+   - `id/type/enabled/default_model`
+   - OpenAI-Compatible：`base_url/api_key/timeout/key_pool`
+   - Anthropic：`base_url/api_key/api_version/timeout/key_pool`
 2. `ai.llm.routing.default_provider_id`
 3. `ai.llm.routing.model_map`
 
-#### 3.2 启动校验升级
-`Validate()` 新增多 Provider 规则：
+#### 4.2 校验规则（启动 fail-fast）
 
-1. providers 不能为空，且至少有一个 enabled。
+1. providers 非空，且至少有一个 enabled。
 2. provider.id 唯一且非空。
-3. provider.type 必须是 `openai_compatible` 或 `anthropic`。
-4. `default_provider_id` 必须指向 enabled provider。
-5. `model_map` 里的 provider_id 必须有效且可用。
-6. 各 provider 的协议字段与 key 池字段分别校验。
+3. provider.type 必须是 `openai_compatible | anthropic`。
+4. `default_provider_id` 必须命中 enabled provider。
+5. `model_map` 指向的 provider 必须有效。
+6. 各协议必要字段 + key_pool 参数完整性校验。
 
 ---
 
-### 4. 主流程装配改造（`main.cc`）
-主线程启动装配链路改为：
+### 5. 启动装配与降级策略（`main.cc`）
+第五阶段主流程装配链路：
 
 1. 读取 `LlmSettings`（providers + routing）。
 2. 若存在任意启用 `key_pool` 的 provider，初始化 `ApiKeyPoolRepository`。
-3. 遍历 `providers[]`：
-   - 根据 `provider.type` 通过 `LlmClientFactory` 创建客户端
-   - provider 若启用 key_pool，则创建 `ProviderKeyPool(provider.id)` 并注入
-   - 注册到 `LlmClientRegistry`
-4. 基于 registry + routing 构建 `LlmRouter`。
-5. 将 `LlmRouter` 注入 `ChatService`。
-6. 停机时遍历停止全部 `ProviderKeyPool` 实例。
+3. 遍历 enabled providers：
+   - 可选创建 `ProviderKeyPool(provider.id)` 并注入 BuildOptions。
+   - 调 `LlmClientFactory::Create(...)` 构建客户端。
+   - 注册到 `LlmClientRegistry`。
+4. 基于 registry + routing 创建 `LlmRouter`。
+5. 注入 `ChatService` 使用。
+6. 停机时逐个 `Stop()` 所有 `ProviderKeyPool`。
 
-工程效果：
+降级语义：
 
-1. 主流程不再写死 `if (provider == xxx) new Client`。
-2. Provider 装配具备可扩展性（新增协议只需注册工厂）。
-
----
-
-### 5. 请求链路改造（HTTP -> Service -> LLM）
-#### 5.1 HTTP 层
-`BuildChatRequest()` 新增可选字段：
-
-1. `provider`
-2. `model`（保留）
-
-响应中新增 `provider` 回传，便于调试和观测实际命中的上游。
-
-#### 5.2 ChatService 层
-`ChatService` 从“单 `m_llm_client`”改为“`m_llm_router`”：
-
-1. 每次请求先调用 router 得到 `route_result`（provider_id/model/client）。
-2. 同步与流式分别调用 `route_result.client`。
-3. 响应对象回填 `provider`。
-4. 摘要调用 `MaybeRefreshSummary` 时复用当前路由命中的 client。
+1. key 池仓库初始化失败：记录告警，回退单 key 模式。
+2. 某 provider key 池启动失败：仅该 provider 回退单 key，不影响其他 provider。
+3. 请求时无可用 key：该请求失败，不影响服务整体存活。
 
 ---
 
-### 6. 协议无关 API Key 池设计（provider_id 级隔离）
-#### 6.1 存储与查询语义
-`ApiKeyPoolRepository` 读取条件采用 `provider_id` 维度：
-
-1. `LoadEnabledKeys(provider_id, ...)`
-2. `ApiKeyRecord.provider_id`
-
-`llm_api_keys.provider` 字段在语义上改为“provider_id”。
-
-#### 6.2 运行时池隔离
-新增统一抽象与实现：
-
-1. `ApiKeyProvider`：协议无关候选 key 获取/成功失败上报接口。
-2. `ProviderKeyPool`：通用运行时 key 池，实现热加载、优先级+权重选择、冷却与状态回写。
-
-`ProviderKeyPool` 构造参数采用 `provider_id`：
-
-1. 每个 provider 对应一个独立 key 池实例（不限协议）。
-2. 冷却、失败计数、重试候选都在 provider 内隔离。
-3. 不同 provider 之间不会互相抢 key、污染状态。
-4. `OpenAICompatibleClient` 与 `AnthropicClient` 都通过同一接口接入重试与切 key。
-
----
-
-### 7. 联调客户端增强
-`ai_auth_chat_client` 增加 provider 指定能力：
+### 6. 客户端联调入口
+`ai_auth_chat_client` 已支持 provider 选择：
 
 1. 启动参数：`--provider <id>`
 2. 交互命令：`/provider <id>`
-3. 发送 payload 自动带 `provider` 字段（可选）
+3. 请求 payload 自动携带 `provider`（可选）
 
-这样可以直接验证同一服务实例下多 provider 的请求级切换。
+这让“同服务实例下多 provider 请求级切换”可直接验证。
 
 ---
 
-### 8. 本阶段验证
+### 7. 测试与验证
 已完成：
 
 1. 编译验证
    - `cmake --build build --target ai_chat_server ai_auth_chat_client -j8`
    - 结果：通过
-2. 静态链路验证
-   - `main -> factory -> registry -> router -> chat_service` 接线完整
-   - 通用 key 池按 `provider.id` 创建并在停机阶段逐个释放
-3. 协议层验证
-   - HTTP 请求可选携带 `provider`
-   - 响应可回显实际 `provider`
-4. 运行时冒烟验证
-   - `timeout 12 ./bin/ai_chat_server -c ./src/ai/config/ai_server.example.yml`
+2. 启动烟测
+   - `timeout 10 ./bin/ai_chat_server -c ./src/ai/config/ai_server.example.yml`
    - `curl http://127.0.0.1:8080/api/v1/healthz` 返回 `{"ok":true,...}`
+3. 静态链路检查
+   - `main -> factory -> registry -> router -> chat_service` 接线完整
+   - `ProviderKeyPool` 已按 `provider.id` 维度装配和停机释放
+
+---
+
+### 8. 当前取舍与已知限制（第五阶段）
+#### 当前取舍
+
+1. key 池表结构仍由代码 `EnsureSchema()` 兜底维护（未统一到手工 SQL 初始化脚本）。
+2. provider 类型当前仅支持 `openai_compatible` 与 `anthropic`。
+3. key 池读取与状态回写仍是同步 DB 调用（QPS 可接受前提下优先简单可靠）。
+
+#### 已知限制
+
+1. `llm_api_keys` 为空时，key 池仅能回退单 `api_key`，无法发挥池化容灾价值。
+2. key 池未做跨节点共享调度策略（当前以单进程实例内调度为主）。
+3. 目前未引入“按成本/延迟”动态路由，仅支持显式 provider + model_map + default。
 
 ---
 
 ### 9. 阶段总结
 第五阶段完成了从“单协议单实例”到“多协议多实例路由”的架构跃迁：
 
-1. 把 Provider 选择从“启动时决策”下沉到“请求时决策”。
-2. 用注册式工厂收敛了协议扩展点，降低 main 装配耦合。
-3. 将 key 池从 OpenAI 特化抽象为协议无关实现，并与 Anthropic 对齐。
+1. Provider 选择从“启动时决策”下沉到“请求时决策”。
+2. 通过 Factory + Registry + Router 形成清晰分层，降低主流程耦合。
+3. key 池从 OpenAI 特化抽象为协议无关实现，并与 Anthropic 对齐。
 4. key 池按 provider_id 隔离，避免跨通道状态污染。
-5. 为后续新增协议（如 Gemini）保留统一扩展位：新增 Client + Factory 注册即可复用现有 key 池机制。
+5. 后续新增协议（如 Gemini）只需新增 Client + Factory 注册，即可复用现有 key 池框架。
 
 ### 10. 下一阶段
 第六阶段建议优先推进：

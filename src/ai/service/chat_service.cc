@@ -120,6 +120,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
 
     ConversationContext context = SnapshotContext(request.sid, conversation_id);
 
+    // 第五阶段：按请求 provider/model 动态路由到目标客户端。
     llm::LlmRouteResult route;
     if (!m_llm_router->Route(request.provider, request.model, route, error))
     {
@@ -202,6 +203,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
     response.conversation_id = conversation_id;
     response.reply = assistant_message.content;
     response.model = llm_response.model;
+    // 回填本次命中的 provider_id，供调用方确认路由结果。
     response.provider = route.provider_id;
     response.finish_reason = llm_response.finish_reason;
     response.created_at_ms = assistant_message.created_at_ms;
@@ -256,6 +258,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
 
     ConversationContext context = SnapshotContext(request.sid, conversation_id);
 
+    // 第五阶段：流式路径与同步路径复用同一套 provider/model 路由策略。
     llm::LlmRouteResult route;
     if (!m_llm_router->Route(request.provider, request.model, route, error))
     {
@@ -292,6 +295,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     nlohmann::json start;
     start["conversation_id"] = conversation_id;
     start["created_at_ms"] = user_message.created_at_ms;
+    // 在 stream start 事件回传命中的 provider/model，方便前端做链路展示。
     start["provider"] = route.provider_id;
     start["model"] = llm_request.model;
     if (!emit("start", start.dump()))

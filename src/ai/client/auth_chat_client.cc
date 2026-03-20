@@ -14,18 +14,36 @@
 namespace
 {
 
+/**
+ * @brief 客户端运行参数。
+ * @details
+ * 第五阶段新增 `provider` 字段，用于“请求级 Provider 选择”：
+ * - 为空：交给服务端 Router 按 model_map/default_provider_id 自动路由；
+ * - 非空：请求显式指定 provider_id，优先命中该 Provider。
+ */
 struct Options
 {
+    /** @brief 服务端基地址。 */
     std::string base_url = "http://127.0.0.1:8080";
+    /** @brief 请求显式模型名；为空时由服务端使用默认模型。 */
     std::string model = "";
+    /** @brief 请求显式 provider_id；为空表示使用服务端路由默认策略。 */
     std::string provider = "";
+    /** @brief 初始会话 ID（可选）。 */
     std::string conversation_id = "";
+    /** @brief 自动登录用户名（可选）。 */
     std::string username = "";
+    /** @brief 自动登录密码（可选）。 */
     std::string password = "";
+    /** @brief 启动即注入 bearer token（可选）。 */
     std::string token = "";
+    /** @brief 采样温度。 */
     double temperature = 0.7;
+    /** @brief 最大生成 token。 */
     uint32_t max_tokens = 512;
+    /** @brief 是否启用流式模式。 */
     bool stream = false;
+    /** @brief 自动流程中先注册再登录。 */
     bool register_first = false;
 };
 
@@ -161,6 +179,7 @@ bool ParseArgs(int argc, char** argv, Options& opts)
         }
         if (arg == "--provider" && i + 1 < argc)
         {
+            // 第五阶段：启动参数显式指定 provider_id（请求级路由）。
             opts.provider = argv[++i];
             continue;
         }
@@ -552,6 +571,17 @@ class ApiClient
     CURL* m_curl = nullptr;
 };
 
+/**
+ * @brief 组装聊天请求 JSON 负载。
+ * @param message 用户输入消息。
+ * @param opts 客户端运行参数（含 model/provider/temperature/max_tokens）。
+ * @param conversation_id 当前会话 ID（可空）。
+ * @return 发往 `/api/v1/chat/completions` 或 `/api/v1/chat/stream` 的 JSON 对象。
+ * @details
+ * 第五阶段关键字段：
+ * - `provider`：仅当 `opts.provider` 非空时写入，触发服务端“显式 provider 路由”。
+ * - `model`：仅当 `opts.model` 非空时写入，供服务端 Router 做 model->provider 映射或直传模型。
+ */
 nlohmann::json BuildChatPayload(const std::string& message,
                                 const Options& opts,
                                 const std::string& conversation_id)
@@ -567,6 +597,7 @@ nlohmann::json BuildChatPayload(const std::string& message,
     }
     if (!opts.provider.empty())
     {
+        // 第五阶段：当客户端显式给出 provider 时，透传到服务端由 Router 优先采用。
         payload["provider"] = opts.provider;
     }
 
@@ -723,6 +754,7 @@ int main(int argc, char** argv)
         std::cout << "Auth: " << (client.HasBearerToken() ? "bearer" : "unauthenticated") << "\n";
         if (!opts.provider.empty())
         {
+            // 显示当前会话默认 provider，便于联调观察路由命中。
             std::cout << "Provider: " << opts.provider << "\n";
         }
         if (!opts.conversation_id.empty())
@@ -935,6 +967,7 @@ int main(int argc, char** argv)
                 }
                 else
                 {
+                    // 第五阶段：交互式切换后续请求的 provider_id（立即生效）。
                     opts.provider = provider;
                     std::cout << "Provider set to " << opts.provider << "\n";
                 }

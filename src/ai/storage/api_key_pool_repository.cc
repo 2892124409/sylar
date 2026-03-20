@@ -12,16 +12,25 @@ namespace storage
 
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 
+/**
+ * @brief 构造 API Key 池仓库。
+ */
 ApiKeyPoolRepository::ApiKeyPoolRepository(const MysqlConnectionPool::ptr& pool)
     : m_pool(pool)
     , m_initialized(false)
 {
 }
 
+/**
+ * @brief 析构函数。
+ */
 ApiKeyPoolRepository::~ApiKeyPoolRepository()
 {
 }
 
+/**
+ * @brief 初始化仓库并确保表结构存在。
+ */
 bool ApiKeyPoolRepository::Init(std::string& error)
 {
     if (m_initialized)
@@ -41,6 +50,11 @@ bool ApiKeyPoolRepository::Init(std::string& error)
     return true;
 }
 
+/**
+ * @brief 加载指定 provider_id 的启用 key。
+ * @details
+ * 查询按 `priority DESC, id ASC` 排序，方便上层优先选择高优先级 key。
+ */
 bool ApiKeyPoolRepository::LoadEnabledKeys(const std::string& provider_id,
                                            std::vector<ApiKeyRecord>& out,
                                            std::string& error)
@@ -99,6 +113,11 @@ bool ApiKeyPoolRepository::LoadEnabledKeys(const std::string& provider_id,
     return true;
 }
 
+/**
+ * @brief 标记 key 成功。
+ * @details
+ * 成功后清空失败上下文，恢复该 key 的正常可用状态。
+ */
 bool ApiKeyPoolRepository::MarkKeySuccess(uint64_t key_id, uint64_t now_ms, std::string& error)
 {
     if (key_id == 0)
@@ -126,6 +145,13 @@ bool ApiKeyPoolRepository::MarkKeySuccess(uint64_t key_id, uint64_t now_ms, std:
     return true;
 }
 
+/**
+ * @brief 标记 key 失败。
+ * @details
+ * - fail_count 自增；
+ * - 记录 last_error_code / last_error_at_ms；
+ * - cooldown_until_ms 取最大值，避免较短冷却覆盖较长冷却。
+ */
 bool ApiKeyPoolRepository::MarkKeyFailure(uint64_t key_id,
                                           const std::string& error_code,
                                           uint64_t cooldown_until_ms,
@@ -164,6 +190,11 @@ bool ApiKeyPoolRepository::MarkKeyFailure(uint64_t key_id,
     return true;
 }
 
+/**
+ * @brief 幂等建表。
+ * @details
+ * `llm_api_keys.provider` 列在业务语义上存放 `provider_id`。
+ */
 bool ApiKeyPoolRepository::EnsureSchema(std::string& error)
 {
     ScopedMysqlConn conn(m_pool, 0, error);
@@ -195,6 +226,9 @@ bool ApiKeyPoolRepository::EnsureSchema(std::string& error)
     return ExecuteSql(conn.get(), kCreateKeysSql, error);
 }
 
+/**
+ * @brief 执行 SQL 并统一错误处理。
+ */
 bool ApiKeyPoolRepository::ExecuteSql(MYSQL* conn, const std::string& sql, std::string& error)
 {
     if (mysql_query(conn, sql.c_str()) != 0)
@@ -206,6 +240,11 @@ bool ApiKeyPoolRepository::ExecuteSql(MYSQL* conn, const std::string& sql, std::
     return true;
 }
 
+/**
+ * @brief SQL 字符串转义。
+ * @details
+ * 使用 `mysql_real_escape_string`，避免 SQL 拼接时注入风险。
+ */
 std::string ApiKeyPoolRepository::Escape(MYSQL* conn, const std::string& value)
 {
     std::string escaped;
