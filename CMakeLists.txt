@@ -3,9 +3,16 @@ cmake_minimum_required(VERSION 3.0)
 project(sylar)
 
 set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O0 -g -Wall -rdynamic -fPIC")
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# 编译选项（按构建类型控制优化级别）
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -rdynamic -fPIC")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -DNDEBUG")
 
 # 包含项目根目录
 include_directories(.)
@@ -42,8 +49,8 @@ add_library(sylar SHARED ${SYLAR_SOURCES})
 target_link_libraries(sylar yaml-cpp pthread dl)
 
 # 定义输出路径
-set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
-set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
+set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/bin)
+set(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR}/lib)
 
 # 编译测试程序
 add_executable(test_log tests/test_log.cc)
@@ -96,3 +103,8 @@ target_link_libraries(test_tcp_server sylar)
 add_executable(test_udp_server tests/test_udp_server.cc)
 target_link_libraries(test_udp_server sylar)
 
+add_executable(test_memorypool tests/test_memorypool.cc)
+target_link_libraries(test_memorypool pthread)
+
+add_executable(test_benchmark_fiber tests/test_benchmark_fiber.cc)
+target_link_libraries(test_benchmark_fiber sylar)

@@ -84,7 +84,8 @@ namespace sylar
     void Scheduler::start()
     {
         MutexType::Lock lock(m_mutex);
-        if (!m_stopping)
+        // 已经启动过（线程池非空）则直接返回，避免重复创建工作线程
+        if (!m_threads.empty())
         {
             return;
         }

@@ -233,7 +233,6 @@ namespace sylar
             return need_tickle;
         }
 
-    private:
         /// 调度器名称
         std::string m_name;
         /// 互斥锁

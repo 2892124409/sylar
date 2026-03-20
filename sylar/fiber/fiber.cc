@@ -3,6 +3,7 @@
 #include "sylar/base/config.h"
 #include "sylar/base/macro.h"
 #include <atomic>
+#include <cstdlib>
 
 namespace sylar
 {
@@ -16,9 +17,9 @@ namespace sylar
     // 线程局部变量：当前线程的主协程（调度协程）
     static thread_local Fiber::ptr t_thread_fiber = nullptr;
 
-    // 配置项：默认协程栈大小 (128KB)
+    // 配置项：默认协程栈大小 (1M)
     static ConfigVar<uint32_t>::ptr g_fiber_stack_size =
-        Config::Lookup<uint32_t>("fiber.stack_size", 128 * 1024, "fiber stack size");
+        Config::Lookup<uint32_t>("fiber.stack_size", 1024 * 1024, "fiber stack size");
 
     /**
      * @brief 简单的栈内存分配器（后续可优化为内存池）
@@ -176,7 +177,7 @@ namespace sylar
      */
     void Fiber::yield()
     {
-        SYLAR_ASSERT(m_state == EXEC || m_state == TERM || m_state == EXCEPT);
+        SYLAR_ASSERT(m_state == EXEC || m_state == READY || m_state == TERM || m_state == EXCEPT);
 
         Fiber *scheduler_fiber = nullptr;
         if (m_runInScheduler)
@@ -199,7 +200,8 @@ namespace sylar
             SetThis(t_thread_fiber.get());
         }
 
-        if (m_state != TERM && m_state != EXCEPT)
+        // READY/TERM/EXCEPT 由调用方决定，只有仍为 EXEC 时才落入 HOLD
+        if (m_state == EXEC)
         {
             m_state = HOLD;
         }

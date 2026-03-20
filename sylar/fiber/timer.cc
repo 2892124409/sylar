@@ -230,7 +230,8 @@ namespace sylar
             return;
         }
 
-        Timer::ptr now_timer(new Timer(now_ms));
+        Timer now_timer_value(now_ms);
+        Timer::ptr now_timer(&now_timer_value, [](Timer *) {});
         /**
          * 2. 确定过期范围：
          * - 如果时间被往回调了，认为全部定时器都“由于时空混乱”而立即过期。
