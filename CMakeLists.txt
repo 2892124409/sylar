@@ -14,6 +14,25 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -rdynamic -fPIC")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -DNDEBUG")
 
+# 协程上下文后端：libco_asm / ucontext
+set(SYLAR_FIBER_CONTEXT_BACKEND "libco_asm" CACHE STRING "Fiber context backend: libco_asm or ucontext")
+set_property(CACHE SYLAR_FIBER_CONTEXT_BACKEND PROPERTY STRINGS libco_asm ucontext)
+
+if(SYLAR_FIBER_CONTEXT_BACKEND STREQUAL "libco_asm")
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "libco_asm backend only supports Linux")
+    endif()
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        message(FATAL_ERROR "libco_asm backend only supports x86_64")
+    endif()
+    enable_language(ASM)
+    add_definitions(-DSYLAR_FIBER_CONTEXT_BACKEND_LIBCO_ASM)
+elseif(SYLAR_FIBER_CONTEXT_BACKEND STREQUAL "ucontext")
+    add_definitions(-DSYLAR_FIBER_CONTEXT_BACKEND_UCONTEXT)
+else()
+    message(FATAL_ERROR "Invalid SYLAR_FIBER_CONTEXT_BACKEND: ${SYLAR_FIBER_CONTEXT_BACKEND}")
+endif()
+
 # 包含项目根目录
 include_directories(.)
 
@@ -28,6 +47,7 @@ set(SYLAR_SOURCES
     sylar/concurrency/mutex/semaphore.cc
     sylar/concurrency/thread.cc
     sylar/fiber/fiber.cc
+    sylar/fiber/context.cc
     sylar/fiber/scheduler.cc
     sylar/fiber/iomanager.cc
     sylar/fiber/timer.cc
@@ -41,6 +61,10 @@ set(SYLAR_SOURCES
     sylar/net/tcp_server.cc
     sylar/net/udp_server.cc
 )
+
+if(SYLAR_FIBER_CONTEXT_BACKEND STREQUAL "libco_asm")
+    list(APPEND SYLAR_SOURCES sylar/fiber/coctx_swap_x86_64.S)
+endif()
 
 # 生成共享库 libsylar.so
 add_library(sylar SHARED ${SYLAR_SOURCES})

@@ -46,11 +46,7 @@ namespace sylar
         m_state = EXEC; // 主协程一创建就在运行中
         SetThis(this);  // 设置当前正在运行的协程
 
-        // getcontext: 抓取当前 CPU 上下文存入 当前Fiber实例的私有成员变量m_ctx
-        if (getcontext(&m_ctx))
-        {
-            SYLAR_ASSERT2(false, "getcontext");
-        }
+        fiber_context::InitMainContext(m_ctx);
 
         ++s_fiber_count;     // 统计当前进程中活着的协程总数
         m_id = ++s_fiber_id; // 让每个协程分配一个全局唯一的 ID
@@ -69,20 +65,8 @@ namespace sylar
         // 1. 为子协程分配独立的栈空间
         m_stack = StackAllocator::Alloc(m_stacksize);
 
-        // 2. 获取当前上下文副本，作为初始模板
-        if (getcontext(&m_ctx))
-        {
-            SYLAR_ASSERT2(false, "getcontext");
-        }
-
-        // 3. 修改上下文：指定该协程运行完后没有后继上下文（uc_link = nullptr）
-        m_ctx.uc_link = nullptr;
-        // 4. 修改上下文：指向我们分配的私有栈
-        m_ctx.uc_stack.ss_sp = m_stack;
-        m_ctx.uc_stack.ss_size = m_stacksize;
-
-        // 5. makecontext: 修改上下文，使其入口指向静态函数 MainFunc
-        makecontext(&m_ctx, &Fiber::MainFunc, 0);
+        // 2. 初始化子协程上下文入口为 MainFunc
+        fiber_context::InitChildContext(m_ctx, m_stack, m_stacksize, &Fiber::MainFunc);
 
         SYLAR_LOG_DEBUG(SYLAR_LOG_ROOT()) << "Fiber::Fiber sub id=" << m_id;
     }
@@ -122,16 +106,7 @@ namespace sylar
         SYLAR_ASSERT(m_state == TERM || m_state == EXCEPT || m_state == INIT);
         m_cb = cb;
 
-        if (getcontext(&m_ctx))
-        {
-            SYLAR_ASSERT2(false, "getcontext");
-        }
-
-        m_ctx.uc_link = nullptr;
-        m_ctx.uc_stack.ss_sp = m_stack;
-        m_ctx.uc_stack.ss_size = m_stacksize;
-
-        makecontext(&m_ctx, &Fiber::MainFunc, 0);
+        fiber_context::InitChildContext(m_ctx, m_stack, m_stacksize, &Fiber::MainFunc);
         m_state = READY;
     }
 
@@ -157,18 +132,12 @@ namespace sylar
         // 如果参与调度，则与调度协程切换；否则与主协程切换
         if (m_runInScheduler && scheduler_fiber)
         {
-            if (swapcontext(&scheduler_fiber->m_ctx, &m_ctx))
-            {
-                SYLAR_ASSERT2(false, "swapcontext");
-            }
+            fiber_context::SwapContext(scheduler_fiber->m_ctx, m_ctx);
         }
         else
         {
             SYLAR_ASSERT2(t_thread_fiber, "resume without thread main fiber");
-            if (swapcontext(&t_thread_fiber->m_ctx, &m_ctx))
-            {
-                SYLAR_ASSERT2(false, "swapcontext");
-            }
+            fiber_context::SwapContext(t_thread_fiber->m_ctx, m_ctx);
         }
     }
 
@@ -208,18 +177,12 @@ namespace sylar
 
         if (m_runInScheduler && scheduler_fiber)
         {
-            if (swapcontext(&m_ctx, &scheduler_fiber->m_ctx))
-            {
-                SYLAR_ASSERT2(false, "swapcontext");
-            }
+            fiber_context::SwapContext(m_ctx, scheduler_fiber->m_ctx);
         }
         else
         {
             SYLAR_ASSERT2(t_thread_fiber, "yield swap without thread main fiber");
-            if (swapcontext(&m_ctx, &t_thread_fiber->m_ctx))
-            {
-                SYLAR_ASSERT2(false, "swapcontext");
-            }
+            fiber_context::SwapContext(m_ctx, t_thread_fiber->m_ctx);
         }
     }
 
@@ -230,10 +193,7 @@ namespace sylar
     {
         SetThis(this);
         m_state = EXEC;
-        if (swapcontext(&t_thread_fiber->m_ctx, &m_ctx))
-        {
-            SYLAR_ASSERT2(false, "swapcontext");
-        }
+        fiber_context::SwapContext(t_thread_fiber->m_ctx, m_ctx);
     }
 
     /**
@@ -242,10 +202,7 @@ namespace sylar
     void Fiber::back()
     {
         SetThis(t_thread_fiber.get());
-        if (swapcontext(&m_ctx, &t_thread_fiber->m_ctx))
-        {
-            SYLAR_ASSERT2(false, "swapcontext");
-        }
+        fiber_context::SwapContext(m_ctx, t_thread_fiber->m_ctx);
     }
 
     void Fiber::SetThis(Fiber *f)

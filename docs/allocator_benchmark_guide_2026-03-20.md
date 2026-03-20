@@ -122,3 +122,13 @@ tests/run_allocator_bench.sh
 
 - `short` 在 4/8 线程下存在非 0 `avg_errors`（三组 allocator 都出现）。
 - 该现象主要由短连接风暴下的连接队列/超时压力导致，不是 allocator 单点问题。
+
+## 8. 当前决策（2026-03-20）
+
+- 结论：**暂不启用 jemalloc/tcmalloc 作为默认优化方案**，保持当前默认分配器配置。
+- 原因：
+  - 整体收益有限（全局平均维度下，`tcmalloc` 提升存在但幅度不大；`jemalloc` 基本持平）。
+  - `short` 连接风暴场景主要瓶颈不在 allocator，优化优先级应放在连接/调度/超时策略。
+- 后续策略：
+  - 保留本 benchmark 程序与脚本作为回归工具；
+  - 仅当生产 profiling 明确显示分配路径成为热点瓶颈时，再重新评估是否启用 allocator 替换。

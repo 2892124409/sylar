@@ -9,7 +9,7 @@
 
 #include <memory>
 #include <functional>
-#include <ucontext.h>
+#include "sylar/fiber/context.h"
 
 namespace sylar
 {
@@ -156,7 +156,7 @@ namespace sylar
         /// 协程状态
         State m_state = INIT;
         /// 协程上下文
-        ucontext_t m_ctx;
+        fiber_context::Context m_ctx;
         /// 协程栈地址
         void *m_stack = nullptr;
         /// 协程运行函数
