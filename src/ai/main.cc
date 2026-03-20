@@ -3,6 +3,10 @@
 #include "ai/middleware/auth_middleware.h"
 #include "ai/middleware/request_id_middleware.h"
 #include "ai/llm/anthropic_client.h"
+#include "ai/llm/llm_client_factory.h"
+#include "ai/llm/llm_client_registry.h"
+#include "ai/llm/llm_router.h"
+#include "ai/llm/provider_key_pool.h"
 #include "ai/llm/openai_compatible_client.h"
 #include "ai/rag/embedding_client.h"
 #include "ai/rag/rag_indexer.h"
@@ -11,6 +15,7 @@
 #include "ai/service/auth_service.h"
 #include "ai/service/chat_service.h"
 #include "ai/storage/async_mysql_writer.h"
+#include "ai/storage/api_key_pool_repository.h"
 #include "ai/storage/auth_repository.h"
 #include "ai/storage/chat_repository.h"
 #include "ai/storage/mysql_connection_pool.h"
@@ -32,6 +37,7 @@
 
 #include <atomic>
 #include <iostream>
+#include <unordered_map>
 #include <vector>
 
 /**
@@ -164,9 +170,7 @@ int main(int argc, char** argv)
     http::HttpFrameworkConfig::SetSessionEnabled(true);
 
     const ai::config::ServerSettings server_settings = ai::config::AiAppConfig::GetServerSettings();
-    const ai::config::ProviderSettings provider_settings = ai::config::AiAppConfig::GetProviderSettings();
-    const ai::config::OpenAICompatibleSettings openai_settings = ai::config::AiAppConfig::GetOpenAICompatibleSettings();
-    const ai::config::AnthropicSettings anthropic_settings = ai::config::AiAppConfig::GetAnthropicSettings();
+    const ai::config::LlmSettings llm_settings = ai::config::AiAppConfig::GetLlmSettings();
     const ai::config::ChatSettings chat_settings = ai::config::AiAppConfig::GetChatSettings();
     const ai::config::AuthSettings auth_settings = ai::config::AiAppConfig::GetAuthSettings();
     const ai::config::MysqlSettings mysql_settings = ai::config::AiAppConfig::GetMysqlSettings();
@@ -201,6 +205,29 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    ai::storage::ApiKeyPoolRepository::ptr api_key_pool_repository;
+    std::unordered_map<std::string, ai::llm::ProviderKeyPool::ptr> provider_key_pools;
+
+    bool need_key_pool_repo = false;
+    for (size_t i = 0; i < llm_settings.providers.size(); ++i)
+    {
+        const ai::config::LlmProviderSettings& provider = llm_settings.providers[i];
+        if (provider.enabled && provider.key_pool.enabled)
+        {
+            need_key_pool_repo = true;
+            break;
+        }
+    }
+    if (need_key_pool_repo)
+    {
+        api_key_pool_repository.reset(new ai::storage::ApiKeyPoolRepository(mysql_pool));
+        if (!api_key_pool_repository->Init(error))
+        {
+            BASE_LOG_WARN(g_logger) << "init api key pool repository failed, fallback to single key for all providers: " << error;
+            api_key_pool_repository.reset();
+        }
+    }
+
     /// @brief Step 6: 启动异步写入器（请求线程只入队，后台批量落库）。
     ai::storage::AsyncMySqlWriter::ptr async_writer(new ai::storage::AsyncMySqlWriter(mysql_pool, persist_settings));
     if (!async_writer->Start(error))
@@ -209,32 +236,69 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    /// @brief Step 7: 按 provider 类型创建具体 LLM Client。
-    /// @details
-    /// 业务层只依赖 LlmClient 抽象，provider 差异在 main 装配期收敛。
-    ai::llm::LlmClient::ptr llm_client;
-    std::string default_model;
-    if (provider_settings.type == "anthropic")
-    {
-        /// @brief 把应用层配置映射到 Anthropic 客户端配置对象。
-        ai::llm::AnthropicSettings settings;
-        settings.base_url = anthropic_settings.base_url;
-        settings.api_key = anthropic_settings.api_key;
-        settings.default_model = anthropic_settings.default_model;
-        settings.api_version = anthropic_settings.api_version;
-        settings.connect_timeout_ms = anthropic_settings.connect_timeout_ms;
-        settings.request_timeout_ms = anthropic_settings.request_timeout_ms;
+    /// @brief Step 7: 按 provider.type 通过注册工厂装配多 Provider 客户端。
+    ai::llm::LlmClientFactory llm_factory = ai::llm::LlmClientFactory::BuildDefault();
+    ai::llm::LlmClientRegistry::ptr llm_registry(new ai::llm::LlmClientRegistry());
 
-        llm_client.reset(new ai::llm::AnthropicClient(settings));
-        /// @brief API 默认模型用于未显式传 model 的请求。
-        default_model = anthropic_settings.default_model;
-    }
-    else
+    for (size_t i = 0; i < llm_settings.providers.size(); ++i)
     {
-        /// @note Validate 已保证 type 合法；非 anthropic 分支即 openai_compatible。
-        llm_client.reset(new ai::llm::OpenAICompatibleClient(openai_settings));
-        default_model = openai_settings.default_model;
+        const ai::config::LlmProviderSettings& provider = llm_settings.providers[i];
+        if (!provider.enabled)
+        {
+            continue;
+        }
+
+        ai::llm::LlmClientFactory::BuildOptions build_options;
+        if (provider.key_pool.enabled)
+        {
+            build_options.max_retry_per_request = provider.key_pool.max_retry_per_request;
+            if (api_key_pool_repository)
+            {
+                ai::llm::ProviderKeyPool::ptr key_pool(new ai::llm::ProviderKeyPool(api_key_pool_repository,
+                                                                                     provider.key_pool,
+                                                                                     provider.id));
+                std::string key_pool_error;
+                if (!key_pool->Start(key_pool_error))
+                {
+                    BASE_LOG_WARN(g_logger) << "start provider key pool failed, provider_id=" << provider.id
+                                            << " fallback to single key, error=" << key_pool_error;
+                }
+                else
+                {
+                    build_options.api_key_provider = key_pool;
+                    provider_key_pools[provider.id] = key_pool;
+                }
+            }
+        }
+
+        ai::llm::LlmClient::ptr llm_client = llm_factory.Create(provider, build_options, error);
+        if (!llm_client)
+        {
+            std::cerr << "create llm client failed, provider_id=" << provider.id << " error=" << error << std::endl;
+            return 1;
+        }
+
+        ai::llm::LlmProviderEntry entry;
+        entry.provider_id = provider.id;
+        entry.provider_type = provider.type;
+        entry.default_model = provider.default_model;
+        entry.client = llm_client;
+        if (!llm_registry->Register(entry, error))
+        {
+            std::cerr << "register llm provider failed, provider_id=" << provider.id << " error=" << error << std::endl;
+            return 1;
+        }
     }
+
+    if (llm_registry->Size() == 0)
+    {
+        std::cerr << "no enabled llm providers loaded" << std::endl;
+        return 1;
+    }
+
+    ai::llm::LlmRouter::ptr llm_router(new ai::llm::LlmRouter(llm_registry,
+                                                              llm_settings.routing.default_provider_id,
+                                                              llm_settings.routing.model_to_provider));
 
     /// @brief Step 8: 组装账号与对话业务服务。
     ai::service::AuthService::ptr auth_service(new ai::service::AuthService(auth_settings, auth_repository));
@@ -286,7 +350,7 @@ int main(int argc, char** argv)
 
     /// @brief 组装业务编排核心 ChatService。
     ai::service::ChatService::ptr chat_service(
-        new ai::service::ChatService(chat_settings, llm_client, chat_repository, async_writer, rag_settings, rag_retriever, rag_indexer));
+        new ai::service::ChatService(chat_settings, llm_router, chat_repository, async_writer, rag_settings, rag_retriever, rag_indexer));
 
     /// @brief Step 9: 按配置创建 HTTP worker（benchmark 同款模式）。
     /// @details
@@ -334,7 +398,7 @@ int main(int argc, char** argv)
     server->addMiddleware(http::Middleware::ptr(new ai::middleware::AuthMiddleware(auth_service)));
 
     /// @brief Step 14: 注册 AI 业务路由（health/completions/stream/history/auth）。
-    ai::api::RegisterAiHttpApi(server, auth_service, chat_service, chat_settings, default_model);
+    ai::api::RegisterAiHttpApi(server, auth_service, chat_service, chat_settings);
 
     /// @brief Step 15: 解析并校验绑定地址（host:port）。
     sylar::Address::ptr bind_addr =
@@ -429,6 +493,15 @@ int main(int argc, char** argv)
     if (rag_indexer)
     {
         rag_indexer->Stop();
+    }
+    for (std::unordered_map<std::string, ai::llm::ProviderKeyPool::ptr>::iterator it = provider_key_pools.begin();
+         it != provider_key_pools.end();
+         ++it)
+    {
+        if (it->second)
+        {
+            it->second->Stop();
+        }
     }
     mysql_pool->Shutdown();
     return 0;

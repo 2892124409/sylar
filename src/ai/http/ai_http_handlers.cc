@@ -14,12 +14,10 @@ namespace api
 AiHttpHandlers::AiHttpHandlers(
     const ai::service::ChatService::ptr& chat_service,
     const ai::service::AuthService::ptr& auth_service,
-    const ai::config::ChatSettings& chat_settings,
-    const std::string& default_model)
+    const ai::config::ChatSettings& chat_settings)
     : m_chat_service(chat_service),
       m_auth_service(auth_service),
-      m_chat_settings(chat_settings),
-      m_default_model(default_model)
+      m_chat_settings(chat_settings)
 {
 }
 
@@ -54,10 +52,13 @@ bool AiHttpHandlers::BuildChatRequest(
         out.conversation_id = body["conversation_id"].get<std::string>();
     }
 
-    out.model = m_default_model;
     if (body.contains("model") && body["model"].is_string())
     {
         out.model = body["model"].get<std::string>();
+    }
+    if (body.contains("provider") && body["provider"].is_string())
+    {
+        out.provider = body["provider"].get<std::string>();
     }
 
     out.temperature = m_chat_settings.default_temperature;
@@ -85,6 +86,7 @@ void AiHttpHandlers::WriteSuccessJson(
     payload["conversation_id"] = chat_response.conversation_id;
     payload["reply"] = chat_response.reply;
     payload["model"] = chat_response.model;
+    payload["provider"] = chat_response.provider;
     payload["finish_reason"] = chat_response.finish_reason;
     payload["created_at_ms"] = chat_response.created_at_ms;
     if (!request_id.empty())

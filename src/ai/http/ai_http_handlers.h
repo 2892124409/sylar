@@ -41,12 +41,10 @@ class AiHttpHandlers
      * @brief 构造 HTTP 处理器。
      * @param chat_service 对话业务服务。
      * @param chat_settings 对话相关配置快照（默认温度、默认 max_tokens、历史 limit 等）。
-     * @param default_model 默认模型名（请求未显式指定 model 时使用）。
      */
     AiHttpHandlers(const ai::service::ChatService::ptr& chat_service,
                    const ai::service::AuthService::ptr& auth_service,
-                   const ai::config::ChatSettings& chat_settings,
-                   const std::string& default_model);
+                   const ai::config::ChatSettings& chat_settings);
 
     /**
      * @brief 处理健康检查接口：`GET /api/v1/healthz`。
@@ -176,8 +174,6 @@ class AiHttpHandlers
     ai::service::AuthService::ptr m_auth_service;
     /** @brief 对话配置快照。 */
     ai::config::ChatSettings m_chat_settings;
-    /** @brief 默认模型名（请求未指定 model 时使用）。 */
-    std::string m_default_model;
 };
 
 } // namespace api

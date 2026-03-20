@@ -28,13 +28,11 @@ namespace api
  * @param server HTTP 服务器实例，内部持有 ServletDispatch。
  * @param chat_service AI 应用服务，承载核心编排逻辑。
  * @param chat_settings 聊天配置，用于默认参数与 limit 约束。
- * @param default_model 默认模型名，当请求未显式指定 model 时使用。
  */
 void RegisterAiHttpApi(const http::HttpServer::ptr& server,
                        const ai::service::AuthService::ptr& auth_service,
                        const ai::service::ChatService::ptr& chat_service,
-                       const ai::config::ChatSettings& chat_settings,
-                       const std::string& default_model);
+                       const ai::config::ChatSettings& chat_settings);
 
 } // namespace api
 } // namespace ai

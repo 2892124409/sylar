@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 /**
  * @file openai_compatible_client.cc
@@ -45,6 +46,8 @@ struct StreamWriteContext
     std::string line_buffer;
     /** @brief 聚合后的完整回答文本。 */
     std::string assembled;
+    /** @brief 是否已经向上层输出过任意 delta 内容。 */
+    bool has_output = false;
     /** @brief 上游回传的模型名称。 */
     std::string model;
     /** @brief 结束原因。 */
@@ -75,6 +78,28 @@ void EnsureCurlGlobalInit()
 std::string BuildAuthorizationHeader(const std::string& api_key)
 {
     return "Authorization: Bearer " + api_key;
+}
+
+ApiKeyFailureType ClassifyHttpFailureType(long http_code)
+{
+    if (http_code == 429)
+    {
+        return ApiKeyFailureType::RATE_LIMIT;
+    }
+    if (http_code == 401 || http_code == 403)
+    {
+        return ApiKeyFailureType::AUTH_ERROR;
+    }
+    if (http_code >= 500 && http_code < 600)
+    {
+        return ApiKeyFailureType::SERVER_ERROR;
+    }
+    return ApiKeyFailureType::OTHER_ERROR;
+}
+
+bool IsRetriableHttpFailure(long http_code)
+{
+    return http_code == 429 || http_code == 401 || http_code == 403 || (http_code >= 500 && http_code < 600);
 }
 
 /**
@@ -166,6 +191,7 @@ bool HandleStreamDataLine(const std::string& line, StreamWriteContext& ctx)
                 {
                     // 本地聚合完整文本，供最终 result.content 使用。
                     ctx.assembled.append(delta_text);
+                    ctx.has_output = true;
                     // 立即回调上层输出增量。
                     if (ctx.on_delta && !ctx.on_delta(delta_text))
                     {
@@ -360,8 +386,12 @@ bool ParseSyncResponse(const std::string& response_text, LlmCompletionResult& re
 /**
  * @brief 构造 OpenAI-Compatible 客户端并完成 curl 全局初始化。
  */
-OpenAICompatibleClient::OpenAICompatibleClient(const config::OpenAICompatibleSettings& settings)
+OpenAICompatibleClient::OpenAICompatibleClient(const config::OpenAICompatibleSettings& settings,
+                                               const ApiKeyProvider::ptr& key_provider,
+                                               uint32_t max_retry_per_request)
     : m_settings(settings)
+    , m_key_provider(key_provider)
+    , m_max_retry_per_request(std::min<uint32_t>(max_retry_per_request, 8))
 {
     EnsureCurlGlobalInit();
 }
@@ -388,90 +418,148 @@ std::string OpenAICompatibleClient::BuildCompletionsUrl() const
  */
 bool OpenAICompatibleClient::Complete(const LlmCompletionRequest& request, LlmCompletionResult& result, std::string& error)
 {
-    CURL* curl = curl_easy_init();
-    if (!curl)
+    std::vector<ApiKeyCandidate> candidates;
+    const size_t attempt_limit = static_cast<size_t>(m_max_retry_per_request) + 1;
+    if (m_key_provider)
     {
-        error = "curl_easy_init failed";
+        candidates = m_key_provider->AcquireCandidates(attempt_limit);
+    }
+    if (candidates.empty() && !m_settings.api_key.empty())
+    {
+        ApiKeyCandidate fallback;
+        fallback.id = 0;
+        fallback.api_key = m_settings.api_key;
+        candidates.push_back(fallback);
+    }
+    if (candidates.empty())
+    {
+        error = "no available openai-compatible api key";
         return false;
     }
 
-    // 把 HTTP 响应体攒完整的临时容器
-    SyncWriteContext write_ctx;
-
-    // 构建非流式 JSON 请求体。
-    nlohmann::json body = BuildRequestBody(request, false);
-    const std::string payload = body.dump();
-
-    // 设置鉴权头与 JSON 类型头。
-    struct curl_slist* headers = nullptr;
-    const std::string auth = BuildAuthorizationHeader(m_settings.api_key);
-    headers = curl_slist_append(headers, auth.c_str());
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-
-    // 配置请求 URL（目标接口地址：.../chat/completions）。
-    curl_easy_setopt(curl, CURLOPT_URL, BuildCompletionsUrl().c_str());
-    // 挂载请求头链表（Authorization、Content-Type 等）。
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    // 开启 POST 方法（1L 表示 true）。
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    // 设置请求体数据起始地址（payload 是序列化后的 JSON 字符串）。
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-    // 显式设置请求体长度，避免依赖 '\0' 推断长度。
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
-    // 连接超时（毫秒）：只约束建连阶段（TCP/TLS 握手）。
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
-    // 总超时（毫秒）：覆盖整次请求（建连 + 发送 + 接收）。
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
-    // 注册写回调函数：每收到一块响应数据就调用一次。
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, SyncWriteCallback);
-    // 传入写回调上下文，回调会把数据累积到 write_ctx.response。
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
-
-    // 之前是直接的 curl_easy_perform是阻塞调用，会导致工作线程阻塞
-    FiberCurlSession session(curl);
-    CURLcode code = session.Perform();
-
-    long http_code = 0;
-    // 取HTTP状态码
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-    // 无论成功失败都释放资源。
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    // curl失败
-    if (code != CURLE_OK)
+    const size_t total_attempts = std::min(candidates.size(), attempt_limit);
+    std::string last_error;
+    for (size_t attempt = 0; attempt < total_attempts; ++attempt)
     {
-        error = std::string("openai-compatible request failed: ") + curl_easy_strerror(code);
-        return false;
-    }
-
-    if (http_code < 200 || http_code >= 300)
-    {
-        std::ostringstream ss;
-        ss << "openai-compatible http status " << http_code;
-        if (!write_ctx.response.empty())
+        const ApiKeyCandidate& candidate = candidates[attempt];
+        if (candidate.api_key.empty())
         {
-            ss << ", body=" << write_ctx.response;
+            continue;
         }
-        error = ss.str();
-        return false;
+
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            error = "curl_easy_init failed";
+            return false;
+        }
+
+        // 把 HTTP 响应体攒完整的临时容器
+        SyncWriteContext write_ctx;
+
+        // 构建非流式 JSON 请求体。
+        nlohmann::json body = BuildRequestBody(request, false);
+        const std::string payload = body.dump();
+
+        // 设置鉴权头与 JSON 类型头。
+        struct curl_slist* headers = nullptr;
+        const std::string auth = BuildAuthorizationHeader(candidate.api_key);
+        headers = curl_slist_append(headers, auth.c_str());
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        // 配置请求 URL（目标接口地址：.../chat/completions）。
+        curl_easy_setopt(curl, CURLOPT_URL, BuildCompletionsUrl().c_str());
+        // 挂载请求头链表（Authorization、Content-Type 等）。
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        // 开启 POST 方法（1L 表示 true）。
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        // 设置请求体数据起始地址（payload 是序列化后的 JSON 字符串）。
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+        // 显式设置请求体长度，避免依赖 '\0' 推断长度。
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
+        // 连接超时（毫秒）：只约束建连阶段（TCP/TLS 握手）。
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
+        // 总超时（毫秒）：覆盖整次请求（建连 + 发送 + 接收）。
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
+        // 注册写回调函数：每收到一块响应数据就调用一次。
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, SyncWriteCallback);
+        // 传入写回调上下文，回调会把数据累积到 write_ctx.response。
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
+
+        FiberCurlSession session(curl);
+        CURLcode code = session.Perform();
+
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+        // 无论成功失败都释放资源。
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        bool should_retry = false;
+        ApiKeyFailureType failure_type = ApiKeyFailureType::OTHER_ERROR;
+        if (code != CURLE_OK)
+        {
+            error = std::string("openai-compatible request failed: ") + curl_easy_strerror(code);
+            should_retry = true;
+            failure_type = ApiKeyFailureType::NETWORK_ERROR;
+        }
+        else if (http_code < 200 || http_code >= 300)
+        {
+            std::ostringstream ss;
+            ss << "openai-compatible http status " << http_code;
+            if (!write_ctx.response.empty())
+            {
+                ss << ", body=" << write_ctx.response;
+            }
+            error = ss.str();
+            should_retry = IsRetriableHttpFailure(http_code);
+            failure_type = ClassifyHttpFailureType(http_code);
+        }
+        else
+        {
+            // 解析 JSON 响应到 result
+            if (!ParseSyncResponse(write_ctx.response, result, error))
+            {
+                BASE_LOG_ERROR(g_logger) << "Parse openai-compatible sync response failed, body=" << write_ctx.response;
+                should_retry = false;
+                failure_type = ApiKeyFailureType::OTHER_ERROR;
+            }
+            else
+            {
+                // 若上游未回传模型名，回退为请求模型。
+                if (result.model.empty())
+                {
+                    result.model = request.model;
+                }
+                if (m_key_provider && candidate.id != 0)
+                {
+                    m_key_provider->ReportSuccess(candidate.id);
+                }
+                return true;
+            }
+        }
+
+        if (should_retry && m_key_provider && candidate.id != 0)
+        {
+            m_key_provider->ReportFailure(candidate.id, failure_type);
+        }
+
+        last_error = error;
+        BASE_LOG_WARN(g_logger) << "openai-compatible attempt failed, key_id=" << candidate.id
+                                << " attempt=" << (attempt + 1) << "/" << total_attempts
+                                << " retry=" << (should_retry ? "yes" : "no")
+                                << " error=" << error;
+
+        if (!should_retry || attempt + 1 >= total_attempts)
+        {
+            error = last_error;
+            return false;
+        }
     }
 
-    // 解析 JSON 响应到 result
-    if (!ParseSyncResponse(write_ctx.response, result, error))
-    {
-        BASE_LOG_ERROR(g_logger) << "Parse openai-compatible sync response failed, body=" << write_ctx.response;
-        return false;
-    }
-
-    // 若上游未回传模型名，回退为请求模型。
-    if (result.model.empty())
-    {
-        result.model = request.model;
-    }
-
-    return true;
+    error = last_error.empty() ? "openai-compatible request failed" : last_error;
+    return false;
 }
 
 /**
@@ -479,92 +567,162 @@ bool OpenAICompatibleClient::Complete(const LlmCompletionRequest& request, LlmCo
  */
 bool OpenAICompatibleClient::StreamComplete(const LlmCompletionRequest& request, const DeltaCallback& on_delta, LlmCompletionResult& result, std::string& error)
 {
-    CURL* curl = curl_easy_init();
-    if (!curl)
+    std::vector<ApiKeyCandidate> candidates;
+    const size_t attempt_limit = static_cast<size_t>(m_max_retry_per_request) + 1;
+    if (m_key_provider)
     {
-        error = "curl_easy_init failed";
+        candidates = m_key_provider->AcquireCandidates(attempt_limit);
+    }
+    if (candidates.empty() && !m_settings.api_key.empty())
+    {
+        ApiKeyCandidate fallback;
+        fallback.id = 0;
+        fallback.api_key = m_settings.api_key;
+        candidates.push_back(fallback);
+    }
+    if (candidates.empty())
+    {
+        error = "no available openai-compatible api key";
         return false;
     }
 
-    StreamWriteContext write_ctx;
-    write_ctx.on_delta = on_delta;
-
-    // 构建流式 JSON 请求体（stream=true）。
-    nlohmann::json body = BuildRequestBody(request, true);
-    const std::string payload = body.dump();
-
-    struct curl_slist* headers = nullptr;
-    const std::string auth = BuildAuthorizationHeader(m_settings.api_key);
-    headers = curl_slist_append(headers, auth.c_str());
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-
-    // 配置请求 URL（目标接口地址：.../chat/completions）。
-    curl_easy_setopt(curl, CURLOPT_URL, BuildCompletionsUrl().c_str());
-    // 挂载请求头链表（Authorization、Content-Type 等）。
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    // 开启 POST 方法（1L 表示 true）。
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    // 设置请求体数据起始地址（payload 是序列化后的 JSON 字符串）。
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-    // 显式设置请求体长度，避免依赖 '\0' 推断长度。
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
-    // 连接超时（毫秒）：只约束建连阶段（TCP/TLS 握手）。
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
-    // 总超时（毫秒）：覆盖整次请求（建连 + 发送 + 接收）。
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
-    // 注册流式写回调：每收到一块响应数据就调用 StreamWriteCallback。
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamWriteCallback);
-    // 传入流式回调上下文，回调会解析 SSE 并累计到 write_ctx。
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
-
-    FiberCurlSession session(curl);
-    CURLcode code = session.Perform();
-
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    // curl 失败要区分：回调主动中断、解析错误、网络错误。
-    if (code != CURLE_OK)
+    const size_t total_attempts = std::min(candidates.size(), attempt_limit);
+    std::string last_error;
+    for (size_t attempt = 0; attempt < total_attempts; ++attempt)
     {
-        if (write_ctx.callback_aborted)
+        const ApiKeyCandidate& candidate = candidates[attempt];
+        if (candidate.api_key.empty())
         {
-            error = "stream callback aborted";
+            continue;
+        }
+
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            error = "curl_easy_init failed";
+            return false;
+        }
+
+        StreamWriteContext write_ctx;
+        write_ctx.on_delta = on_delta;
+
+        // 构建流式 JSON 请求体（stream=true）。
+        nlohmann::json body = BuildRequestBody(request, true);
+        const std::string payload = body.dump();
+
+        struct curl_slist* headers = nullptr;
+        const std::string auth = BuildAuthorizationHeader(candidate.api_key);
+        headers = curl_slist_append(headers, auth.c_str());
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        // 配置请求 URL（目标接口地址：.../chat/completions）。
+        curl_easy_setopt(curl, CURLOPT_URL, BuildCompletionsUrl().c_str());
+        // 挂载请求头链表（Authorization、Content-Type 等）。
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        // 开启 POST 方法（1L 表示 true）。
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        // 设置请求体数据起始地址（payload 是序列化后的 JSON 字符串）。
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+        // 显式设置请求体长度，避免依赖 '\0' 推断长度。
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
+        // 连接超时（毫秒）：只约束建连阶段（TCP/TLS 握手）。
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
+        // 总超时（毫秒）：覆盖整次请求（建连 + 发送 + 接收）。
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
+        // 注册流式写回调：每收到一块响应数据就调用 StreamWriteCallback。
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamWriteCallback);
+        // 传入流式回调上下文，回调会解析 SSE 并累计到 write_ctx。
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
+
+        FiberCurlSession session(curl);
+        CURLcode code = session.Perform();
+
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        bool should_retry = false;
+        bool should_report_failure = false;
+        ApiKeyFailureType failure_type = ApiKeyFailureType::OTHER_ERROR;
+        // curl 失败要区分：回调主动中断、解析错误、网络错误。
+        if (code != CURLE_OK)
+        {
+            if (write_ctx.callback_aborted)
+            {
+                error = "stream callback aborted";
+                should_retry = false;
+            }
+            else if (!write_ctx.parse_error.empty())
+            {
+                error = write_ctx.parse_error;
+                should_retry = false;
+            }
+            else
+            {
+                error = std::string("openai-compatible stream request failed: ") + curl_easy_strerror(code);
+                should_retry = true;
+                should_report_failure = true;
+                failure_type = ApiKeyFailureType::NETWORK_ERROR;
+            }
+        }
+        else if (http_code < 200 || http_code >= 300)
+        {
+            std::ostringstream ss;
+            ss << "openai-compatible stream http status " << http_code;
+            error = ss.str();
+            should_retry = IsRetriableHttpFailure(http_code);
+            should_report_failure = should_retry;
+            failure_type = ClassifyHttpFailureType(http_code);
         }
         else if (!write_ctx.parse_error.empty())
         {
             error = write_ctx.parse_error;
+            should_retry = false;
         }
         else
         {
-            error = std::string("openai-compatible stream request failed: ") + curl_easy_strerror(code);
+            // 回填流式聚合结果。
+            result.content = write_ctx.assembled;
+            result.model = write_ctx.model.empty() ? request.model : write_ctx.model;
+            result.finish_reason = write_ctx.finish_reason;
+            result.prompt_tokens = write_ctx.prompt_tokens;
+            result.completion_tokens = write_ctx.completion_tokens;
+            if (m_key_provider && candidate.id != 0)
+            {
+                m_key_provider->ReportSuccess(candidate.id);
+            }
+            return true;
         }
-        return false;
+
+        if (write_ctx.has_output && should_retry)
+        {
+            // 已向客户端发送过部分 token，禁止自动换 key 重试，避免重复输出。
+            should_retry = false;
+            error = "openai-compatible stream interrupted after partial output";
+        }
+
+        if (should_report_failure && m_key_provider && candidate.id != 0)
+        {
+            m_key_provider->ReportFailure(candidate.id, failure_type);
+        }
+
+        last_error = error;
+        BASE_LOG_WARN(g_logger) << "openai-compatible stream attempt failed, key_id=" << candidate.id
+                                << " attempt=" << (attempt + 1) << "/" << total_attempts
+                                << " retry=" << (should_retry ? "yes" : "no")
+                                << " error=" << error;
+
+        if (!should_retry || attempt + 1 >= total_attempts)
+        {
+            error = last_error;
+            return false;
+        }
     }
 
-    if (http_code < 200 || http_code >= 300)
-    {
-        std::ostringstream ss;
-        ss << "openai-compatible stream http status " << http_code;
-        error = ss.str();
-        return false;
-    }
-
-    if (!write_ctx.parse_error.empty())
-    {
-        error = write_ctx.parse_error;
-        return false;
-    }
-
-    // 回填流式聚合结果。
-    result.content = write_ctx.assembled;
-    result.model = write_ctx.model.empty() ? request.model : write_ctx.model;
-    result.finish_reason = write_ctx.finish_reason;
-    result.prompt_tokens = write_ctx.prompt_tokens;
-    result.completion_tokens = write_ctx.completion_tokens;
-    return true;
+    error = last_error.empty() ? "openai-compatible stream request failed" : last_error;
+    return false;
 }
 
 } // namespace llm

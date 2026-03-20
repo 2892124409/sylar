@@ -4,6 +4,7 @@
 #include "ai/common/ai_types.h"
 #include "ai/config/ai_app_config.h"
 #include "ai/llm/llm_client.h"
+#include "ai/llm/llm_router.h"
 #include "ai/rag/rag_indexer.h"
 #include "ai/rag/rag_retriever.h"
 #include "ai/service/chat_interfaces.h"
@@ -45,12 +46,12 @@ class ChatService
     /**
      * @brief 构造 ChatService。
      * @param settings 对话业务配置。
-     * @param llm_client 大模型客户端抽象。
+     * @param llm_router 大模型路由器（按 provider/model 选择客户端）。
      * @param store 历史读接口（ChatStore）。
      * @param sink 持久化写接口（MessageSink）。
      */
     ChatService(const config::ChatSettings& settings,
-        const llm::LlmClient::ptr& llm_client,
+        const llm::LlmRouter::ptr& llm_router,
         const ChatStore::ptr& store,
         const MessageSink::ptr& sink,
         const config::RagSettings& rag_settings = config::RagSettings(),
@@ -168,7 +169,11 @@ class ChatService
      * @brief 在上下文超阈值时生成/更新摘要记忆。
      */
     bool MaybeRefreshSummary(
-        const std::string& sid, const std::string& conversation_id, const std::string& model, std::string& error);
+        const std::string& sid,
+        const std::string& conversation_id,
+        const llm::LlmClient::ptr& llm_client,
+        const std::string& model,
+        std::string& error);
 
     /**
      * @brief 启发式估算一条消息的 token 数量。
@@ -183,8 +188,8 @@ class ChatService
   private:
     /** @brief 业务配置快照。 */
     config::ChatSettings m_settings;
-    /** @brief 大模型客户端。 */
-    llm::LlmClient::ptr m_llm_client;
+    /** @brief 大模型路由器（请求级选择 provider/client）。 */
+    llm::LlmRouter::ptr m_llm_router;
     /** @brief 历史读取接口。 */
     ChatStore::ptr m_store;
     /** @brief 异步写入接口。 */

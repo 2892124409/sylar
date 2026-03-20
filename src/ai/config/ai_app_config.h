@@ -5,6 +5,8 @@
 #include <stdint.h>
 
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 /**
  * @file ai_app_config.h
@@ -47,9 +49,26 @@ struct OpenAICompatibleSettings
     /** @brief 默认模型名。 */
     std::string default_model;
     /** @brief 连接超时（毫秒）。 */
-    uint64_t connect_timeout_ms;
+    uint64_t connect_timeout_ms = 3000;
     /** @brief 请求超时（毫秒）。 */
-    uint64_t request_timeout_ms;
+    uint64_t request_timeout_ms = 120000;
+};
+
+/**
+ * @brief 通用 API Key 池配置（可用于任意 Provider）。
+ */
+struct ApiKeyPoolSettings
+{
+    /** @brief 是否启用全局 Key 池。 */
+    bool enabled = false;
+    /** @brief Key 池热加载周期（毫秒）。 */
+    uint64_t reload_interval_ms = 5000;
+    /** @brief 单请求最大重试次数（不含首次尝试）。 */
+    uint32_t max_retry_per_request = 2;
+    /** @brief 短冷却时长（毫秒），用于限流/网络/5xx。 */
+    uint64_t cooldown_short_ms = 60000;
+    /** @brief 长冷却时长（毫秒），用于鉴权失败。 */
+    uint64_t cooldown_long_ms = 600000;
 };
 
 /**
@@ -75,9 +94,50 @@ struct AnthropicSettings
     /** @brief API 版本头。 */
     std::string api_version;
     /** @brief 连接超时（毫秒）。 */
-    uint64_t connect_timeout_ms;
+    uint64_t connect_timeout_ms = 3000;
     /** @brief 请求超时（毫秒）。 */
-    uint64_t request_timeout_ms;
+    uint64_t request_timeout_ms = 120000;
+};
+
+/**
+ * @brief LLM Provider 实例配置（可同时存在多个）。
+ */
+struct LlmProviderSettings
+{
+    /** @brief Provider 实例唯一 ID（如 `deepseek_main`）。 */
+    std::string id;
+    /** @brief Provider 类型：`openai_compatible` / `anthropic`。 */
+    std::string type;
+    /** @brief 是否启用该 Provider 实例。 */
+    bool enabled = true;
+    /** @brief 请求未显式给 model 时使用的默认模型。 */
+    std::string default_model;
+    /** @brief OpenAI-Compatible 协议配置。 */
+    OpenAICompatibleSettings openai_compatible;
+    /** @brief Provider Key 池配置（协议无关）。 */
+    ApiKeyPoolSettings key_pool;
+    /** @brief Anthropic 协议配置。 */
+    AnthropicSettings anthropic;
+};
+
+/**
+ * @brief LLM 路由配置。
+ */
+struct LlmRoutingSettings
+{
+    /** @brief 默认 Provider 实例 ID。 */
+    std::string default_provider_id;
+    /** @brief model -> provider_id 映射。 */
+    std::unordered_map<std::string, std::string> model_to_provider;
+};
+
+/**
+ * @brief LLM 总配置：Provider 列表 + 路由规则。
+ */
+struct LlmSettings
+{
+    std::vector<LlmProviderSettings> providers;
+    LlmRoutingSettings routing;
 };
 
 /**
@@ -247,6 +307,12 @@ class AiAppConfig
     static ProviderSettings GetProviderSettings();
     /** @brief 获取 OpenAI-Compatible 客户端配置。 */
     static OpenAICompatibleSettings GetOpenAICompatibleSettings();
+    /** @brief 获取通用 API Key 池配置（兼容旧键 ai.openai_compatible.key_pool.*）。 */
+    static ApiKeyPoolSettings GetApiKeyPoolSettings();
+    /** @brief 兼容旧接口名。 */
+    static ApiKeyPoolSettings GetOpenAIKeyPoolSettings();
+    /** @brief 获取 LLM 多 Provider 配置。 */
+    static LlmSettings GetLlmSettings();
     /** @brief 获取 Anthropic 客户端配置。 */
     static AnthropicSettings GetAnthropicSettings();
     /** @brief 获取对话业务配置。 */

@@ -3,6 +3,8 @@
 #include "config/config.h"
 
 #include <stdlib.h>
+#include <set>
+#include <sstream>
 
 namespace ai
 {
@@ -30,6 +32,17 @@ http::ConfigVar<std::string>::ptr g_ai_server_ssl_key_file =
 http::ConfigVar<std::string>::ptr g_ai_provider_type =
     http::Config::Lookup<std::string>("ai.provider.type", "openai_compatible", "ai provider type");
 
+http::ConfigVar<std::string>::ptr g_ai_llm_providers_yaml =
+    http::Config::Lookup<std::string>("ai.llm.providers", "[]", "llm provider list");
+
+http::ConfigVar<std::string>::ptr g_ai_llm_routing_default_provider_id =
+    http::Config::Lookup<std::string>("ai.llm.routing.default_provider_id", "", "llm default provider id");
+
+http::ConfigVar<std::unordered_map<std::string, std::string>>::ptr g_ai_llm_routing_model_map =
+    http::Config::Lookup<std::unordered_map<std::string, std::string>>("ai.llm.routing.model_map",
+                                                                        std::unordered_map<std::string, std::string>(),
+                                                                        "llm model to provider map");
+
 // OpenAI-Compatible 配置键：ai.openai_compatible.*
 http::ConfigVar<std::string>::ptr g_ai_openai_base_url =
     http::Config::Lookup<std::string>("ai.openai_compatible.base_url", "", "openai-compatible base url");
@@ -45,6 +58,21 @@ http::ConfigVar<uint64_t>::ptr g_ai_openai_connect_timeout_ms =
 
 http::ConfigVar<uint64_t>::ptr g_ai_openai_request_timeout_ms =
     http::Config::Lookup<uint64_t>("ai.openai_compatible.request_timeout_ms", 120000, "openai-compatible request timeout ms");
+
+http::ConfigVar<bool>::ptr g_ai_openai_key_pool_enabled =
+    http::Config::Lookup<bool>("ai.openai_compatible.key_pool.enabled", false, "openai-compatible key pool enabled");
+
+http::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_reload_interval_ms =
+    http::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.reload_interval_ms", 5000, "openai-compatible key pool reload interval ms");
+
+http::ConfigVar<uint32_t>::ptr g_ai_openai_key_pool_max_retry_per_request =
+    http::Config::Lookup<uint32_t>("ai.openai_compatible.key_pool.max_retry_per_request", 2, "openai-compatible key pool max retry per request");
+
+http::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_cooldown_short_ms =
+    http::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.cooldown_short_ms", 60000, "openai-compatible key pool short cooldown ms");
+
+http::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_cooldown_long_ms =
+    http::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.cooldown_long_ms", 600000, "openai-compatible key pool long cooldown ms");
 
 http::ConfigVar<std::string>::ptr g_ai_anthropic_base_url =
     http::Config::Lookup<std::string>("ai.anthropic.base_url", "https://api.anthropic.com", "anthropic base url");
@@ -211,6 +239,179 @@ http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_dedup_ttl_ms =
 http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_dedup_max_entries =
     http::Config::Lookup<uint64_t>("ai.rag_indexer.dedup_max_entries", 50000, "rag indexer dedup max entries");
 
+std::string ResolveOpenAICompatibleApiKeyFrom(const std::string& key_from_config)
+{
+    if (!key_from_config.empty())
+    {
+        return key_from_config;
+    }
+
+    const char* env_key = std::getenv("OPENAI_COMPATIBLE_API_KEY");
+    if (env_key && env_key[0] != '\0')
+    {
+        return std::string(env_key);
+    }
+
+    env_key = std::getenv("OPENAI_API_KEY");
+    return env_key ? std::string(env_key) : std::string();
+}
+
+std::string ResolveAnthropicApiKeyFrom(const std::string& key_from_config)
+{
+    if (!key_from_config.empty())
+    {
+        return key_from_config;
+    }
+
+    const char* env_key = std::getenv("ANTHROPIC_API_KEY");
+    return env_key ? std::string(env_key) : std::string();
+}
+
+OpenAICompatibleSettings ParseOpenAICompatibleSettings(const YAML::Node& node)
+{
+    OpenAICompatibleSettings settings;
+    if (!node || !node.IsMap())
+    {
+        return settings;
+    }
+
+    if (node["base_url"] && node["base_url"].IsScalar())
+    {
+        settings.base_url = node["base_url"].as<std::string>();
+    }
+    if (node["api_key"] && node["api_key"].IsScalar())
+    {
+        settings.api_key = ResolveOpenAICompatibleApiKeyFrom(node["api_key"].as<std::string>());
+    }
+    else
+    {
+        settings.api_key = ResolveOpenAICompatibleApiKeyFrom(std::string());
+    }
+    if (node["default_model"] && node["default_model"].IsScalar())
+    {
+        settings.default_model = node["default_model"].as<std::string>();
+    }
+    if (node["connect_timeout_ms"] && node["connect_timeout_ms"].IsScalar())
+    {
+        settings.connect_timeout_ms = node["connect_timeout_ms"].as<uint64_t>();
+    }
+    if (node["request_timeout_ms"] && node["request_timeout_ms"].IsScalar())
+    {
+        settings.request_timeout_ms = node["request_timeout_ms"].as<uint64_t>();
+    }
+    return settings;
+}
+
+ApiKeyPoolSettings ParseApiKeyPoolSettings(const YAML::Node& node)
+{
+    ApiKeyPoolSettings settings;
+    if (!node || !node.IsMap())
+    {
+        return settings;
+    }
+    if (node["enabled"] && node["enabled"].IsScalar())
+    {
+        settings.enabled = node["enabled"].as<bool>();
+    }
+    if (node["reload_interval_ms"] && node["reload_interval_ms"].IsScalar())
+    {
+        settings.reload_interval_ms = node["reload_interval_ms"].as<uint64_t>();
+    }
+    if (node["max_retry_per_request"] && node["max_retry_per_request"].IsScalar())
+    {
+        settings.max_retry_per_request = node["max_retry_per_request"].as<uint32_t>();
+    }
+    if (node["cooldown_short_ms"] && node["cooldown_short_ms"].IsScalar())
+    {
+        settings.cooldown_short_ms = node["cooldown_short_ms"].as<uint64_t>();
+    }
+    if (node["cooldown_long_ms"] && node["cooldown_long_ms"].IsScalar())
+    {
+        settings.cooldown_long_ms = node["cooldown_long_ms"].as<uint64_t>();
+    }
+    return settings;
+}
+
+AnthropicSettings ParseAnthropicSettings(const YAML::Node& node)
+{
+    AnthropicSettings settings;
+    if (!node || !node.IsMap())
+    {
+        return settings;
+    }
+    if (node["base_url"] && node["base_url"].IsScalar())
+    {
+        settings.base_url = node["base_url"].as<std::string>();
+    }
+    if (node["api_key"] && node["api_key"].IsScalar())
+    {
+        settings.api_key = ResolveAnthropicApiKeyFrom(node["api_key"].as<std::string>());
+    }
+    else
+    {
+        settings.api_key = ResolveAnthropicApiKeyFrom(std::string());
+    }
+    if (node["default_model"] && node["default_model"].IsScalar())
+    {
+        settings.default_model = node["default_model"].as<std::string>();
+    }
+    if (node["api_version"] && node["api_version"].IsScalar())
+    {
+        settings.api_version = node["api_version"].as<std::string>();
+    }
+    if (node["connect_timeout_ms"] && node["connect_timeout_ms"].IsScalar())
+    {
+        settings.connect_timeout_ms = node["connect_timeout_ms"].as<uint64_t>();
+    }
+    if (node["request_timeout_ms"] && node["request_timeout_ms"].IsScalar())
+    {
+        settings.request_timeout_ms = node["request_timeout_ms"].as<uint64_t>();
+    }
+    return settings;
+}
+
+LlmProviderSettings ParseLlmProviderSettings(const YAML::Node& node)
+{
+    LlmProviderSettings settings;
+    if (!node || !node.IsMap())
+    {
+        return settings;
+    }
+
+    if (node["id"] && node["id"].IsScalar())
+    {
+        settings.id = node["id"].as<std::string>();
+    }
+    if (node["type"] && node["type"].IsScalar())
+    {
+        settings.type = node["type"].as<std::string>();
+    }
+    if (node["enabled"] && node["enabled"].IsScalar())
+    {
+        settings.enabled = node["enabled"].as<bool>();
+    }
+
+    if (settings.type == "openai_compatible")
+    {
+        settings.openai_compatible = ParseOpenAICompatibleSettings(node);
+        settings.key_pool = ParseApiKeyPoolSettings(node["key_pool"]);
+        settings.default_model = settings.openai_compatible.default_model;
+    }
+    else if (settings.type == "anthropic")
+    {
+        settings.anthropic = ParseAnthropicSettings(node);
+        settings.key_pool = ParseApiKeyPoolSettings(node["key_pool"]);
+        settings.default_model = settings.anthropic.default_model;
+    }
+
+    if (node["default_model"] && node["default_model"].IsScalar())
+    {
+        settings.default_model = node["default_model"].as<std::string>();
+    }
+
+    return settings;
+}
+
 } // namespace
 
 ServerSettings AiAppConfig::GetServerSettings()
@@ -239,6 +440,55 @@ OpenAICompatibleSettings AiAppConfig::GetOpenAICompatibleSettings()
     settings.default_model = g_ai_openai_default_model->getValue();
     settings.connect_timeout_ms = g_ai_openai_connect_timeout_ms->getValue();
     settings.request_timeout_ms = g_ai_openai_request_timeout_ms->getValue();
+    return settings;
+}
+
+ApiKeyPoolSettings AiAppConfig::GetApiKeyPoolSettings()
+{
+    ApiKeyPoolSettings settings;
+    settings.enabled = g_ai_openai_key_pool_enabled->getValue();
+    settings.reload_interval_ms = g_ai_openai_key_pool_reload_interval_ms->getValue();
+    settings.max_retry_per_request = g_ai_openai_key_pool_max_retry_per_request->getValue();
+    settings.cooldown_short_ms = g_ai_openai_key_pool_cooldown_short_ms->getValue();
+    settings.cooldown_long_ms = g_ai_openai_key_pool_cooldown_long_ms->getValue();
+    return settings;
+}
+
+ApiKeyPoolSettings AiAppConfig::GetOpenAIKeyPoolSettings()
+{
+    return GetApiKeyPoolSettings();
+}
+
+LlmSettings AiAppConfig::GetLlmSettings()
+{
+    LlmSettings settings;
+    settings.routing.default_provider_id = g_ai_llm_routing_default_provider_id->getValue();
+    settings.routing.model_to_provider = g_ai_llm_routing_model_map->getValue();
+
+    const std::string providers_yaml = g_ai_llm_providers_yaml->getValue();
+    if (providers_yaml.empty())
+    {
+        return settings;
+    }
+
+    try
+    {
+        YAML::Node providers = YAML::Load(providers_yaml);
+        if (!providers || !providers.IsSequence())
+        {
+            return settings;
+        }
+
+        for (size_t i = 0; i < providers.size(); ++i)
+        {
+            settings.providers.push_back(ParseLlmProviderSettings(providers[i]));
+        }
+    }
+    catch (...)
+    {
+        settings.providers.clear();
+    }
+
     return settings;
 }
 
@@ -352,32 +602,12 @@ RagIndexerSettings AiAppConfig::GetRagIndexerSettings()
 
 std::string AiAppConfig::ResolveOpenAICompatibleApiKey()
 {
-    std::string key = g_ai_openai_api_key->getValue();
-    if (!key.empty())
-    {
-        return key;
-    }
-
-    const char* env_key = std::getenv("OPENAI_COMPATIBLE_API_KEY");
-    if (env_key && env_key[0] != '\0')
-    {
-        return std::string(env_key);
-    }
-
-    env_key = std::getenv("OPENAI_API_KEY");
-    return env_key ? std::string(env_key) : std::string();
+    return ResolveOpenAICompatibleApiKeyFrom(g_ai_openai_api_key->getValue());
 }
 
 std::string AiAppConfig::ResolveAnthropicApiKey()
 {
-    std::string key = g_ai_anthropic_api_key->getValue();
-    if (!key.empty())
-    {
-        return key;
-    }
-
-    const char* env_key = std::getenv("ANTHROPIC_API_KEY");
-    return env_key ? std::string(env_key) : std::string();
+    return ResolveAnthropicApiKeyFrom(g_ai_anthropic_api_key->getValue());
 }
 
 bool AiAppConfig::Validate(std::string& error)
@@ -399,54 +629,149 @@ bool AiAppConfig::Validate(std::string& error)
         return false;
     }
 
-    const ProviderSettings provider = GetProviderSettings();
-    if (provider.type != "openai_compatible" && provider.type != "anthropic")
+    const LlmSettings llm = GetLlmSettings();
+    if (llm.providers.empty())
     {
-        error = "ai.provider.type must be one of: openai_compatible, anthropic";
+        error = "ai.llm.providers can not be empty";
         return false;
     }
 
-    if (provider.type == "openai_compatible")
+    std::set<std::string> provider_ids;
+    std::set<std::string> enabled_provider_ids;
+    for (size_t i = 0; i < llm.providers.size(); ++i)
     {
-        const OpenAICompatibleSettings openai = GetOpenAICompatibleSettings();
-        if (openai.base_url.empty())
+        const LlmProviderSettings& provider = llm.providers[i];
+        if (provider.id.empty())
         {
-            error = "ai.openai_compatible.base_url can not be empty";
+            error = "ai.llm.providers[].id can not be empty";
             return false;
         }
-        if (openai.api_key.empty())
+        if (!provider_ids.insert(provider.id).second)
         {
-            error = "openai-compatible api key is empty, configure ai.openai_compatible.api_key"
-                    " or OPENAI_COMPATIBLE_API_KEY / OPENAI_API_KEY";
+            error = "duplicated ai.llm.providers[].id: " + provider.id;
             return false;
         }
-        if (openai.default_model.empty())
+        if (provider.type != "openai_compatible" && provider.type != "anthropic")
         {
-            error = "ai.openai_compatible.default_model can not be empty";
+            error = "ai.llm.providers[].type must be one of: openai_compatible, anthropic";
             return false;
+        }
+        if (!provider.enabled)
+        {
+            continue;
+        }
+        enabled_provider_ids.insert(provider.id);
+        if (provider.type == "openai_compatible")
+        {
+            const OpenAICompatibleSettings& openai = provider.openai_compatible;
+            const ApiKeyPoolSettings& key_pool = provider.key_pool;
+            if (openai.base_url.empty())
+            {
+                error = "ai.llm.providers[].base_url can not be empty for openai_compatible provider: " + provider.id;
+                return false;
+            }
+            if (openai.api_key.empty() && !key_pool.enabled)
+            {
+                error = "openai-compatible provider api key is empty when key_pool is disabled: " + provider.id;
+                return false;
+            }
+            if (provider.default_model.empty())
+            {
+                error = "openai-compatible provider default_model can not be empty: " + provider.id;
+                return false;
+            }
+            if (key_pool.enabled)
+            {
+                if (key_pool.reload_interval_ms == 0)
+                {
+                    error = "openai key_pool.reload_interval_ms must be > 0 for provider: " + provider.id;
+                    return false;
+                }
+                if (key_pool.max_retry_per_request > 8)
+                {
+                    error = "openai key_pool.max_retry_per_request must be <= 8 for provider: " + provider.id;
+                    return false;
+                }
+                if (key_pool.cooldown_short_ms == 0 || key_pool.cooldown_long_ms == 0)
+                {
+                    error = "openai key_pool cooldown values must be > 0 for provider: " + provider.id;
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            const AnthropicSettings& anthropic = provider.anthropic;
+            if (anthropic.base_url.empty())
+            {
+                error = "anthropic provider base_url can not be empty: " + provider.id;
+                return false;
+            }
+            const ApiKeyPoolSettings& key_pool = provider.key_pool;
+            if (anthropic.api_key.empty() && !key_pool.enabled)
+            {
+                error = "anthropic provider api key is empty when key_pool is disabled: " + provider.id;
+                return false;
+            }
+            if (provider.default_model.empty())
+            {
+                error = "anthropic provider default_model can not be empty: " + provider.id;
+                return false;
+            }
+            if (anthropic.api_version.empty())
+            {
+                error = "anthropic provider api_version can not be empty: " + provider.id;
+                return false;
+            }
+            if (key_pool.enabled)
+            {
+                if (key_pool.reload_interval_ms == 0)
+                {
+                    error = "anthropic key_pool.reload_interval_ms must be > 0 for provider: " + provider.id;
+                    return false;
+                }
+                if (key_pool.max_retry_per_request > 8)
+                {
+                    error = "anthropic key_pool.max_retry_per_request must be <= 8 for provider: " + provider.id;
+                    return false;
+                }
+                if (key_pool.cooldown_short_ms == 0 || key_pool.cooldown_long_ms == 0)
+                {
+                    error = "anthropic key_pool cooldown values must be > 0 for provider: " + provider.id;
+                    return false;
+                }
+            }
         }
     }
-    else
+
+    if (enabled_provider_ids.empty())
     {
-        const AnthropicSettings anthropic = GetAnthropicSettings();
-        if (anthropic.base_url.empty())
+        error = "ai.llm.providers has no enabled provider";
+        return false;
+    }
+
+    if (llm.routing.default_provider_id.empty())
+    {
+        error = "ai.llm.routing.default_provider_id can not be empty";
+        return false;
+    }
+    if (enabled_provider_ids.find(llm.routing.default_provider_id) == enabled_provider_ids.end())
+    {
+        error = "ai.llm.routing.default_provider_id is not enabled provider: " + llm.routing.default_provider_id;
+        return false;
+    }
+    for (std::unordered_map<std::string, std::string>::const_iterator it = llm.routing.model_to_provider.begin();
+         it != llm.routing.model_to_provider.end();
+         ++it)
+    {
+        if (it->first.empty() || it->second.empty())
         {
-            error = "ai.anthropic.base_url can not be empty";
+            error = "ai.llm.routing.model_map key/value can not be empty";
             return false;
         }
-        if (anthropic.api_key.empty())
+        if (enabled_provider_ids.find(it->second) == enabled_provider_ids.end())
         {
-            error = "anthropic api key is empty, configure ai.anthropic.api_key or ANTHROPIC_API_KEY";
-            return false;
-        }
-        if (anthropic.default_model.empty())
-        {
-            error = "ai.anthropic.default_model can not be empty";
-            return false;
-        }
-        if (anthropic.api_version.empty())
-        {
-            error = "ai.anthropic.api_version can not be empty";
+            error = "ai.llm.routing.model_map points to unknown or disabled provider: " + it->second;
             return false;
         }
     }

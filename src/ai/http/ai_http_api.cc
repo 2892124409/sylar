@@ -10,11 +10,10 @@ namespace api
 void RegisterAiHttpApi(const http::HttpServer::ptr& server,
                        const ai::service::AuthService::ptr& auth_service,
                        const ai::service::ChatService::ptr& chat_service,
-                       const ai::config::ChatSettings& chat_settings,
-                       const std::string& default_model)
+                       const ai::config::ChatSettings& chat_settings)
 {
     http::ServletDispatch::ptr dispatch = server->getServletDispatch();
-    AiHttpHandlers::ptr handlers(new AiHttpHandlers(chat_service, auth_service, chat_settings, default_model));
+    AiHttpHandlers::ptr handlers(new AiHttpHandlers(chat_service, auth_service, chat_settings));
 
     dispatch->addServlet(
         http::HttpMethod::GET,

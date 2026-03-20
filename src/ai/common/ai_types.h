@@ -63,6 +63,8 @@ struct ChatCompletionRequest
 
     /** @brief 模型名称。 */
     std::string model;
+    /** @brief 可选 provider 实例 ID（显式路由优先）。 */
+    std::string provider;
     /** @brief 采样温度参数。 */
     double temperature = 0.7;
     /** @brief 期望模型生成的最大 token 数。 */
@@ -83,6 +85,8 @@ struct ChatCompletionResponse
     std::string reply;
     /** @brief 实际使用的模型名称。 */
     std::string model;
+    /** @brief 实际命中的 provider 实例 ID。 */
+    std::string provider;
     /** @brief 结束原因，例如 "stop"、"length"。 */
     std::string finish_reason;
     /** @brief 响应创建时间（毫秒时间戳）。 */

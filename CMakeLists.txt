@@ -149,7 +149,11 @@ if(BUILD_AI_CHAT_SERVER)
         src/ai/http/ai_http_handlers.cc
         src/ai/middleware/auth_middleware.cc
         src/ai/middleware/request_id_middleware.cc
+        src/ai/llm/llm_client_factory.cc
+        src/ai/llm/llm_client_registry.cc
+        src/ai/llm/llm_router.cc
         src/ai/llm/openai_compatible_client.cc
+        src/ai/llm/provider_key_pool.cc
         src/ai/llm/anthropic_client.cc
         src/ai/llm/fiber_curl_session.cc
         src/ai/rag/rag_http_client.cc
@@ -159,6 +163,7 @@ if(BUILD_AI_CHAT_SERVER)
         src/ai/rag/rag_indexer.cc
         src/ai/service/auth_service.cc
         src/ai/service/chat_service.cc
+        src/ai/storage/api_key_pool_repository.cc
         src/ai/storage/auth_repository.cc
         src/ai/storage/mysql_connection_pool.cc
         src/ai/storage/chat_repository.cc

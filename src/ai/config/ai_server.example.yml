@@ -5,21 +5,42 @@ ai:
     enable_ssl: false
     ssl_cert_file: ""
     ssl_key_file: ""
-  provider:
-    type: openai_compatible
-  openai_compatible:
-    base_url: https://api.deepseek.com/v1
-    api_key: "sk-0c2ef3af68c841aa92ab2eae60f57c41"
-    default_model: deepseek-chat
-    connect_timeout_ms: 10000
-    request_timeout_ms: 180000
-  anthropic:
-    base_url: https://api.anthropic.com
-    api_key: "YOUR_ANTHROPIC_API_KEY"
-    default_model: claude-3-5-sonnet-20241022
-    api_version: "2023-06-01"
-    connect_timeout_ms: 3000
-    request_timeout_ms: 120000
+  llm:
+    providers:
+      - id: deepseek_main
+        type: openai_compatible
+        enabled: true
+        base_url: https://api.deepseek.com/v1
+        api_key: "YOUR_DEEPSEEK_API_KEY"
+        default_model: deepseek-chat
+        connect_timeout_ms: 10000
+        request_timeout_ms: 180000
+        key_pool:
+          enabled: false
+          reload_interval_ms: 5000
+          max_retry_per_request: 2
+          cooldown_short_ms: 60000
+          cooldown_long_ms: 600000
+      - id: anthropic_main
+        type: anthropic
+        enabled: false
+        base_url: https://api.anthropic.com
+        api_key: "YOUR_ANTHROPIC_API_KEY"
+        default_model: claude-3-5-sonnet-20241022
+        api_version: "2023-06-01"
+        connect_timeout_ms: 3000
+        request_timeout_ms: 120000
+        key_pool:
+          enabled: false
+          reload_interval_ms: 5000
+          max_retry_per_request: 2
+          cooldown_short_ms: 60000
+          cooldown_long_ms: 600000
+    routing:
+      default_provider_id: deepseek_main
+      model_map:
+        deepseek-chat: deepseek_main
+        deepseek-reasoner: deepseek_main
   chat:
     require_sid: true
     max_context_messages: 20

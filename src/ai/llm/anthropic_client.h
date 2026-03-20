@@ -1,6 +1,7 @@
 #ifndef __SYLAR_AI_LLM_ANTHROPIC_CLIENT_H__
 #define __SYLAR_AI_LLM_ANTHROPIC_CLIENT_H__
 
+#include "ai/llm/api_key_provider.h"
 #include "ai/llm/llm_client.h"
 
 #include <stdint.h>
@@ -52,8 +53,12 @@ class AnthropicClient : public LlmClient
     /**
      * @brief 构造 Anthropic 客户端。
      * @param settings Anthropic 客户端配置快照。
+     * @param key_provider Provider 级 Key 提供者（可选）。
+     * @param max_retry_per_request 单请求最大重试次数（不含首次尝试）。
      */
-    explicit AnthropicClient(const AnthropicSettings& settings);
+    explicit AnthropicClient(const AnthropicSettings& settings,
+                             const ApiKeyProvider::ptr& key_provider = ApiKeyProvider::ptr(),
+                             uint32_t max_retry_per_request = 2);
 
     /**
      * @brief 发起同步补全请求。
@@ -89,6 +94,10 @@ class AnthropicClient : public LlmClient
   private:
     /** @brief Anthropic 客户端配置快照。 */
     AnthropicSettings m_settings;
+    /** @brief 动态 key 提供者（可选）。 */
+    ApiKeyProvider::ptr m_key_provider;
+    /** @brief 单请求最大重试次数（不含首次尝试）。 */
+    uint32_t m_max_retry_per_request;
 };
 
 } // namespace llm

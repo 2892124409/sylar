@@ -61,14 +61,14 @@ bool ContainsAny(const std::string& text, const std::vector<std::string>& keywor
  * @brief 构造 ChatService，注入依赖与策略配置。
  */
 ChatService::ChatService(const config::ChatSettings& settings,
-                         const llm::LlmClient::ptr& llm_client,
+                         const llm::LlmRouter::ptr& llm_router,
                          const ChatStore::ptr& store,
                          const MessageSink::ptr& sink,
                          const config::RagSettings& rag_settings,
                          const rag::RagRetriever::ptr& rag_retriever,
                          const rag::RagIndexer::ptr& rag_indexer)
     : m_settings(settings)
-    , m_llm_client(llm_client)
+    , m_llm_router(llm_router)
     , m_store(store)
     , m_sink(sink)
     , m_rag_settings(rag_settings)
@@ -103,7 +103,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
         return false;
     }
 
-    if (!m_llm_client || !m_store || !m_sink)
+    if (!m_llm_router || !m_store || !m_sink)
     {
         status = http::HttpStatus::INTERNAL_SERVER_ERROR;
         error = "chat service dependencies are not initialized";
@@ -120,6 +120,13 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
 
     ConversationContext context = SnapshotContext(request.sid, conversation_id);
 
+    llm::LlmRouteResult route;
+    if (!m_llm_router->Route(request.provider, request.model, route, error))
+    {
+        status = http::HttpStatus::BAD_REQUEST;
+        return false;
+    }
+
     // Step 3: 组装用户消息与 LLM 请求基础参数。
     common::ChatMessage user_message;
     user_message.role = "user";
@@ -127,7 +134,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
     user_message.created_at_ms = common::NowMs();
 
     llm::LlmCompletionRequest llm_request;
-    llm_request.model = request.model;
+    llm_request.model = route.model;
     llm_request.temperature = request.temperature;
     llm_request.max_tokens = request.max_tokens;
 
@@ -147,7 +154,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
 
     // Step 5: 调用 LLM 完成补全。
     llm::LlmCompletionResult llm_response;
-    if (!m_llm_client->Complete(llm_request, llm_response, error))
+    if (!route.client->Complete(llm_request, llm_response, error))
     {
         status = http::HttpStatus::SERVICE_UNAVAILABLE;
         return false;
@@ -184,7 +191,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
     AppendContextMessages(request.sid, conversation_id, user_message, assistant_message);
 
     std::string summary_error;
-    if (!MaybeRefreshSummary(request.sid, conversation_id, request.model, summary_error))
+    if (!MaybeRefreshSummary(request.sid, conversation_id, route.client, route.model, summary_error))
     {
         BASE_LOG_WARN(g_logger) << "refresh summary failed sid=" << request.sid
                                 << " conv=" << conversation_id
@@ -195,6 +202,7 @@ bool ChatService::Complete(const common::ChatCompletionRequest& request,
     response.conversation_id = conversation_id;
     response.reply = assistant_message.content;
     response.model = llm_response.model;
+    response.provider = route.provider_id;
     response.finish_reason = llm_response.finish_reason;
     response.created_at_ms = assistant_message.created_at_ms;
 
@@ -231,7 +239,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
         return false;
     }
 
-    if (!m_llm_client || !m_store || !m_sink)
+    if (!m_llm_router || !m_store || !m_sink)
     {
         status = http::HttpStatus::INTERNAL_SERVER_ERROR;
         error = "chat service dependencies are not initialized";
@@ -248,6 +256,13 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
 
     ConversationContext context = SnapshotContext(request.sid, conversation_id);
 
+    llm::LlmRouteResult route;
+    if (!m_llm_router->Route(request.provider, request.model, route, error))
+    {
+        status = http::HttpStatus::BAD_REQUEST;
+        return false;
+    }
+
     // Step 3: 构建请求消息（system + budgeted_context + user）。
     common::ChatMessage user_message;
     user_message.role = "user";
@@ -255,7 +270,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     user_message.created_at_ms = common::NowMs();
 
     llm::LlmCompletionRequest llm_request;
-    llm_request.model = request.model;
+    llm_request.model = route.model;
     llm_request.temperature = request.temperature;
     llm_request.max_tokens = request.max_tokens;
 
@@ -277,6 +292,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     nlohmann::json start;
     start["conversation_id"] = conversation_id;
     start["created_at_ms"] = user_message.created_at_ms;
+    start["provider"] = route.provider_id;
     start["model"] = llm_request.model;
     if (!emit("start", start.dump()))
     {
@@ -288,7 +304,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     // Step 5: 流式拉取 delta，并实时透传 SSE chunk。
     std::string assembled;
     llm::LlmCompletionResult llm_response;
-    bool ok = m_llm_client->StreamComplete(
+    bool ok = route.client->StreamComplete(
         llm_request,
         [&emit, &assembled](const std::string& delta)
         {
@@ -348,7 +364,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     AppendContextMessages(request.sid, conversation_id, user_message, assistant_message);
 
     std::string summary_error;
-    if (!MaybeRefreshSummary(request.sid, conversation_id, request.model, summary_error))
+    if (!MaybeRefreshSummary(request.sid, conversation_id, route.client, route.model, summary_error))
     {
         BASE_LOG_WARN(g_logger) << "refresh summary failed sid=" << request.sid
                                 << " conv=" << conversation_id
@@ -358,6 +374,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     // Step 9: 发送 done 事件（包含 usage/finish_reason）。
     nlohmann::json done;
     done["conversation_id"] = conversation_id;
+    done["provider"] = route.provider_id;
     done["model"] = llm_response.model;
     done["finish_reason"] = llm_response.finish_reason;
     done["created_at_ms"] = assistant_message.created_at_ms;
@@ -374,6 +391,7 @@ bool ChatService::StreamComplete(const common::ChatCompletionRequest& request,
     response.conversation_id = conversation_id;
     response.reply = assistant_message.content;
     response.model = llm_response.model;
+    response.provider = route.provider_id;
     response.finish_reason = llm_response.finish_reason;
     response.created_at_ms = assistant_message.created_at_ms;
 
@@ -749,6 +767,7 @@ bool ChatService::ShouldTriggerRagRecall(const common::ChatMessage& pending_user
  */
 bool ChatService::MaybeRefreshSummary(const std::string& sid,
                                       const std::string& conversation_id,
+                                      const llm::LlmClient::ptr& llm_client,
                                       const std::string& model,
                                       std::string& error)
 {
@@ -826,7 +845,12 @@ bool ChatService::MaybeRefreshSummary(const std::string& sid,
 
     llm::LlmCompletionResult result;
     std::string llm_error;
-    if (!m_llm_client->Complete(req, result, llm_error))
+    if (!llm_client)
+    {
+        error = "summary llm client is null";
+        return false;
+    }
+    if (!llm_client->Complete(req, result, llm_error))
     {
         error = llm_error;
         return false;

@@ -18,6 +18,7 @@ struct Options
 {
     std::string base_url = "http://127.0.0.1:8080";
     std::string model = "";
+    std::string provider = "";
     std::string conversation_id = "";
     std::string username = "";
     std::string password = "";
@@ -77,6 +78,7 @@ void PrintUsage(const char* argv0)
         << "Usage: " << argv0 << " [options]\n"
         << "  --base-url <url>         Server base url, default http://127.0.0.1:8080\n"
         << "  --model <name>           Model name, default use server config\n"
+        << "  --provider <id>          Provider id, default use server routing\n"
         << "  --conversation-id <id>   Start with existing conversation id\n"
         << "  --temperature <float>    Sampling temperature, default 0.7\n"
         << "  --max-tokens <int>       Max tokens, default 512\n"
@@ -91,6 +93,7 @@ void PrintUsage(const char* argv0)
         << "  /new                     Start a new conversation\n"
         << "  /history [limit]         Query current conversation history\n"
         << "  /stream on|off           Toggle stream mode\n"
+        << "  /provider <id>           Set provider id for next requests\n"
         << "  /register <u> <p>        Register account\n"
         << "  /login <u> <p>           Login and store bearer token\n"
         << "  /logout                  Logout and clear bearer token\n"
@@ -113,6 +116,7 @@ void PrintInteractiveHelp()
         << "  /new\n"
         << "  /history [limit]\n"
         << "  /stream on|off\n"
+        << "  /provider <id>\n"
         << "  /exit\n";
 }
 
@@ -153,6 +157,11 @@ bool ParseArgs(int argc, char** argv, Options& opts)
         if (arg == "--model" && i + 1 < argc)
         {
             opts.model = argv[++i];
+            continue;
+        }
+        if (arg == "--provider" && i + 1 < argc)
+        {
+            opts.provider = argv[++i];
             continue;
         }
         if (arg == "--conversation-id" && i + 1 < argc)
@@ -556,6 +565,10 @@ nlohmann::json BuildChatPayload(const std::string& message,
     {
         payload["model"] = opts.model;
     }
+    if (!opts.provider.empty())
+    {
+        payload["provider"] = opts.provider;
+    }
 
     if (!conversation_id.empty())
     {
@@ -708,6 +721,10 @@ int main(int argc, char** argv)
         std::cout << "Connected to " << opts.base_url << "\n";
         std::cout << "Mode: " << (opts.stream ? "stream" : "sync") << "\n";
         std::cout << "Auth: " << (client.HasBearerToken() ? "bearer" : "unauthenticated") << "\n";
+        if (!opts.provider.empty())
+        {
+            std::cout << "Provider: " << opts.provider << "\n";
+        }
         if (!opts.conversation_id.empty())
         {
             std::cout << "Start with conversation_id=" << opts.conversation_id << "\n";
@@ -906,6 +923,21 @@ int main(int argc, char** argv)
                 HttpResult history = client.History(conversation_id, limit);
                 std::cout << "History status=" << history.status << "\n";
                 PrintJsonIfPossible(history.body);
+                continue;
+            }
+
+            if (input.compare(0, 10, "/provider ") == 0)
+            {
+                std::string provider = Trim(input.substr(10));
+                if (provider.empty())
+                {
+                    std::cout << "Usage: /provider <id>\n";
+                }
+                else
+                {
+                    opts.provider = provider;
+                    std::cout << "Provider set to " << opts.provider << "\n";
+                }
                 continue;
             }
 

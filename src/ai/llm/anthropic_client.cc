@@ -6,6 +6,7 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <mutex>
 #include <sstream>
 
@@ -44,6 +45,8 @@ struct StreamWriteContext
     std::string line_buffer;
     /** @brief 聚合后的完整文本。 */
     std::string assembled;
+    /** @brief 是否已经向上层输出过任意 delta 内容。 */
+    bool has_output = false;
     /** @brief 响应模型名。 */
     std::string model;
     /** @brief 停止原因。 */
@@ -100,6 +103,28 @@ std::string BuildApiKeyHeader(const std::string& api_key)
 std::string BuildApiVersionHeader(const std::string& api_version)
 {
     return "anthropic-version: " + api_version;
+}
+
+ApiKeyFailureType ClassifyHttpFailureType(long http_code)
+{
+    if (http_code == 429)
+    {
+        return ApiKeyFailureType::RATE_LIMIT;
+    }
+    if (http_code == 401 || http_code == 403)
+    {
+        return ApiKeyFailureType::AUTH_ERROR;
+    }
+    if (http_code >= 500 && http_code < 600)
+    {
+        return ApiKeyFailureType::SERVER_ERROR;
+    }
+    return ApiKeyFailureType::OTHER_ERROR;
+}
+
+bool IsRetriableHttpFailure(long http_code)
+{
+    return http_code == 429 || http_code == 401 || http_code == 403 || (http_code >= 500 && http_code < 600);
 }
 
 /**
@@ -371,12 +396,13 @@ bool HandleStreamDataLine(const std::string& line, StreamWriteContext& ctx)
         if (delta.contains("text") && delta["text"].is_string())
         {
             const std::string text = delta["text"].get<std::string>();
-            if (!text.empty())
-            {
-                ctx.assembled.append(text);
-                if (ctx.on_delta && !ctx.on_delta(text))
+                if (!text.empty())
                 {
-                    ctx.callback_aborted = true;
+                    ctx.assembled.append(text);
+                    ctx.has_output = true;
+                    if (ctx.on_delta && !ctx.on_delta(text))
+                    {
+                        ctx.callback_aborted = true;
                     return false;
                 }
             }
@@ -392,6 +418,7 @@ bool HandleStreamDataLine(const std::string& line, StreamWriteContext& ctx)
             if (!text.empty())
             {
                 ctx.assembled.append(text);
+                ctx.has_output = true;
                 if (ctx.on_delta && !ctx.on_delta(text))
                 {
                     ctx.callback_aborted = true;
@@ -448,8 +475,12 @@ size_t StreamWriteCallback(void* contents, size_t size, size_t nmemb, void* user
 /**
  * @brief 构造 Anthropic 客户端并完成 curl 全局初始化。
  */
-AnthropicClient::AnthropicClient(const AnthropicSettings& settings)
+AnthropicClient::AnthropicClient(const AnthropicSettings& settings,
+                                 const ApiKeyProvider::ptr& key_provider,
+                                 uint32_t max_retry_per_request)
     : m_settings(settings)
+    , m_key_provider(key_provider)
+    , m_max_retry_per_request(std::min<uint32_t>(max_retry_per_request, 8))
 {
     EnsureCurlGlobalInit();
 }
@@ -487,70 +518,131 @@ bool AnthropicClient::Complete(const LlmCompletionRequest& request,
                                LlmCompletionResult& result,
                                std::string& error)
 {
-    CURL* curl = curl_easy_init();
-    if (!curl)
+    std::vector<ApiKeyCandidate> candidates;
+    const size_t attempt_limit = static_cast<size_t>(m_max_retry_per_request) + 1;
+    if (m_key_provider)
     {
-        error = "curl_easy_init failed";
+        candidates = m_key_provider->AcquireCandidates(attempt_limit);
+    }
+    if (candidates.empty() && !m_settings.api_key.empty())
+    {
+        ApiKeyCandidate fallback;
+        fallback.id = 0;
+        fallback.api_key = m_settings.api_key;
+        candidates.push_back(fallback);
+    }
+    if (candidates.empty())
+    {
+        error = "no available anthropic api key";
         return false;
     }
 
-    SyncWriteContext write_ctx;
-    nlohmann::json body = BuildRequestBody(request, false);
-    const std::string payload = body.dump();
-
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, BuildApiKeyHeader(m_settings.api_key).c_str());
-    headers = curl_slist_append(headers, BuildApiVersionHeader(m_settings.api_version).c_str());
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-
-    curl_easy_setopt(curl, CURLOPT_URL, BuildMessagesUrl().c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, SyncWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
-
-    FiberCurlSession session(curl);
-    CURLcode code = session.Perform();
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (code != CURLE_OK)
+    const size_t total_attempts = std::min(candidates.size(), attempt_limit);
+    std::string last_error;
+    for (size_t attempt = 0; attempt < total_attempts; ++attempt)
     {
-        error = std::string("anthropic request failed: ") + curl_easy_strerror(code);
-        return false;
-    }
-
-    if (http_code < 200 || http_code >= 300)
-    {
-        std::ostringstream ss;
-        ss << "anthropic http status " << http_code;
-        if (!write_ctx.response.empty())
+        const ApiKeyCandidate& candidate = candidates[attempt];
+        if (candidate.api_key.empty())
         {
-            ss << ", body=" << write_ctx.response;
+            continue;
         }
-        error = ss.str();
-        return false;
+
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            error = "curl_easy_init failed";
+            return false;
+        }
+
+        SyncWriteContext write_ctx;
+        nlohmann::json body = BuildRequestBody(request, false);
+        const std::string payload = body.dump();
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, BuildApiKeyHeader(candidate.api_key).c_str());
+        headers = curl_slist_append(headers, BuildApiVersionHeader(m_settings.api_version).c_str());
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, BuildMessagesUrl().c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, SyncWriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
+
+        FiberCurlSession session(curl);
+        CURLcode code = session.Perform();
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        bool should_retry = false;
+        ApiKeyFailureType failure_type = ApiKeyFailureType::OTHER_ERROR;
+        if (code != CURLE_OK)
+        {
+            error = std::string("anthropic request failed: ") + curl_easy_strerror(code);
+            should_retry = true;
+            failure_type = ApiKeyFailureType::NETWORK_ERROR;
+        }
+        else if (http_code < 200 || http_code >= 300)
+        {
+            std::ostringstream ss;
+            ss << "anthropic http status " << http_code;
+            if (!write_ctx.response.empty())
+            {
+                ss << ", body=" << write_ctx.response;
+            }
+            error = ss.str();
+            should_retry = IsRetriableHttpFailure(http_code);
+            failure_type = ClassifyHttpFailureType(http_code);
+        }
+        else
+        {
+            if (!ParseSyncResponse(write_ctx.response, result, error))
+            {
+                BASE_LOG_ERROR(g_logger) << "Parse anthropic sync response failed, body=" << write_ctx.response;
+                should_retry = false;
+                failure_type = ApiKeyFailureType::OTHER_ERROR;
+            }
+            else
+            {
+                if (result.model.empty())
+                {
+                    result.model = request.model;
+                }
+                if (m_key_provider && candidate.id != 0)
+                {
+                    m_key_provider->ReportSuccess(candidate.id);
+                }
+                return true;
+            }
+        }
+
+        if (should_retry && m_key_provider && candidate.id != 0)
+        {
+            m_key_provider->ReportFailure(candidate.id, failure_type);
+        }
+
+        last_error = error;
+        BASE_LOG_WARN(g_logger) << "anthropic attempt failed, key_id=" << candidate.id
+                                << " attempt=" << (attempt + 1) << "/" << total_attempts
+                                << " retry=" << (should_retry ? "yes" : "no")
+                                << " error=" << error;
+
+        if (!should_retry || attempt + 1 >= total_attempts)
+        {
+            error = last_error;
+            return false;
+        }
     }
 
-    if (!ParseSyncResponse(write_ctx.response, result, error))
-    {
-        BASE_LOG_ERROR(g_logger) << "Parse anthropic sync response failed, body=" << write_ctx.response;
-        return false;
-    }
-
-    if (result.model.empty())
-    {
-        result.model = request.model;
-    }
-
-    return true;
+    error = last_error.empty() ? "anthropic request failed" : last_error;
+    return false;
 }
 
 /**
@@ -561,79 +653,148 @@ bool AnthropicClient::StreamComplete(const LlmCompletionRequest& request,
                                      LlmCompletionResult& result,
                                      std::string& error)
 {
-    CURL* curl = curl_easy_init();
-    if (!curl)
+    std::vector<ApiKeyCandidate> candidates;
+    const size_t attempt_limit = static_cast<size_t>(m_max_retry_per_request) + 1;
+    if (m_key_provider)
     {
-        error = "curl_easy_init failed";
+        candidates = m_key_provider->AcquireCandidates(attempt_limit);
+    }
+    if (candidates.empty() && !m_settings.api_key.empty())
+    {
+        ApiKeyCandidate fallback;
+        fallback.id = 0;
+        fallback.api_key = m_settings.api_key;
+        candidates.push_back(fallback);
+    }
+    if (candidates.empty())
+    {
+        error = "no available anthropic api key";
         return false;
     }
 
-    StreamWriteContext write_ctx;
-    write_ctx.on_delta = on_delta;
-
-    nlohmann::json body = BuildRequestBody(request, true);
-    const std::string payload = body.dump();
-
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, BuildApiKeyHeader(m_settings.api_key).c_str());
-    headers = curl_slist_append(headers, BuildApiVersionHeader(m_settings.api_version).c_str());
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-
-    curl_easy_setopt(curl, CURLOPT_URL, BuildMessagesUrl().c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
-
-    FiberCurlSession session(curl);
-    CURLcode code = session.Perform();
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (code != CURLE_OK)
+    const size_t total_attempts = std::min(candidates.size(), attempt_limit);
+    std::string last_error;
+    for (size_t attempt = 0; attempt < total_attempts; ++attempt)
     {
-        if (write_ctx.callback_aborted)
+        const ApiKeyCandidate& candidate = candidates[attempt];
+        if (candidate.api_key.empty())
         {
-            error = "stream callback aborted";
+            continue;
+        }
+
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            error = "curl_easy_init failed";
+            return false;
+        }
+
+        StreamWriteContext write_ctx;
+        write_ctx.on_delta = on_delta;
+
+        nlohmann::json body = BuildRequestBody(request, true);
+        const std::string payload = body.dump();
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, BuildApiKeyHeader(candidate.api_key).c_str());
+        headers = curl_slist_append(headers, BuildApiVersionHeader(m_settings.api_version).c_str());
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, BuildMessagesUrl().c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload.size());
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(m_settings.connect_timeout_ms));
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_settings.request_timeout_ms));
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamWriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
+
+        FiberCurlSession session(curl);
+        CURLcode code = session.Perform();
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        bool should_retry = false;
+        bool should_report_failure = false;
+        ApiKeyFailureType failure_type = ApiKeyFailureType::OTHER_ERROR;
+        if (code != CURLE_OK)
+        {
+            if (write_ctx.callback_aborted)
+            {
+                error = "stream callback aborted";
+                should_retry = false;
+            }
+            else if (!write_ctx.parse_error.empty())
+            {
+                error = write_ctx.parse_error;
+                should_retry = false;
+            }
+            else
+            {
+                error = std::string("anthropic stream request failed: ") + curl_easy_strerror(code);
+                should_retry = true;
+                should_report_failure = true;
+                failure_type = ApiKeyFailureType::NETWORK_ERROR;
+            }
+        }
+        else if (http_code < 200 || http_code >= 300)
+        {
+            std::ostringstream ss;
+            ss << "anthropic stream http status " << http_code;
+            error = ss.str();
+            should_retry = IsRetriableHttpFailure(http_code);
+            should_report_failure = should_retry;
+            failure_type = ClassifyHttpFailureType(http_code);
         }
         else if (!write_ctx.parse_error.empty())
         {
             error = write_ctx.parse_error;
+            should_retry = false;
         }
         else
         {
-            error = std::string("anthropic stream request failed: ") + curl_easy_strerror(code);
+            result.content = write_ctx.assembled;
+            result.model = write_ctx.model.empty() ? request.model : write_ctx.model;
+            result.finish_reason = write_ctx.finish_reason;
+            result.prompt_tokens = write_ctx.prompt_tokens;
+            result.completion_tokens = write_ctx.completion_tokens;
+            if (m_key_provider && candidate.id != 0)
+            {
+                m_key_provider->ReportSuccess(candidate.id);
+            }
+            return true;
         }
-        return false;
+
+        if (write_ctx.has_output && should_retry)
+        {
+            should_retry = false;
+            error = "anthropic stream interrupted after partial output";
+        }
+
+        if (should_report_failure && m_key_provider && candidate.id != 0)
+        {
+            m_key_provider->ReportFailure(candidate.id, failure_type);
+        }
+
+        last_error = error;
+        BASE_LOG_WARN(g_logger) << "anthropic stream attempt failed, key_id=" << candidate.id
+                                << " attempt=" << (attempt + 1) << "/" << total_attempts
+                                << " retry=" << (should_retry ? "yes" : "no")
+                                << " error=" << error;
+
+        if (!should_retry || attempt + 1 >= total_attempts)
+        {
+            error = last_error;
+            return false;
+        }
     }
 
-    if (http_code < 200 || http_code >= 300)
-    {
-        std::ostringstream ss;
-        ss << "anthropic stream http status " << http_code;
-        error = ss.str();
-        return false;
-    }
-
-    if (!write_ctx.parse_error.empty())
-    {
-        error = write_ctx.parse_error;
-        return false;
-    }
-
-    result.content = write_ctx.assembled;
-    result.model = write_ctx.model.empty() ? request.model : write_ctx.model;
-    result.finish_reason = write_ctx.finish_reason;
-    result.prompt_tokens = write_ctx.prompt_tokens;
-    result.completion_tokens = write_ctx.completion_tokens;
-    return true;
+    error = last_error.empty() ? "anthropic stream request failed" : last_error;
+    return false;
 }
 
 } // namespace llm

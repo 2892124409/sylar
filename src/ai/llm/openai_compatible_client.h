@@ -1,10 +1,13 @@
 #ifndef __SYLAR_AI_LLM_OPENAI_COMPATIBLE_CLIENT_H__
 #define __SYLAR_AI_LLM_OPENAI_COMPATIBLE_CLIENT_H__
 
+#include "ai/llm/api_key_provider.h"
 #include "ai/config/ai_app_config.h"
 #include "ai/llm/llm_client.h"
 
+#include <memory>
 #include <string>
+#include <vector>
 
 /**
  * @file openai_compatible_client.h
@@ -30,7 +33,9 @@ class OpenAICompatibleClient : public LlmClient
      * 使用 `ai.openai_compatible.*` 配置中的
      * `base_url/api_key/default_model/timeout` 等通用字段。
      */
-    explicit OpenAICompatibleClient(const config::OpenAICompatibleSettings& settings);
+    explicit OpenAICompatibleClient(const config::OpenAICompatibleSettings& settings,
+                                    const ApiKeyProvider::ptr& key_provider = ApiKeyProvider::ptr(),
+                                    uint32_t max_retry_per_request = 2);
 
     /**
      * @brief 调用同步补全接口。
@@ -56,6 +61,10 @@ class OpenAICompatibleClient : public LlmClient
   private:
     /** @brief OpenAI-Compatible 客户端配置快照。 */
     config::OpenAICompatibleSettings m_settings;
+    /** @brief 动态 key 提供者（可选）。 */
+    ApiKeyProvider::ptr m_key_provider;
+    /** @brief 单请求最大重试次数（不含首次尝试）。 */
+    uint32_t m_max_retry_per_request;
 };
 
 } // namespace llm
