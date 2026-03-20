@@ -108,3 +108,6 @@ target_link_libraries(test_memorypool pthread)
 
 add_executable(test_benchmark_fiber tests/test_benchmark_fiber.cc)
 target_link_libraries(test_benchmark_fiber sylar)
+
+add_executable(test_benchmark_tcp_allocator tests/test_benchmark_tcp_allocator.cc)
+target_link_libraries(test_benchmark_tcp_allocator sylar)
