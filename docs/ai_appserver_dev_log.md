@@ -3,17 +3,17 @@
 ## 项目目标（持续更新）
 - 作为 AI 应用层的阶段化开发日志，持续记录从 V1 最小通路到后续生产化能力建设的全过程。
 - 每个阶段固定记录：目标、实现细节、关键设计取舍、踩坑与复盘。
-- 当前进度：第一阶段（最小通路）、第二阶段（Provider 切换 + 上下文摘要 + 并发能力增强）、第三阶段（用户体系与鉴权）、第四阶段（记忆检索增强 RAG）已完成。
+- 当前进度：第一阶段（最小通路）、第二阶段（Provider 切换 + 上下文摘要 + 并发能力增强）、第三阶段（用户体系与鉴权）、第四阶段（记忆检索增强 RAG）、第五阶段（多 Provider 路由与注册式工厂）、第六阶段（写路径消息队列化 RabbitMQ）已完成。
 
 ---
 
 ## 当前范围声明
 这份笔记是多阶段持续维护文档，不只记录第一阶段。
 
-- 已落地并已详细展开：第一阶段、第二阶段、第三阶段、第四阶段。
-- 已列出但未展开实现细节：第五阶段及之后。
-- 当前未实现能力：写路径消息队列化、限流熔断、观测告警、发布治理等。
-- 当前运行时支持通过 `ai.provider.type` 切换 `openai_compatible` / `anthropic`。
+- 已落地并已详细展开：第一阶段、第二阶段、第三阶段、第四阶段、第五阶段、第六阶段。
+- 已列出但未展开实现细节：第七阶段及之后。
+- 当前未实现能力：限流熔断、观测告警、发布治理等。
+- 当前运行时支持多 Provider 路由（`ai.llm.providers` + `ai.llm.routing`）与 MQ 写路径开关（`ai.mq.*`）。
 
 ---
 
@@ -2564,8 +2564,162 @@ Client
 
 ---
 
+## 第六阶段：写路径消息队列化（RabbitMQ）
+
+### 1. 阶段目标
+把“主服务进程内异步写库”升级为“主服务生产消息 + 独立消费者落库”的生产者-消费者架构：
+
+1. 主服务只负责业务编排与消息投递，不再承担写库执行。
+2. 写库职责下沉到独立消费者进程，进程边界解耦写路径。
+3. 保持 `ChatService` 层接口稳定（继续依赖 `MessageSink` 抽象）。
+
+---
+
+### 2. 架构与边界
+本阶段最终采用 RabbitMQ 原生 AMQP（`librabbitmq`）实现：
+
+1. 生产者：`RabbitMqMessageSink`（实现 `MessageSink`），请求线程只做入队，后台线程负责发布。
+2. 消费者：`ai_mq_consumer` 独立可执行程序，批量拉取消息并落库。
+3. 写库执行器：`ChatMessagePersister`，统一建表与事务批量写入逻辑。
+4. 主服务装配策略：优先 MQ，失败可按配置回退本地 `AsyncMySqlWriter`。
+
+代码路径：
+
+1. `src/ai/mq/rabbitmq_amqp_client.h/.cc`
+2. `src/ai/mq/rabbitmq_message_sink.h/.cc`
+3. `src/ai/mq/main_mq_consumer.cc`
+4. `src/ai/storage/chat_message_persister.h/.cc`
+5. `src/ai/main.cc`
+
+---
+
+### 3. 核心改动清单
+
+#### 3.1 配置层新增与收敛（`ai_app_config`）
+新增/使用 `ai.mq.*` 与 `ai.mq.rabbitmq.*`：
+
+1. `ai.mq.enabled`
+2. `ai.mq.provider`（当前仅支持 `rabbitmq_amqp`）
+3. `ai.mq.producer_queue_capacity`
+4. `ai.mq.fallback_to_local_writer`
+5. `ai.mq.consumer_batch_size`
+6. `ai.mq.consumer_poll_interval_ms`
+7. `ai.mq.rabbitmq.host/port/username/password/vhost/exchange/queue/routing_key/request_timeout_ms/connect_timeout_ms/channel/heartbeat_seconds`
+
+说明：
+
+1. `routing_key` 为空时默认回填 `queue`。
+2. `Validate()` 已加入 MQ 配置合法性校验（fail-fast）。
+3. 旧的 HTTP API 配置（如 `api_base_url`）已移除，不再兼容。
+
+#### 3.2 RabbitMQ AMQP 客户端（`src/ai/mq/rabbitmq_amqp_client.h/.cc`）
+能力：
+
+1. `EnsureQueue()`：幂等声明队列（必要时绑定交换机与路由键）。
+2. `Publish(payload)`：使用 `amqp_basic_publish` 发布 JSON 消息。
+3. `Get(count)`：批量 `basic_get` 拉取消息，当前使用 `no_ack=true`。
+
+实现要点：
+
+1. 使用 `amqp_socket_open_noblock + amqp_login + amqp_channel_open` 建立连接会话。
+2. 每次发布/拉取都走 `OpenSession -> 操作 -> CloseSession`，实现简单、边界清晰。
+3. 发布消息设置 `content_type=application/json`、`delivery_mode=2`（持久化消息）。
+
+#### 3.3 MQ 生产者 Sink（`src/ai/mq/rabbitmq_message_sink.h/.cc`）
+职责：
+
+1. 请求线程调用 `Enqueue` 仅入本地队列，避免把网络阻塞暴露给业务线程。
+2. 后台线程循环取本地队列并调用 `RabbitMqAmqpClient::Publish`。
+3. 启动阶段执行 `EnsureQueue()` 并校验 provider/capacity。
+
+消息协议：
+
+1. schema：`ai.persist_message.v1`
+2. payload 字段：`sid/conversation_id/role/content/created_at_ms`
+
+#### 3.4 写库执行器与消费者进程
+新增 `ChatMessagePersister`（`src/ai/storage/chat_message_persister.h/.cc`）：
+
+1. 负责 `conversations/chat_messages` 建表与补字段。
+2. 负责批量事务写入（`BEGIN -> batch upsert/insert -> COMMIT/ROLLBACK`）。
+
+新增消费者入口 `src/ai/mq/main_mq_consumer.cc`：
+
+1. 读取同一份 `ai_server.yml`。
+2. 初始化 MySQL 连接池与 `ChatMessagePersister`。
+3. 循环拉取批次，反序列化 `PersistMessage` 后统一落库。
+
+#### 3.5 主服务装配改造（`src/ai/main.cc`）
+写路径装配从“固定 `AsyncMySqlWriter`”改为“可切换 sink”：
+
+1. `mq.enabled=true` 时优先启动 `RabbitMqMessageSink`。
+2. MQ 启动失败且 `fallback_to_local_writer=true` 时回退 `AsyncMySqlWriter`。
+3. MQ 启动失败且不允许回退时启动失败（用于强制验收）。
+4. 启动日志可见：`persist sink selected: rabbitmq_amqp`。
+
+---
+
+### 4. 第六阶段调用链
+消息写路径调用链如下：
+
+1. `ChatService::PersistMessage`
+2. `MessageSink::Enqueue`（实际为 `RabbitMqMessageSink::Enqueue`）
+3. `RabbitMqMessageSink` 后台线程 `Publish`
+4. RabbitMQ 队列 `ai_chat_persist`
+5. `ai_mq_consumer` 拉取 `Get(batch)`
+6. `ChatMessagePersister::PersistBatch`
+7. MySQL `conversations/chat_messages`
+
+---
+
+### 5. 测试与验证（当前版本）
+已完成：
+
+1. 构建验证
+   - `cmake --build build --target ai_chat_server ai_auth_chat_client ai_mq_consumer -j8`
+   - 结果：通过
+2. 代码链路校验
+   - 已无 `rabbitmq_http` 与 `api_base_url` 相关实现代码。
+   - `ai.mq.provider` 已收敛为 `rabbitmq_amqp`。
+3. 联调验证
+   - 主服务在 `mq.enabled=true` 时选择 MQ sink。
+   - 消费者可拉取队列消息并写入 `chat_messages`。
+
+---
+
+### 6. 当前取舍与已知限制（第六阶段）
+#### 当前取舍
+
+1. 当前 AMQP 消费使用 `basic_get + no_ack=true`，实现简单，便于快速落地。
+2. 消费者采用轮询拉取模型（`consumer_batch_size + poll_interval_ms`），可控但实时性一般。
+3. `RabbitMqAmqpClient` 采用“每次操作独立会话”策略，降低连接状态复杂度。
+
+#### 已知限制
+
+1. `no_ack=true` 下属于 at-most-once 语义，消费者在“拉取后写库前”崩溃可能丢消息。
+2. 尚未引入 DLQ、重放队列与幂等去重键。
+3. 连接复用与 channel 复用尚未做，吞吐提升空间仍在。
+
+---
+
+### 7. 阶段总结
+第六阶段完成了写路径的进程级解耦，并完成了 RabbitMQ 接入方式收敛：
+
+1. 主服务从“写库执行者”转为“消息生产者”。
+2. 写库逻辑由独立消费者进程承担，读写职责边界更清晰。
+3. `MessageSink` 抽象保持稳定，业务层改动最小化。
+4. RabbitMQ 路径已统一为原生 AMQP，HTTP API 实现代码已删除。
+
+### 8. 下一阶段
+第七阶段建议优先推进：
+
+1. 写路径可靠性增强：手动 ack、失败重放（DLQ）、幂等键、防重复消费。
+2. 稳定性治理：限流、重试、熔断、降级。
+3. 可观测性补齐：队列深度、消费延迟、失败率、DB 写入时延指标。
+
+---
+
 ## 后续阶段（规划）
-- 第六阶段：写路径消息队列化（MQ），将主服务进程内异步写入升级为外部 MQ（生产者-消费者），实现写路径解耦、削峰与失败重放；主服务进程只负责读库 + 生产消息，消费者侧批量落库并独立维护连接池。
 - 第七阶段：稳定性治理（限流、重试、熔断、降级）。
 - 第八阶段：可观测性（指标、日志、trace、告警）。
 - 第九阶段：运维发布（灰度、配置分层、备份恢复）。

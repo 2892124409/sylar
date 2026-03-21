@@ -225,6 +225,58 @@ struct PersistSettings
 };
 
 /**
+ * @brief RabbitMQ（原生 AMQP）配置。
+ */
+struct RabbitMqSettings
+{
+    /** @brief RabbitMQ 主机名/IP。 */
+    std::string host = "127.0.0.1";
+    /** @brief RabbitMQ AMQP 端口。 */
+    uint16_t port = 5672;
+    /** @brief RabbitMQ 用户名。 */
+    std::string username;
+    /** @brief RabbitMQ 密码。 */
+    std::string password;
+    /** @brief RabbitMQ vhost，默认 `/`。 */
+    std::string vhost = "/";
+    /** @brief 交换机名称，默认空串（default exchange）。 */
+    std::string exchange = "amq.default";
+    /** @brief 队列名称。 */
+    std::string queue;
+    /** @brief 路由键，留空时默认使用 `queue`。 */
+    std::string routing_key;
+    /** @brief AMQP 连接超时（毫秒）。 */
+    uint64_t connect_timeout_ms = 3000;
+    /** @brief 通道编号。 */
+    uint16_t channel = 1;
+    /** @brief 心跳间隔（秒），0 表示禁用。 */
+    uint16_t heartbeat_seconds = 30;
+    /** @brief 操作超时（毫秒），用于 get 操作等待与连接初始化。 */
+    uint64_t request_timeout_ms = 3000;
+};
+
+/**
+ * @brief 消息队列写路径配置。
+ */
+struct MqSettings
+{
+    /** @brief 是否启用 MQ 写路径。 */
+    bool enabled = false;
+    /** @brief MQ 提供者类型，当前仅支持 `rabbitmq_amqp`。 */
+    std::string provider = "rabbitmq_amqp";
+    /** @brief 生产者本地缓冲队列容量。 */
+    size_t producer_queue_capacity = 10000;
+    /** @brief 发送失败时是否回退到本地 AsyncMySqlWriter。 */
+    bool fallback_to_local_writer = true;
+    /** @brief 消费者拉取批大小。 */
+    size_t consumer_batch_size = 64;
+    /** @brief 消费者空轮询间隔（毫秒）。 */
+    uint64_t consumer_poll_interval_ms = 200;
+    /** @brief RabbitMQ 连接参数。 */
+    RabbitMqSettings rabbitmq;
+};
+
+/**
  * @brief RAG 检索策略配置。
  */
 struct RagSettings
@@ -325,6 +377,8 @@ class AiAppConfig
     static MysqlSettings GetMysqlSettings();
     /** @brief 获取异步持久化配置。 */
     static PersistSettings GetPersistSettings();
+    /** @brief 获取 MQ 写路径配置。 */
+    static MqSettings GetMqSettings();
     /** @brief 获取 RAG 配置。 */
     static RagSettings GetRagSettings();
     /** @brief 获取 Embedding 配置。 */

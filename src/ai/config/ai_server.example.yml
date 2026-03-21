@@ -74,6 +74,26 @@ ai:
     queue_capacity: 10000
     flush_interval_ms: 200
     batch_size: 128
+  mq:
+    enabled: true
+    provider: rabbitmq_amqp
+    producer_queue_capacity: 10000
+    fallback_to_local_writer: true
+    consumer_batch_size: 64
+    consumer_poll_interval_ms: 200
+    rabbitmq:
+      host: 127.0.0.1
+      port: 5672
+      username: guest
+      password: guest
+      vhost: /
+      exchange: amq.default
+      queue: ai_chat_persist
+      routing_key: ai_chat_persist
+      connect_timeout_ms: 3000
+      channel: 1
+      heartbeat_seconds: 30
+      request_timeout_ms: 3000
   rag:
     enabled: true
     recall_trigger_mode: intent   # always | intent

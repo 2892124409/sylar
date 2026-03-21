@@ -142,6 +142,11 @@ if(BUILD_AI_CHAT_SERVER)
         message(FATAL_ERROR "BUILD_AI_CHAT_SERVER=ON requires libmysqlclient. Install libmysqlclient-dev (or equivalent).")
     endif()
 
+    find_library(RABBITMQ_LIBRARY NAMES rabbitmq)
+    if(NOT RABBITMQ_LIBRARY)
+        message(FATAL_ERROR "BUILD_AI_CHAT_SERVER=ON requires librabbitmq. Install librabbitmq-dev (or equivalent).")
+    endif()
+
     set(AI_CHAT_SERVER_SOURCES
         src/ai/common/ai_utils.cc
         src/ai/config/ai_app_config.cc
@@ -149,6 +154,8 @@ if(BUILD_AI_CHAT_SERVER)
         src/ai/http/ai_http_handlers.cc
         src/ai/middleware/auth_middleware.cc
         src/ai/middleware/request_id_middleware.cc
+        src/ai/mq/rabbitmq_amqp_client.cc
+        src/ai/mq/rabbitmq_message_sink.cc
         src/ai/llm/llm_client_factory.cc
         src/ai/llm/llm_client_registry.cc
         src/ai/llm/llm_router.cc
@@ -172,7 +179,7 @@ if(BUILD_AI_CHAT_SERVER)
     )
 
     add_executable(ai_chat_server ${AI_CHAT_SERVER_SOURCES})
-    target_link_libraries(ai_chat_server PRIVATE sylar ${MYSQLCLIENT_LIBRARY} OpenSSL::Crypto)
+    target_link_libraries(ai_chat_server PRIVATE sylar ${MYSQLCLIENT_LIBRARY} ${RABBITMQ_LIBRARY} OpenSSL::Crypto)
 
     if(TARGET CURL::libcurl)
         target_link_libraries(ai_chat_server PRIVATE CURL::libcurl)
@@ -204,6 +211,23 @@ if(BUILD_AI_CHAT_SERVER)
     )
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(ai_auth_chat_client PRIVATE -Wall)
+    endif()
+
+    add_executable(ai_mq_consumer
+        src/ai/common/ai_utils.cc
+        src/ai/config/ai_app_config.cc
+        src/ai/mq/rabbitmq_amqp_client.cc
+        src/ai/mq/main_mq_consumer.cc
+        src/ai/storage/chat_message_persister.cc
+        src/ai/storage/mysql_connection_pool.cc
+    )
+    target_link_libraries(ai_mq_consumer PRIVATE sylar ${MYSQLCLIENT_LIBRARY} ${RABBITMQ_LIBRARY} OpenSSL::Crypto)
+    set_target_properties(ai_mq_consumer PROPERTIES
+        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(ai_mq_consumer PRIVATE -Wall)
     endif()
 endif()
 

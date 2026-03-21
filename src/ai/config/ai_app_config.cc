@@ -3,6 +3,8 @@
 #include "config/config.h"
 
 #include <stdlib.h>
+#include <algorithm>
+#include <cstdlib>
 #include <set>
 #include <sstream>
 
@@ -179,6 +181,60 @@ http::ConfigVar<uint64_t>::ptr g_ai_persist_flush_interval_ms =
 http::ConfigVar<uint64_t>::ptr g_ai_persist_batch_size =
     http::Config::Lookup<uint64_t>("ai.persist.batch_size", 128, "persist batch size");
 
+http::ConfigVar<std::string>::ptr g_ai_mq_enabled =
+    http::Config::Lookup<std::string>("ai.mq.enabled", "false", "mq write path enabled");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_provider =
+    http::Config::Lookup<std::string>("ai.mq.provider", "rabbitmq_amqp", "mq provider type");
+
+http::ConfigVar<uint64_t>::ptr g_ai_mq_producer_queue_capacity =
+    http::Config::Lookup<uint64_t>("ai.mq.producer_queue_capacity", 10000, "mq producer local queue capacity");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_fallback_to_local_writer =
+    http::Config::Lookup<std::string>("ai.mq.fallback_to_local_writer", "true", "fallback to local async writer when mq unavailable");
+
+http::ConfigVar<uint64_t>::ptr g_ai_mq_consumer_batch_size =
+    http::Config::Lookup<uint64_t>("ai.mq.consumer_batch_size", 64, "mq consumer pull batch size");
+
+http::ConfigVar<uint64_t>::ptr g_ai_mq_consumer_poll_interval_ms =
+    http::Config::Lookup<uint64_t>("ai.mq.consumer_poll_interval_ms", 200, "mq consumer poll interval ms");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_host =
+    http::Config::Lookup<std::string>("ai.mq.rabbitmq.host", "127.0.0.1", "rabbitmq host");
+
+http::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_port =
+    http::Config::Lookup<uint32_t>("ai.mq.rabbitmq.port", 5672, "rabbitmq amqp port");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_username =
+    http::Config::Lookup<std::string>("ai.mq.rabbitmq.username", "guest", "rabbitmq username");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_password =
+    http::Config::Lookup<std::string>("ai.mq.rabbitmq.password", "guest", "rabbitmq password");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_vhost =
+    http::Config::Lookup<std::string>("ai.mq.rabbitmq.vhost", "/", "rabbitmq vhost");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_exchange =
+    http::Config::Lookup<std::string>("ai.mq.rabbitmq.exchange", "amq.default", "rabbitmq exchange");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_queue =
+    http::Config::Lookup<std::string>("ai.mq.rabbitmq.queue", "ai_chat_persist", "rabbitmq queue");
+
+http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_routing_key =
+    http::Config::Lookup<std::string>("ai.mq.rabbitmq.routing_key", "", "rabbitmq routing key");
+
+http::ConfigVar<uint64_t>::ptr g_ai_mq_rabbit_request_timeout_ms =
+    http::Config::Lookup<uint64_t>("ai.mq.rabbitmq.request_timeout_ms", 3000, "rabbitmq request timeout ms");
+
+http::ConfigVar<uint64_t>::ptr g_ai_mq_rabbit_connect_timeout_ms =
+    http::Config::Lookup<uint64_t>("ai.mq.rabbitmq.connect_timeout_ms", 3000, "rabbitmq connect timeout ms");
+
+http::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_channel =
+    http::Config::Lookup<uint32_t>("ai.mq.rabbitmq.channel", 1, "rabbitmq channel id");
+
+http::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_heartbeat_seconds =
+    http::Config::Lookup<uint32_t>("ai.mq.rabbitmq.heartbeat_seconds", 30, "rabbitmq heartbeat seconds");
+
 http::ConfigVar<bool>::ptr g_ai_rag_enabled =
     http::Config::Lookup<bool>("ai.rag.enabled", true, "whether rag retrieval is enabled");
 
@@ -268,6 +324,22 @@ std::string ResolveAnthropicApiKeyFrom(const std::string& key_from_config)
 
     const char* env_key = std::getenv("ANTHROPIC_API_KEY");
     return env_key ? std::string(env_key) : std::string();
+}
+
+bool ParseBoolLike(const std::string& raw, bool default_value)
+{
+    std::string value = raw;
+    std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+
+    if (value == "1" || value == "true" || value == "yes" || value == "on")
+    {
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "no" || value == "off")
+    {
+        return false;
+    }
+    return default_value;
 }
 
 OpenAICompatibleSettings ParseOpenAICompatibleSettings(const YAML::Node& node)
@@ -563,6 +635,37 @@ PersistSettings AiAppConfig::GetPersistSettings()
     return settings;
 }
 
+MqSettings AiAppConfig::GetMqSettings()
+{
+    MqSettings settings;
+    settings.enabled = ParseBoolLike(g_ai_mq_enabled->getValue(), false);
+    settings.provider = g_ai_mq_provider->getValue();
+    settings.producer_queue_capacity = static_cast<size_t>(g_ai_mq_producer_queue_capacity->getValue());
+    settings.fallback_to_local_writer = ParseBoolLike(g_ai_mq_fallback_to_local_writer->getValue(), true);
+    settings.consumer_batch_size = static_cast<size_t>(g_ai_mq_consumer_batch_size->getValue());
+    settings.consumer_poll_interval_ms = g_ai_mq_consumer_poll_interval_ms->getValue();
+
+    settings.rabbitmq.host = g_ai_mq_rabbit_host->getValue();
+    settings.rabbitmq.port = static_cast<uint16_t>(g_ai_mq_rabbit_port->getValue());
+    settings.rabbitmq.username = g_ai_mq_rabbit_username->getValue();
+    settings.rabbitmq.password = g_ai_mq_rabbit_password->getValue();
+    settings.rabbitmq.vhost = g_ai_mq_rabbit_vhost->getValue();
+    settings.rabbitmq.exchange = g_ai_mq_rabbit_exchange->getValue();
+    settings.rabbitmq.queue = g_ai_mq_rabbit_queue->getValue();
+    settings.rabbitmq.routing_key = g_ai_mq_rabbit_routing_key->getValue();
+    settings.rabbitmq.request_timeout_ms = g_ai_mq_rabbit_request_timeout_ms->getValue();
+    settings.rabbitmq.connect_timeout_ms = g_ai_mq_rabbit_connect_timeout_ms->getValue();
+    settings.rabbitmq.channel = static_cast<uint16_t>(g_ai_mq_rabbit_channel->getValue());
+    settings.rabbitmq.heartbeat_seconds = static_cast<uint16_t>(g_ai_mq_rabbit_heartbeat_seconds->getValue());
+
+    if (settings.rabbitmq.routing_key.empty())
+    {
+        settings.rabbitmq.routing_key = settings.rabbitmq.queue;
+    }
+
+    return settings;
+}
+
 RagSettings AiAppConfig::GetRagSettings()
 {
     RagSettings settings;
@@ -855,6 +958,86 @@ bool AiAppConfig::Validate(std::string& error)
     {
         error = "ai.persist settings queue_capacity/batch_size/flush_interval_ms must be > 0";
         return false;
+    }
+
+    const MqSettings mq = GetMqSettings();
+    if (mq.enabled)
+    {
+        if (mq.provider != "rabbitmq_amqp")
+        {
+            error = "ai.mq.provider currently only supports rabbitmq_amqp";
+            return false;
+        }
+        if (mq.producer_queue_capacity == 0)
+        {
+            error = "ai.mq.producer_queue_capacity must be > 0";
+            return false;
+        }
+        if (mq.consumer_batch_size == 0)
+        {
+            error = "ai.mq.consumer_batch_size must be > 0";
+            return false;
+        }
+        if (mq.consumer_poll_interval_ms == 0)
+        {
+            error = "ai.mq.consumer_poll_interval_ms must be > 0";
+            return false;
+        }
+        if (mq.rabbitmq.host.empty())
+        {
+            error = "ai.mq.rabbitmq.host can not be empty";
+            return false;
+        }
+        if (mq.rabbitmq.port == 0)
+        {
+            error = "ai.mq.rabbitmq.port must be > 0";
+            return false;
+        }
+        if (mq.rabbitmq.username.empty())
+        {
+            error = "ai.mq.rabbitmq.username can not be empty";
+            return false;
+        }
+        if (mq.rabbitmq.password.empty())
+        {
+            error = "ai.mq.rabbitmq.password can not be empty";
+            return false;
+        }
+        if (mq.rabbitmq.vhost.empty())
+        {
+            error = "ai.mq.rabbitmq.vhost can not be empty";
+            return false;
+        }
+        if (mq.rabbitmq.exchange.empty())
+        {
+            error = "ai.mq.rabbitmq.exchange can not be empty";
+            return false;
+        }
+        if (mq.rabbitmq.queue.empty())
+        {
+            error = "ai.mq.rabbitmq.queue can not be empty";
+            return false;
+        }
+        if (mq.rabbitmq.routing_key.empty())
+        {
+            error = "ai.mq.rabbitmq.routing_key can not be empty";
+            return false;
+        }
+        if (mq.rabbitmq.request_timeout_ms == 0)
+        {
+            error = "ai.mq.rabbitmq.request_timeout_ms must be > 0";
+            return false;
+        }
+        if (mq.rabbitmq.connect_timeout_ms == 0)
+        {
+            error = "ai.mq.rabbitmq.connect_timeout_ms must be > 0";
+            return false;
+        }
+        if (mq.rabbitmq.channel == 0)
+        {
+            error = "ai.mq.rabbitmq.channel must be > 0";
+            return false;
+        }
     }
 
     const RagSettings rag = GetRagSettings();

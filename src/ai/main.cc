@@ -2,6 +2,7 @@
 #include "ai/http/ai_http_api.h"
 #include "ai/middleware/auth_middleware.h"
 #include "ai/middleware/request_id_middleware.h"
+#include "ai/mq/rabbitmq_message_sink.h"
 #include "ai/llm/anthropic_client.h"
 #include "ai/llm/llm_client_factory.h"
 #include "ai/llm/llm_client_registry.h"
@@ -175,6 +176,7 @@ int main(int argc, char** argv)
     const ai::config::AuthSettings auth_settings = ai::config::AiAppConfig::GetAuthSettings();
     const ai::config::MysqlSettings mysql_settings = ai::config::AiAppConfig::GetMysqlSettings();
     const ai::config::PersistSettings persist_settings = ai::config::AiAppConfig::GetPersistSettings();
+    const ai::config::MqSettings mq_settings = ai::config::AiAppConfig::GetMqSettings();
     ai::config::RagSettings rag_settings = ai::config::AiAppConfig::GetRagSettings();
     const ai::config::EmbeddingSettings embedding_settings = ai::config::AiAppConfig::GetEmbeddingSettings();
     const ai::config::QdrantSettings qdrant_settings = ai::config::AiAppConfig::GetQdrantSettings();
@@ -231,12 +233,46 @@ int main(int argc, char** argv)
         }
     }
 
-    /// @brief Step 6: 启动异步写入器（请求线程只入队，后台批量落库）。
-    ai::storage::AsyncMySqlWriter::ptr async_writer(new ai::storage::AsyncMySqlWriter(mysql_pool, persist_settings));
-    if (!async_writer->Start(error))
+    /// @brief Step 6: 装配写路径 sink（优先 MQ，失败可回退本地异步写入）。
+    ai::service::MessageSink::ptr message_sink;
+    ai::mq::RabbitMqMessageSink::ptr mq_sink;
+    ai::storage::AsyncMySqlWriter::ptr async_writer;
+
+    if (mq_settings.enabled)
     {
-        std::cerr << "start async mysql writer failed: " << error << std::endl;
-        return 1;
+        mq_sink.reset(new ai::mq::RabbitMqMessageSink(mq_settings));
+        if (mq_sink->Start(error))
+        {
+            message_sink = mq_sink;
+            BASE_LOG_INFO(g_logger) << "persist sink selected: rabbitmq_amqp";
+        }
+        else if (mq_settings.fallback_to_local_writer)
+        {
+            BASE_LOG_WARN(g_logger) << "start rabbitmq sink failed, fallback to local async writer: " << error;
+            async_writer.reset(new ai::storage::AsyncMySqlWriter(mysql_pool, persist_settings));
+            if (!async_writer->Start(error))
+            {
+                std::cerr << "start async mysql writer failed: " << error << std::endl;
+                return 1;
+            }
+            message_sink = async_writer;
+        }
+        else
+        {
+            std::cerr << "start rabbitmq sink failed: " << error << std::endl;
+            return 1;
+        }
+    }
+    else
+    {
+        async_writer.reset(new ai::storage::AsyncMySqlWriter(mysql_pool, persist_settings));
+        if (!async_writer->Start(error))
+        {
+            std::cerr << "start async mysql writer failed: " << error << std::endl;
+            return 1;
+        }
+        message_sink = async_writer;
+        BASE_LOG_INFO(g_logger) << "persist sink selected: local_async_mysql";
     }
 
     /// @brief Step 7: 按 provider.type 通过注册工厂装配多 Provider 客户端。
@@ -362,7 +398,7 @@ int main(int argc, char** argv)
 
     /// @brief 组装业务编排核心 ChatService。
     ai::service::ChatService::ptr chat_service(
-        new ai::service::ChatService(chat_settings, llm_router, chat_repository, async_writer, rag_settings, rag_retriever, rag_indexer));
+        new ai::service::ChatService(chat_settings, llm_router, chat_repository, message_sink, rag_settings, rag_retriever, rag_indexer));
 
     /// @brief Step 9: 按配置创建 HTTP worker（benchmark 同款模式）。
     /// @details
@@ -398,7 +434,14 @@ int main(int argc, char** argv)
         if (!server->setSslConfig(ssl_config))
         {
             std::cerr << "configure server ssl failed" << std::endl;
-            async_writer->Stop();
+            if (mq_sink)
+            {
+                mq_sink->Stop();
+            }
+            if (async_writer)
+            {
+                async_writer->Stop();
+            }
             return 1;
         }
     }
@@ -418,7 +461,14 @@ int main(int argc, char** argv)
     if (!bind_addr)
     {
         std::cerr << "invalid bind address: " << server_settings.host << ":" << server_settings.port << std::endl;
-        async_writer->Stop();
+        if (mq_sink)
+        {
+            mq_sink->Stop();
+        }
+        if (async_writer)
+        {
+            async_writer->Stop();
+        }
         return 1;
     }
 
@@ -432,7 +482,14 @@ int main(int argc, char** argv)
     {
         std::cerr << "start ai chat server failed at " << server_settings.host << ":" << server_settings.port
                   << std::endl;
-        async_writer->Stop();
+        if (mq_sink)
+        {
+            mq_sink->Stop();
+        }
+        if (async_writer)
+        {
+            async_writer->Stop();
+        }
         return 1;
     }
 
@@ -501,7 +558,14 @@ int main(int argc, char** argv)
     /// @details
     /// 1) 先停异步写线程，尽量把已入队消息刷盘完成；
     /// 2) 再关闭连接池，释放数据库连接资源。
-    async_writer->Stop();
+    if (mq_sink)
+    {
+        mq_sink->Stop();
+    }
+    if (async_writer)
+    {
+        async_writer->Stop();
+    }
     if (rag_indexer)
     {
         rag_indexer->Stop();
