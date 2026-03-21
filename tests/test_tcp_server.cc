@@ -13,7 +13,7 @@
 #include "sylar/net/address.h"
 #include "sylar/log/logger.h"
 #include "sylar/fiber/iomanager.h"
-#include "sylar/fiber/hook.h" // 添加 hook 头文件
+#include <thread>
 #include <iostream>
 #include <cstring>
 
@@ -82,14 +82,11 @@ protected:
 void test_echo_server()
 {
     std::cout << "\n========== Echo 服务器测试 ==========\n";
-
-    // 启用 hook，让 accept() 等函数变成异步
-    sylar::set_hook_enable(true);
-
-    sylar::IOManager iom(2);
+    sylar::IOManager io_iom(2, false, "echo_io");
+    sylar::IOManager accept_iom(1, true, "echo_accept");
 
     // 创建 Echo 服务器
-    EchoServer::ptr server(new EchoServer(&iom, &iom));
+    EchoServer::ptr server(new EchoServer(&io_iom, &accept_iom));
 
     // 绑定多个地址
     std::vector<sylar::Address::ptr> addrs;
@@ -112,16 +109,14 @@ void test_echo_server()
 
     // 启动服务器
     server->start();
-    std::cout << "[服务器] Echo 服务器启动成功\n";
+    std::cout << "[服务器] Echo 服务器启动成功，accept 在主线程 reactor，IO 在 worker 池\n";
 
-    // 客户端测试协程
-    iom.schedule([]()
-                 {
+    std::thread client_thread([server, &accept_iom, &io_iom]()
+                              {
         sleep(1);
 
         std::cout << "\n---------- 客户端测试 ----------\n";
 
-        // 连接端口 8080
         sylar::Socket::ptr sock1 = sylar::Socket::CreateTCPSocket();
         if (sock1->connect(sylar::Address::LookupAny("127.0.0.1:8080"))) {
             std::cout << "[客户端1] 连接 8080 成功\n";
@@ -141,7 +136,6 @@ void test_echo_server()
             stream->close();
         }
 
-        // 连接端口 8081
         sylar::Socket::ptr sock2 = sylar::Socket::CreateTCPSocket();
         if (sock2->connect(sylar::Address::LookupAny("127.0.0.1:8081"))) {
             std::cout << "[客户端2] 连接 8081 成功\n";
@@ -161,17 +155,16 @@ void test_echo_server()
             stream->close();
         }
 
-        std::cout << "---------- 测试完成 ----------\n"; });
-
-    // 等待测试完成后停止服务器
-    iom.schedule([server]()
-                 {
-        sleep(3);  // 等待测试完成
+        std::cout << "---------- 测试完成 ----------\n";
+        sleep(1);
         std::cout << "\n[服务器] 准备停止...\n";
         server->stop();
+        accept_iom.stop();
+        io_iom.stop();
         std::cout << "[服务器] 已停止\n"; });
 
-    // IOManager 析构时会等待所有任务完成
+    accept_iom.runCaller();
+    client_thread.join();
 }
 
 // ============================================================================

@@ -228,9 +228,13 @@ namespace sylar
         int client_sock = ::accept(m_sock, (sockaddr *)&addr, &len);
         if (client_sock < 0)
         {
-            SYLAR_LOG_ERROR(g_logger) << "accept sock=" << m_sock
-                                      << " errno=" << errno
-                                      << " errstr=" << strerror(errno);
+            if (errno != EAGAIN && errno != EWOULDBLOCK &&
+                errno != EBADF && errno != EINVAL && errno != ENOTSOCK)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "accept sock=" << m_sock
+                                          << " errno=" << errno
+                                          << " errstr=" << strerror(errno);
+            }
             return nullptr;
         }
         Socket::ptr client(new Socket(m_family, m_type, m_protocol));

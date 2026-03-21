@@ -129,15 +129,6 @@ namespace sylar
 
 } // namespace sylar
 
-// ============================================================================
-// 定时器信息结构体（用于超时控制）
-// ============================================================================
-
-struct timer_info
-{
-    int cancelled = 0;
-};
-
 namespace sylar
 {
 
@@ -166,6 +157,10 @@ namespace sylar
 
         // 从FdManager获取文件描述符的上下文
         sylar::FdCtx::ptr ctx = sylar::FdMgr::GetInstance()->get(fd);
+        if (!ctx)
+        {
+            ctx = sylar::FdMgr::GetInstance()->get(fd, true);
+        }
         // 如果获取不到上下文，或者文件描述符无效/已关闭/不是socket/用户设置了非阻塞，
         // 则直接调用原始IO函数（因为这些情况不需要或不应该进行协程hook）
         if (!ctx || ctx->isClose() || !ctx->isSocket() || ctx->getUserNonblock())
@@ -180,86 +175,37 @@ namespace sylar
             return fun(fd, std::forward<Args>(args)...);
         }
 
-        // 获取对应的超时时间 (毫秒)
         uint64_t timeout = ctx->getTimeout(timeout_so_type);
-        sylar::Timer::ptr timer; // 定时器智能指针
-        // 获取当前协程的弱引用，用于定时器回调中安全地访问协程
-        std::weak_ptr<sylar::Fiber> cur_fiber = sylar::Fiber::GetThis();
 
-        // 循环直到IO操作成功、出现永久错误或超时
         while (true)
         {
-            // 如果设置了超时 (timeout != (uint64_t)-1)
-            if (timeout != (uint64_t)-1)
-            {
-                // 添加一个条件定时器，当超时时间到达时，唤醒当前协程
-                // 使用weak_ptr确保协程在销毁后不会触发无效回调
-                timer = iom->addConditionTimer(timeout, [&, cur_fiber, iom, fd, event]()
-                                               {
-                auto ptr = cur_fiber.lock(); // 尝试提升弱引用为强引用
-                if (ptr) {
-                    // 超时时，设置errno并取消IO事件，然后调度协程
-                    errno = ETIMEDOUT; // 设置errno为超时
-                    iom->cancelEvent(fd, event); // 取消该文件描述符上注册的IO事件
-                    iom->schedule(ptr); // 将协程重新添加到调度队列，使其被唤醒处理超时
-                } }, cur_fiber); // 条件定时器绑定到当前协程的weak_ptr
-            }
-
-            // 尝试执行原始IO函数
             ssize_t rt = fun(fd, std::forward<Args>(args)...);
-
-            // 如果IO操作成功，或者出现了非EAGAIN/EINTR的错误 (即永久性错误)
-            if (SYLAR_LIKELY(rt != -1 || (errno != EAGAIN && errno != EINTR)))
+            if (SYLAR_LIKELY(rt != -1))
             {
-                if (timer)
-                {
-                    timer->cancel(); // 如果有定时器，取消它（因为IO已完成或发生永久错误）
-                }
-                return rt; // 返回IO操作结果
+                return rt;
             }
 
-            // 如果IO操作返回-1且errno为EAGAIN或EINTR (表示IO未就绪或被中断)
-            if (errno == EAGAIN || errno == EINTR)
+            if (errno == EINTR)
             {
-                // 在IOManager中注册IO事件 (READ或WRITE)，等待IO就绪
-                int ret = iom->addEvent(fd, event);
-                if (SYLAR_UNLIKELY(ret))
-                {
-                    // 如果添加事件失败，记录错误并返回
-                    SYLAR_LOG_ERROR(g_logger) << hook_fun_name << " addEvent(" << fd << ", " << event << ") error:" << errno << " " << strerror(errno);
-                    if (timer)
-                    {
-                        timer->cancel(); // 取消定时器
-                    }
-                    errno = EBADF; // 设置错误码为无效文件描述符
-                    return -1;
-                }
-                else
-                {
-                    // 让出当前协程的执行权，等待IOManager唤醒
-                    sylar::Fiber::YieldToHold();
-
-                    // 协程被唤醒后：
-                    if (timer)
-                    {
-                        timer->cancel(); // 如果有定时器，取消它（因为协程已被IO事件唤醒，不再需要定时器了）
-                    }
-                    // 检查 errno 是否已被定时器设置为 ETIMEDOUT
-                    if (errno == ETIMEDOUT)
-                    {              // 这表示协程被超时定时器唤醒
-                        return -1; // 返回-1表示超时
-                    }
-                    // 如果不是超时唤醒，则循环继续，重新尝试IO操作
-                }
+                continue;
             }
-            else
+
+            if (errno != EAGAIN)
             {
-                // 出现了其他类型的错误 (非EAGAIN/EINTR)，视为永久性错误
-                if (timer)
-                {
-                    timer->cancel(); // 取消定时器
-                }
-                return rt; // 返回IO操作结果
+                return rt;
+            }
+
+            int wait_rt = iom->waitEvent(fd, event, timeout);
+            if (SYLAR_UNLIKELY(wait_rt < 0))
+            {
+                SYLAR_LOG_ERROR(g_logger) << hook_fun_name << " waitEvent(" << fd << ", "
+                                          << event << ") error:" << errno << " " << strerror(errno);
+                errno = EBADF;
+                return -1;
+            }
+            if (wait_rt > 0)
+            {
+                return -1;
             }
         }
     }
@@ -364,6 +310,10 @@ extern "C"
             return connect_f(fd, addr, addrlen);
         }
         sylar::FdCtx::ptr ctx = sylar::FdMgr::GetInstance()->get(fd);
+        if (!ctx)
+        {
+            ctx = sylar::FdMgr::GetInstance()->get(fd, true);
+        }
         if (!ctx || ctx->isClose())
         {
             errno = EBADF;
@@ -391,43 +341,19 @@ extern "C"
         }
 
         sylar::IOManager *iom = sylar::IOManager::GetThis();
-        sylar::Timer::ptr timer;
-        std::shared_ptr<timer_info> tinfo(new timer_info);
-        std::weak_ptr<timer_info> winfo(tinfo);
-
-        if (timeout_ms != (uint64_t)-1)
+        if (!iom)
         {
-            timer = iom->addConditionTimer(timeout_ms, [winfo, fd, iom]()
-                                           {
-            auto t = winfo.lock();
-            if(!t || t->cancelled) {
-                return;
-            }
-            t->cancelled = ETIMEDOUT;
-            iom->cancelEvent(fd, sylar::IOManager::WRITE); }, winfo);
+            return connect_f(fd, addr, addrlen);
         }
 
-        int rt = iom->addEvent(fd, sylar::IOManager::WRITE);
-        if (rt == 0)
+        int wait_rt = iom->waitEvent(fd, sylar::IOManager::WRITE, timeout_ms);
+        if (wait_rt < 0)
         {
-            sylar::Fiber::YieldToHold();
-            if (timer)
-            {
-                timer->cancel();
-            }
-            if (tinfo->cancelled)
-            {
-                errno = tinfo->cancelled;
-                return -1;
-            }
+            return -1;
         }
-        else
+        if (wait_rt > 0)
         {
-            if (timer)
-            {
-                timer->cancel();
-            }
-            SYLAR_LOG_ERROR(g_logger) << "connect addEvent(" << fd << ", WRITE) error";
+            return -1;
         }
 
         int error = 0;

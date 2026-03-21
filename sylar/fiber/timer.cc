@@ -1,309 +1,381 @@
 #include "timer.h"
-#include "sylar/base/util.h"
+#include <algorithm>
+#include <ctime>
 #include "sylar/base/macro.h"
 
 namespace sylar
 {
 
-    /**
-     * @brief 定时器比较仿函数的实现
-     * @details
-     * 1. 比较绝对过期时间。
-     * 2. 如果时间相同，则比较指针地址，确保两个不同的定时器对象在 set 中共存。
-     */
-    bool Timer::Comparator::operator()(const Timer::ptr &lhs,
-                                       const Timer::ptr &rhs) const
+    namespace
     {
-        if (!lhs && !rhs)
+        uint64_t GetMonotonicMS()
         {
-            return false;
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            return static_cast<uint64_t>(ts.tv_sec) * 1000ull +
+                   static_cast<uint64_t>(ts.tv_nsec) / 1000000ull;
         }
-        if (!lhs)
-        {
-            return true; // lhs 为空认为小
-        }
-        if (!rhs)
-        {
-            return false; // rhs 为空认为大
-        }
-        // 核心：按绝对过期时间升序排列
-        if (lhs->m_next < rhs->m_next)
-        {
-            return true;
-        }
-        if (rhs->m_next < lhs->m_next)
-        {
-            return false;
-        }
-        // 重要：时间相同时，利用指针地址做去重判断，防止 set 误删
-        return lhs.get() < rhs.get();
+
     }
 
-    Timer::Timer(uint64_t ms, std::function<void()> cb,
-                 bool recurring, TimerManager *manager)
-        : m_recurring(recurring), m_ms(ms), m_cb(cb), m_manager(manager)
+    Timer::Timer(uint64_t ms, std::function<void()> cb, bool recurring,
+                 TimerManager *manager, size_t worker, uint64_t next, uint64_t sequence)
+        : m_recurring(recurring),
+          m_ms(ms),
+          m_next(next),
+          m_cb(std::move(cb)),
+          m_manager(manager),
+          m_worker(worker),
+          m_sequence(sequence)
     {
-        // 初始化时计算绝对过期时间
-        m_next = sylar::GetCurrentMS() + m_ms;
     }
 
-    Timer::Timer(uint64_t next)
-        : m_next(next)
-    {
-        // 用于 lower_bound 查找的临时空对象
-    }
-
-    /**
-     * @brief 取消定时器
-     */
     bool Timer::cancel()
     {
-        TimerManager::RWMutexType::WriteLock lock(m_manager->m_mutex);
-        if (m_cb)
+        if (!m_manager || !m_inHeap)
         {
-            m_cb = nullptr; // 销毁回调，打破循环引用
-            auto it = m_manager->m_timers.find(shared_from_this());
-            if (it != m_manager->m_timers.end())
-            {
-                m_manager->m_timers.erase(it);
-            }
-            return true;
+            return false;
         }
-        return false;
+
+        TimerManager::TimerBucket &bucket = *m_manager->m_buckets[m_worker];
+        bool removed = false;
+        {
+            Mutex::Lock lock(bucket.mutex);
+            if (m_inHeap)
+            {
+                m_manager->removeTimerLocked(bucket, m_heapIndex);
+                removed = true;
+            }
+        }
+
+        if (removed)
+        {
+            m_cb = nullptr;
+        }
+        return removed;
     }
 
-    /**
-     * @brief 刷新定时器
-     * @details 将定时器的执行时间顺延一个周期
-     */
     bool Timer::refresh()
     {
-        TimerManager::RWMutexType::WriteLock lock(m_manager->m_mutex);
-        if (!m_cb)
+        if (!m_manager || !m_cb)
         {
             return false;
         }
-        auto it = m_manager->m_timers.find(shared_from_this());
-        if (it == m_manager->m_timers.end())
+
+        TimerManager::TimerBucket &bucket = *m_manager->m_buckets[m_worker];
+        bool at_front = false;
         {
-            return false;
+            Mutex::Lock lock(bucket.mutex);
+            if (!m_inHeap)
+            {
+                return false;
+            }
+
+            m_manager->removeTimerLocked(bucket, m_heapIndex);
+            m_next = GetMonotonicMS() + m_ms;
+            m_sequence = m_manager->m_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+            m_manager->insertTimerLocked(bucket, shared_from_this());
+            at_front = (m_heapIndex == 0);
         }
-        // 必须先删除再插入，因为 m_next 改变了，会导致在 set 中的位置变化
-        m_manager->m_timers.erase(it);
-        m_next = sylar::GetCurrentMS() + m_ms;
-        m_manager->m_timers.insert(shared_from_this());
+
+        if (at_front)
+        {
+            m_manager->onTimerInsertedAtFront(m_worker);
+        }
         return true;
     }
 
-    /**
-     * @brief 重置定时器时间
-     */
     bool Timer::reset(uint64_t ms, bool from_now)
     {
-        if (ms == m_ms && !from_now)
-        {
-            return true;
-        }
-        TimerManager::RWMutexType::WriteLock lock(m_manager->m_mutex);
-        if (!m_cb)
+        if (!m_manager || !m_cb)
         {
             return false;
         }
-        auto it = m_manager->m_timers.find(shared_from_this());
-        if (it == m_manager->m_timers.end())
-        {
-            return false;
-        }
-        m_manager->m_timers.erase(it);
 
-        uint64_t start = 0;
-        if (from_now)
+        TimerManager::TimerBucket &bucket = *m_manager->m_buckets[m_worker];
+        bool at_front = false;
         {
-            start = sylar::GetCurrentMS();
+            Mutex::Lock lock(bucket.mutex);
+            if (!m_inHeap)
+            {
+                return false;
+            }
+
+            uint64_t start = from_now ? GetMonotonicMS() : (m_next - m_ms);
+            m_manager->removeTimerLocked(bucket, m_heapIndex);
+            m_ms = ms;
+            m_next = start + m_ms;
+            m_sequence = m_manager->m_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+            m_manager->insertTimerLocked(bucket, shared_from_this());
+            at_front = (m_heapIndex == 0);
         }
-        else
+
+        if (at_front)
         {
-            // 基于原定的开始时间计算
-            start = m_next - m_ms;
+            m_manager->onTimerInsertedAtFront(m_worker);
         }
-        m_ms = ms;
-        m_next = start + m_ms;
-        // 重新通过管理器添加（涉及通知逻辑）
-        m_manager->addTimer(shared_from_this(), lock);
         return true;
     }
 
     TimerManager::TimerManager()
+        : m_rr(0), m_sequence(0)
     {
-        m_previouseTime = sylar::GetCurrentMS();
+        initTimerBuckets(1);
     }
 
     TimerManager::~TimerManager()
     {
     }
 
-    /**
-     * @brief 添加普通的定时器
-     */
+    void TimerManager::initTimerBuckets(size_t count)
+    {
+        if (count == 0)
+        {
+            count = 1;
+        }
+
+        m_buckets.clear();
+        m_buckets.reserve(count);
+        for (size_t i = 0; i < count; ++i)
+        {
+            m_buckets.emplace_back(new TimerBucket());
+        }
+    }
+
+    size_t TimerManager::getTimerWorkerIndex()
+    {
+        return m_rr.fetch_add(1, std::memory_order_relaxed) % m_buckets.size();
+    }
+
     Timer::ptr TimerManager::addTimer(uint64_t ms, std::function<void()> cb, bool recurring)
     {
-        Timer::ptr timer(new Timer(ms, cb, recurring, this));
-        RWMutexType::WriteLock lock(m_mutex);
-        addTimer(timer, lock);
+        return addTimer(ms, std::move(cb), recurring, getTimerWorkerIndex());
+    }
+
+    Timer::ptr TimerManager::addTimer(uint64_t ms, std::function<void()> cb,
+                                      bool recurring, size_t worker)
+    {
+        if (m_buckets.empty())
+        {
+            initTimerBuckets(1);
+        }
+        worker %= m_buckets.size();
+
+        uint64_t now = GetMonotonicMS();
+        Timer::ptr timer(new Timer(ms, std::move(cb), recurring, this, worker,
+                                   now + ms,
+                                   m_sequence.fetch_add(1, std::memory_order_relaxed) + 1));
+
+        TimerBucket &bucket = *m_buckets[worker];
+        bool at_front = false;
+        {
+            Mutex::Lock lock(bucket.mutex);
+            insertTimerLocked(bucket, timer);
+            at_front = (timer->m_heapIndex == 0);
+        }
+
+        if (at_front)
+        {
+            onTimerInsertedAtFront(worker);
+        }
         return timer;
     }
 
-    /**
-     * @brief 条件定时器回调包装
-     */
     static void OnTimer(std::weak_ptr<void> weak_cond, std::function<void()> cb)
     {
-        // 尝试将弱引用提升为强引用
         std::shared_ptr<void> tmp = weak_cond.lock();
         if (tmp)
         {
-            // 对象依然存活，执行回调
             cb();
         }
     }
 
-    /**
-     * @brief 添加条件定时器
-     * @details 只有当 weak_cond 指向的对象未销毁时，才执行 cb
-     */
     Timer::ptr TimerManager::addConditionTimer(uint64_t ms, std::function<void()> cb,
                                                std::weak_ptr<void> weak_cond,
                                                bool recurring)
     {
-        // 利用 bind 将条件检查封装进回调
-        return addTimer(ms, std::bind(&OnTimer, weak_cond, cb), recurring);
+        return addTimer(ms, std::bind(&OnTimer, weak_cond, std::move(cb)), recurring);
     }
 
-    /**
-     * @brief 获取距离下一个定时器触发还有多久
-     * @return 毫秒数。如果没有定时器返回最大值；如果已过期返回 0
-     */
-    uint64_t TimerManager::getNextTimer()
+    uint64_t TimerManager::getNextTimer(size_t worker)
     {
-        RWMutexType::ReadLock lock(m_mutex);
-        if (m_timers.empty())
+        if (worker >= m_buckets.size())
         {
-            return ~0ull; // 返回 0xFFFFFF...
+            return ~0ull;
         }
-        uint64_t now_ms = sylar::GetCurrentMS();
-        const Timer::ptr &next = *m_timers.begin(); // 取出最早的
-        if (now_ms >= next->m_next)
+
+        TimerBucket &bucket = *m_buckets[worker];
+        Mutex::Lock lock(bucket.mutex);
+        if (bucket.heap.empty())
         {
-            return 0; // 已经过期了，应该立刻处理
+            return ~0ull;
         }
-        else
+
+        uint64_t now = GetMonotonicMS();
+        if (bucket.heap.front()->m_next <= now)
         {
-            return next->m_next - now_ms; // 还剩多久
+            return 0;
         }
+        return bucket.heap.front()->m_next - now;
     }
 
-    /**
-     * @brief 核心：获取所有过期的任务回调
-     */
-    void TimerManager::listExpiredCb(std::vector<std::function<void()>> &cbs)
+    void TimerManager::listExpiredCb(size_t worker, std::vector<std::function<void()>> &cbs)
     {
-        uint64_t now_ms = sylar::GetCurrentMS();
+        if (worker >= m_buckets.size())
+        {
+            return;
+        }
+
+        TimerBucket &bucket = *m_buckets[worker];
         std::vector<Timer::ptr> expired;
+        uint64_t now = GetMonotonicMS();
         {
-            RWMutexType::ReadLock lock(m_mutex);
-            if (m_timers.empty())
+            Mutex::Lock lock(bucket.mutex);
+            while (!bucket.heap.empty() && bucket.heap.front()->m_next <= now)
             {
-                return;
+                Timer::ptr timer = bucket.heap.front();
+                removeTimerLocked(bucket, 0);
+                expired.push_back(timer);
             }
         }
-        RWMutexType::WriteLock lock(m_mutex);
-        if (m_timers.empty())
-        {
-            return;
-        }
 
-        // 1. 检查系统时间是否回退（校时异常处理）
-        bool rollover = detectClockRollover(now_ms);
-        // 如果没校时，且还没到第一个定时器的时间，直接返回
-        if (!rollover && ((*m_timers.begin())->m_next > now_ms))
+        cbs.reserve(cbs.size() + expired.size());
+        for (size_t i = 0; i < expired.size(); ++i)
         {
-            return;
-        }
+            Timer::ptr &timer = expired[i];
+            if (!timer->m_cb)
+            {
+                continue;
+            }
 
-        Timer now_timer_value(now_ms);
-        Timer::ptr now_timer(&now_timer_value, [](Timer *) {});
-        /**
-         * 2. 确定过期范围：
-         * - 如果时间被往回调了，认为全部定时器都“由于时空混乱”而立即过期。
-         * - 否则，找到所有小于等于当前时间的定时器。
-         */
-        auto it = rollover ? m_timers.end() : m_timers.lower_bound(now_timer);
-        while (it != m_timers.end() && (*it)->m_next == now_ms)
-        {
-            ++it;
-        }
-
-        // 3. 将过期的定时器从 set 中剥离
-        expired.insert(expired.begin(), m_timers.begin(), it);
-        m_timers.erase(m_timers.begin(), it);
-        cbs.reserve(expired.size());
-
-        // 4. 处理循环定时器
-        for (auto &timer : expired)
-        {
             cbs.push_back(timer->m_cb);
             if (timer->m_recurring)
             {
-                // 重新计算下一次执行时间，并放回队列
-                timer->m_next = now_ms + timer->m_ms;
-                m_timers.insert(timer);
+                timer->m_next = now + timer->m_ms;
+                timer->m_sequence = m_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+
+                TimerBucket &resched_bucket = *m_buckets[timer->m_worker];
+                Mutex::Lock lock(resched_bucket.mutex);
+                insertTimerLocked(resched_bucket, timer);
             }
             else
             {
-                // 一次性任务，清理回调释放内存
                 timer->m_cb = nullptr;
             }
         }
     }
 
-    /**
-     * @brief 内部实现：将定时器插入容器
-     */
-    void TimerManager::addTimer(Timer::ptr val, RWMutexType::WriteLock &lock)
-    {
-        auto it = m_timers.insert(val).first;
-        // 如果插入的位置是集合的最前面，说明它成了“全村最早过期的”
-        bool at_front = (it == m_timers.begin());
-        if (at_front)
-        {
-            // 调用虚函数，通知 IOManager 重新设置 epoll_wait 超时
-            onTimerInsertedAtFront();
-        }
-    }
-
-    /**
-     * @brief 检测系统时间是否回退
-     */
-    bool TimerManager::detectClockRollover(uint64_t now_ms)
-    {
-        bool rollover = false;
-        // 如果当前时间比上次记录时间小了 1 小时以上，认为发生了手动校时
-        if (now_ms < m_previouseTime &&
-            now_ms < (m_previouseTime - 60 * 60 * 1000))
-        {
-            rollover = true;
-        }
-        m_previouseTime = now_ms;
-        return rollover;
-    }
-
-    /**
-     * @brief 是否还有待处理的定时器
-     */
     bool TimerManager::hasTimer()
     {
-        RWMutexType::ReadLock lock(m_mutex);
-        return !m_timers.empty();
+        for (size_t i = 0; i < m_buckets.size(); ++i)
+        {
+            TimerBucket &bucket = *m_buckets[i];
+            Mutex::Lock lock(bucket.mutex);
+            if (!bucket.heap.empty())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void TimerManager::insertTimerLocked(TimerBucket &bucket, const Timer::ptr &timer)
+    {
+        timer->m_inHeap = true;
+        timer->m_heapIndex = bucket.heap.size();
+        bucket.heap.push_back(timer);
+        siftUpLocked(bucket, timer->m_heapIndex);
+    }
+
+    void TimerManager::removeTimerLocked(TimerBucket &bucket, size_t index)
+    {
+        if (index >= bucket.heap.size())
+        {
+            return;
+        }
+
+        Timer::ptr removed = bucket.heap[index];
+        size_t last = bucket.heap.size() - 1;
+        if (index != last)
+        {
+            swapNodesLocked(bucket, index, last);
+        }
+
+        bucket.heap.pop_back();
+        removed->m_heapIndex = static_cast<size_t>(-1);
+        removed->m_inHeap = false;
+
+        if (index < bucket.heap.size())
+        {
+            siftDownLocked(bucket, index);
+            siftUpLocked(bucket, index);
+        }
+    }
+
+    void TimerManager::siftUpLocked(TimerBucket &bucket, size_t index)
+    {
+        while (index > 0)
+        {
+            size_t parent = (index - 1) / 2;
+            const Timer::ptr &cur = bucket.heap[index];
+            const Timer::ptr &par = bucket.heap[parent];
+            if (cur->m_next > par->m_next ||
+                (cur->m_next == par->m_next && cur->m_sequence >= par->m_sequence))
+            {
+                break;
+            }
+            swapNodesLocked(bucket, index, parent);
+            index = parent;
+        }
+    }
+
+    void TimerManager::siftDownLocked(TimerBucket &bucket, size_t index)
+    {
+        size_t size = bucket.heap.size();
+        while (true)
+        {
+            size_t left = index * 2 + 1;
+            if (left >= size)
+            {
+                break;
+            }
+
+            size_t smallest = left;
+            size_t right = left + 1;
+            if (right < size)
+            {
+                const Timer::ptr &rhs = bucket.heap[right];
+                const Timer::ptr &lhs = bucket.heap[left];
+                if (rhs->m_next < lhs->m_next ||
+                    (rhs->m_next == lhs->m_next && rhs->m_sequence < lhs->m_sequence))
+                {
+                    smallest = right;
+                }
+            }
+
+            const Timer::ptr &child = bucket.heap[smallest];
+            const Timer::ptr &cur = bucket.heap[index];
+            if (child->m_next > cur->m_next ||
+                (child->m_next == cur->m_next && child->m_sequence >= cur->m_sequence))
+            {
+                break;
+            }
+
+            swapNodesLocked(bucket, index, smallest);
+            index = smallest;
+        }
+    }
+
+    void TimerManager::swapNodesLocked(TimerBucket &bucket, size_t lhs, size_t rhs)
+    {
+        if (lhs == rhs)
+        {
+            return;
+        }
+
+        std::swap(bucket.heap[lhs], bucket.heap[rhs]);
+        bucket.heap[lhs]->m_heapIndex = lhs;
+        bucket.heap[rhs]->m_heapIndex = rhs;
     }
 
 }

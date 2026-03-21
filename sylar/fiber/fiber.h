@@ -7,6 +7,7 @@
 #ifndef __SYLAR_FIBER_H__
 #define __SYLAR_FIBER_H__
 
+#include <atomic>
 #include <memory>
 #include <functional>
 #include "sylar/fiber/context.h"
@@ -39,6 +40,14 @@ namespace sylar
             TERM,
             /// 异常状态
             EXCEPT
+        };
+
+        enum WaitResult
+        {
+            WAIT_NONE = 0,
+            WAIT_READY = 1,
+            WAIT_TIMEOUT = 2,
+            WAIT_CANCELLED = 3,
         };
 
     private:
@@ -123,6 +132,12 @@ namespace sylar
         static Fiber::ptr GetThis();
 
         /**
+         * @brief 返回当前所在协程的裸指针
+         * @details 热路径使用，避免额外的 shared_ptr 引用计数
+         */
+        static Fiber *GetThisRaw();
+
+        /**
          * @brief 将当前协程切换到 READY 状态，并让出执行权
          */
         static void YieldToReady();
@@ -148,6 +163,10 @@ namespace sylar
          */
         static uint64_t GetFiberId();
 
+        uint64_t beginWait();
+        void setWaitResult(uint64_t token, WaitResult result);
+        WaitResult consumeWaitResult(uint64_t token);
+
     private:
         /// 协程id
         uint64_t m_id = 0;
@@ -163,6 +182,10 @@ namespace sylar
         std::function<void()> m_cb;
         /// 本协程是否参与调度器调度
         bool m_runInScheduler;
+        /// 最近一次等待 token
+        std::atomic<uint64_t> m_waitToken = {0};
+        /// 最近一次等待结果
+        std::atomic<int> m_waitResult = {WAIT_NONE};
     };
 
 }

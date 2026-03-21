@@ -50,7 +50,6 @@ namespace sylar
 
         ++s_fiber_count;     // 统计当前进程中活着的协程总数
         m_id = ++s_fiber_id; // 让每个协程分配一个全局唯一的 ID
-        SYLAR_LOG_DEBUG(SYLAR_LOG_ROOT()) << "Fiber::Fiber main id=" << m_id;
     }
 
     /**
@@ -68,7 +67,6 @@ namespace sylar
         // 2. 初始化子协程上下文入口为 MainFunc
         fiber_context::InitChildContext(m_ctx, m_stack, m_stacksize, &Fiber::MainFunc);
 
-        SYLAR_LOG_DEBUG(SYLAR_LOG_ROOT()) << "Fiber::Fiber sub id=" << m_id;
     }
 
     Fiber::~Fiber()
@@ -92,8 +90,6 @@ namespace sylar
                 SetThis(nullptr);
             }
         }
-        SYLAR_LOG_DEBUG(SYLAR_LOG_ROOT()) << "Fiber::~Fiber id=" << m_id
-                                          << " total=" << s_fiber_count;
     }
 
     /**
@@ -227,12 +223,21 @@ namespace sylar
         return t_fiber->shared_from_this();
     }
 
+    Fiber *Fiber::GetThisRaw()
+    {
+        if (!t_fiber)
+        {
+            Fiber::GetThis();
+        }
+        return t_fiber;
+    }
+
     /**
      * @brief 挂起并设置为 READY 状态（等待后续再次被 resume）
      */
     void Fiber::YieldToReady()
     {
-        Fiber::ptr cur = GetThis();
+        Fiber *cur = GetThisRaw();
         SYLAR_ASSERT(cur->m_state == EXEC);
         cur->m_state = READY;
         cur->yield();
@@ -243,7 +248,7 @@ namespace sylar
      */
     void Fiber::YieldToHold()
     {
-        Fiber::ptr cur = GetThis();
+        Fiber *cur = GetThisRaw();
         SYLAR_ASSERT(cur->m_state == EXEC);
         cur->yield();
     }
@@ -319,6 +324,31 @@ namespace sylar
             return t_fiber->getId();
         }
         return 0;
+    }
+
+    uint64_t Fiber::beginWait()
+    {
+        uint64_t token = m_waitToken.fetch_add(1, std::memory_order_relaxed) + 1;
+        m_waitResult.store(WAIT_NONE, std::memory_order_release);
+        return token;
+    }
+
+    void Fiber::setWaitResult(uint64_t token, WaitResult result)
+    {
+        if (m_waitToken.load(std::memory_order_acquire) != token)
+        {
+            return;
+        }
+        m_waitResult.store(static_cast<int>(result), std::memory_order_release);
+    }
+
+    Fiber::WaitResult Fiber::consumeWaitResult(uint64_t token)
+    {
+        if (m_waitToken.load(std::memory_order_acquire) != token)
+        {
+            return WAIT_NONE;
+        }
+        return static_cast<WaitResult>(m_waitResult.load(std::memory_order_acquire));
     }
 
 }

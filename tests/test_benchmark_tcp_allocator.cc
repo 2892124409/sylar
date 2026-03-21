@@ -324,12 +324,12 @@ namespace
             return m_iom;
         }
 
-        void cancelGuard()
+        void stop()
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_guardTimer)
+            if (m_iom)
             {
-                m_guardTimer->cancel();
+                m_iom->stop();
             }
         }
 
@@ -345,21 +345,18 @@ namespace
         void threadMain()
         {
             sylar::IOManager iom(m_ioThreads, true, "bench_off_io");
-            sylar::Timer::ptr guard = iom.addTimer(100, []() {}, true);
 
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_iom = &iom;
-                m_guardTimer = guard;
                 m_ready = true;
             }
             m_cv.notify_one();
 
-            iom.stop();
+            iom.runCaller();
 
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                m_guardTimer.reset();
                 m_iom = nullptr;
             }
         }
@@ -371,7 +368,6 @@ namespace
         std::condition_variable m_cv;
         bool m_ready = false;
         sylar::IOManager *m_iom = nullptr;
-        sylar::Timer::ptr m_guardTimer;
     };
 
     uint64_t runPersistentClients(const std::string &endpoint,
@@ -516,14 +512,12 @@ namespace
                               : static_cast<uint64_t>(opt.shortTotalRequests);
 
         sylar::IOManager iom(static_cast<size_t>(threadsTotal), true, "bench_on");
-        sylar::Timer::ptr guard = iom.addTimer(100, []() {}, true);
 
         EchoBenchServer::ptr server(new EchoBenchServer(&iom, &iom, opt.payloadBytes));
         if (!server->start())
         {
             debugLog("runModeOn server start failed");
             r.errors = r.totalRequests;
-            guard->cancel();
             return r;
         }
         std::string endpoint = server->endpoint();
@@ -548,12 +542,11 @@ namespace
             workUs.store(w1 - w0, std::memory_order_relaxed);
             debugLog("runModeOn client done err=" + std::to_string(errCount) + " succ_lat=" + std::to_string(r.latUs.size()));
             server->stop();
-            guard->cancel();
-            iom.schedule([]() {}); });
+            iom.stop(); });
 
-        debugLog("runModeOn iom.stop enter");
-        iom.stop();
-        debugLog("runModeOn iom.stop leave");
+        debugLog("runModeOn iom.runCaller enter");
+        iom.runCaller();
+        debugLog("runModeOn iom.runCaller leave");
 
         clientThread.join();
         r.totalUs = workUs.load(std::memory_order_relaxed);
@@ -587,15 +580,12 @@ namespace
         }
 
         sylar::IOManager acceptIom(1, true, "bench_off_accept");
-        sylar::Timer::ptr acceptGuard = acceptIom.addTimer(100, []() {}, true);
 
         EchoBenchServer::ptr server(new EchoBenchServer(ioIom, &acceptIom, opt.payloadBytes));
         if (!server->start())
         {
             debugLog("runModeOff server start failed");
             r.errors = r.totalRequests;
-            acceptGuard->cancel();
-            ioHost.cancelGuard();
             ioHost.join();
             return r;
         }
@@ -621,17 +611,12 @@ namespace
             workUs.store(w1 - w0, std::memory_order_relaxed);
             debugLog("runModeOff client done err=" + std::to_string(errCount) + " succ_lat=" + std::to_string(r.latUs.size()));
             server->stop();
-            acceptGuard->cancel();
-            ioHost.cancelGuard();
-            acceptIom.schedule([]() {});
-            if (ioIom)
-            {
-                ioIom->schedule([]() {});
-            } });
+            acceptIom.stop();
+            ioHost.stop(); });
 
-        debugLog("runModeOff acceptIom.stop enter");
-        acceptIom.stop();
-        debugLog("runModeOff acceptIom.stop leave");
+        debugLog("runModeOff acceptIom.runCaller enter");
+        acceptIom.runCaller();
+        debugLog("runModeOff acceptIom.runCaller leave");
 
         clientThread.join();
         ioHost.join();
