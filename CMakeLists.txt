@@ -135,3 +135,9 @@ target_link_libraries(test_benchmark_fiber sylar)
 
 add_executable(test_benchmark_tcp_allocator tests/test_benchmark_tcp_allocator.cc)
 target_link_libraries(test_benchmark_tcp_allocator sylar)
+
+add_executable(test_context_switch_pingpong tests/test_context_switch_pingpong.cc)
+target_link_libraries(test_context_switch_pingpong sylar)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(test_context_switch_pingpong PRIVATE -O3)
+endif()
