@@ -36,6 +36,7 @@ namespace sylar
              * @brief 构造函数
              * @param io_worker 处理客户端连接的协程调度器
              * @param accept_worker 执行 accept 的协程调度器
+             * @note 第三阶段要求二者必须不同实例（accept/io 分离）
              */
             TcpServer(IOManager *io_worker = IOManager::GetThis(),
                       IOManager *accept_worker = IOManager::GetThis());

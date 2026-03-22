@@ -1,5 +1,6 @@
 #include "sylar/fiber/scheduler.h"
 #include <algorithm>
+#include <cstdint>
 #include <utility>
 #include "sylar/base/macro.h"
 #include "sylar/fiber/hook.h"
@@ -62,6 +63,26 @@ namespace sylar
         return t_scheduler_fiber;
     }
 
+    void Scheduler::scheduleCommand(const Fiber::ptr &fiber, int thread)
+    {
+        FiberAndThread task(fiber, thread);
+        if (!task.fiber)
+        {
+            return;
+        }
+        scheduleTask(std::move(task), true);
+    }
+
+    void Scheduler::scheduleCommand(const std::function<void()> &cb, int thread)
+    {
+        FiberAndThread task(cb, thread);
+        if (!task.cb)
+        {
+            return;
+        }
+        scheduleTask(std::move(task), true);
+    }
+
     void Scheduler::setThis()
     {
         t_scheduler = this;
@@ -92,7 +113,7 @@ namespace sylar
         m_workers.resize(m_workerCount);
         for (size_t i = 0; i < m_workerCount; ++i)
         {
-            m_workers[i].reset(new Worker());
+            m_workers[i].reset(new Worker(kMailboxRingSize));
             m_workers[i]->index = i;
         }
 
@@ -224,13 +245,40 @@ namespace sylar
             return t_scheduler_worker_index;
         }
 
+        size_t base = 0;
+        size_t count = m_workers.size();
         if (m_useCaller && m_workers.size() > 1 &&
             !m_callerActive.load(std::memory_order_acquire))
         {
-            return 1 + (m_workerCursor.fetch_add(1, std::memory_order_relaxed) % (m_workers.size() - 1));
+            base = 1;
+            count = m_workers.size() - 1;
         }
 
-        return m_workerCursor.fetch_add(1, std::memory_order_relaxed) % m_workers.size();
+        if (count == 1)
+        {
+            return base;
+        }
+
+        size_t pick1 = base + (m_workerCursor.fetch_add(1, std::memory_order_relaxed) % count);
+        size_t pick2 = base + (m_workerCursor.fetch_add(1, std::memory_order_relaxed) % count);
+        if (pick1 == pick2)
+        {
+            pick2 = base + ((pick2 - base + 1) % count);
+        }
+
+        uint32_t load1 = m_workers[pick1]->queuedTasks.load(std::memory_order_relaxed);
+        uint32_t load2 = m_workers[pick2]->queuedTasks.load(std::memory_order_relaxed);
+        if (load1 < load2)
+        {
+            return pick1;
+        }
+        if (load2 < load1)
+        {
+            return pick2;
+        }
+
+        // tie-break：负载相同则交替选择，避免长期偏向同一候选。
+        return (m_workerCursor.fetch_add(1, std::memory_order_relaxed) & 1) ? pick1 : pick2;
     }
 
     void Scheduler::enqueueStartupTask(FiberAndThread task)
@@ -250,7 +298,7 @@ namespace sylar
 
         for (size_t i = 0; i < tasks.size(); ++i)
         {
-            scheduleTask(std::move(tasks[i]));
+            scheduleTask(std::move(tasks[i]), false);
             m_pendingTaskCount.fetch_sub(1, std::memory_order_release);
         }
     }
@@ -259,22 +307,57 @@ namespace sylar
     {
         Worker::QueueMutexType::Lock lock(worker.queueMutex);
         worker.localQueue.push_back(std::move(task));
+        worker.queuedTasks.fetch_add(1, std::memory_order_relaxed);
         m_pendingTaskCount.fetch_add(1, std::memory_order_release);
     }
 
-    void Scheduler::enqueueRemote(Worker &worker, FiberAndThread task)
+    bool Scheduler::tryEnqueueMailboxRing(Worker &worker, FiberAndThread &task)
+    {
+        size_t pos = worker.mailboxEnqueuePos.load(std::memory_order_relaxed);
+        for (;;)
+        {
+            Worker::MailboxRingSlot &slot = worker.mailboxRing[pos & worker.mailboxRingMask];
+            size_t seq = slot.seq.load(std::memory_order_acquire);
+            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+            if (diff == 0)
+            {
+                if (worker.mailboxEnqueuePos.compare_exchange_weak(
+                        pos, pos + 1,
+                        std::memory_order_relaxed,
+                        std::memory_order_relaxed))
+                {
+                    slot.task = std::move(task);
+                    slot.seq.store(pos + 1, std::memory_order_release);
+                    worker.queuedTasks.fetch_add(1, std::memory_order_relaxed);
+                    m_pendingTaskCount.fetch_add(1, std::memory_order_release);
+                    return true;
+                }
+                continue;
+            }
+
+            if (diff < 0)
+            {
+                return false;
+            }
+
+            pos = worker.mailboxEnqueuePos.load(std::memory_order_relaxed);
+        }
+    }
+
+    void Scheduler::enqueueMailboxFallback(Worker &worker, FiberAndThread task)
     {
         RemoteTaskNode *node = new RemoteTaskNode(std::move(task));
-        RemoteTaskNode *old_head = worker.remoteQueue.load(std::memory_order_relaxed);
+        RemoteTaskNode *old_head = worker.mailboxFallback.load(std::memory_order_relaxed);
         do
         {
             node->next = old_head;
-        } while (!worker.remoteQueue.compare_exchange_weak(
+        } while (!worker.mailboxFallback.compare_exchange_weak(
             old_head, node, std::memory_order_release, std::memory_order_relaxed));
+        worker.queuedTasks.fetch_add(1, std::memory_order_relaxed);
         m_pendingTaskCount.fetch_add(1, std::memory_order_release);
     }
 
-    void Scheduler::scheduleTask(FiberAndThread task)
+    void Scheduler::scheduleTask(FiberAndThread task, bool allow_cross_worker)
     {
         if (!task.fiber && !task.cb)
         {
@@ -294,21 +377,86 @@ namespace sylar
             return;
         }
 
-        Worker &worker = *m_workers[worker_index];
-        bool local = (t_scheduler == this && t_scheduler_worker_index == worker_index);
-        if (local)
+        size_t current = (t_scheduler == this) ? t_scheduler_worker_index : kInvalidWorker;
+        if (current != kInvalidWorker)
         {
-            enqueueLocal(worker, std::move(task));
+            if (current == worker_index)
+            {
+                enqueueLocal(*m_workers[current], std::move(task));
+                return;
+            }
+
+            if (!allow_cross_worker)
+            {
+                static std::atomic<uint64_t> s_cross_worker_downgrade_log_count(0);
+                uint64_t n = s_cross_worker_downgrade_log_count.fetch_add(1, std::memory_order_relaxed);
+                if (n < 16)
+                {
+                    SYLAR_LOG_WARN(g_logger) << "cross-worker schedule downgraded to local queue"
+                                             << " scheduler=" << m_name
+                                             << " current_worker=" << current
+                                             << " target_worker=" << worker_index;
+                }
+                enqueueLocal(*m_workers[current], std::move(task));
+                return;
+            }
+        }
+
+        Worker &worker = *m_workers[worker_index];
+        if (!tryEnqueueMailboxRing(worker, task))
+        {
+            enqueueMailboxFallback(worker, std::move(task));
+        }
+        // 远程投递只在目标 worker 处于睡眠态时唤醒，减少高频 eventfd 写入。
+        if (worker.sleeping.load(std::memory_order_acquire))
+        {
+            tickle(worker_index);
+        }
+    }
+
+    void Scheduler::drainMailboxRing(Worker &worker, size_t max_batch)
+    {
+        std::vector<FiberAndThread> batch;
+        batch.reserve(max_batch);
+
+        size_t pos = worker.mailboxDequeuePos.load(std::memory_order_relaxed);
+        while (batch.size() < max_batch)
+        {
+            Worker::MailboxRingSlot &slot = worker.mailboxRing[pos & worker.mailboxRingMask];
+            size_t seq = slot.seq.load(std::memory_order_acquire);
+            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+            if (diff < 0)
+            {
+                break;
+            }
+            if (diff > 0)
+            {
+                pos = worker.mailboxDequeuePos.load(std::memory_order_relaxed);
+                continue;
+            }
+
+            batch.push_back(std::move(slot.task));
+            slot.seq.store(pos + worker.mailboxRingSize, std::memory_order_release);
+            ++pos;
+        }
+
+        worker.mailboxDequeuePos.store(pos, std::memory_order_relaxed);
+
+        if (batch.empty())
+        {
             return;
         }
 
-        enqueueRemote(worker, std::move(task));
-        tickle(worker_index);
+        Worker::QueueMutexType::Lock lock(worker.queueMutex);
+        for (size_t i = 0; i < batch.size(); ++i)
+        {
+            worker.localQueue.push_back(std::move(batch[i]));
+        }
     }
 
-    void Scheduler::drainRemoteQueue(Worker &worker)
+    void Scheduler::drainMailboxFallback(Worker &worker)
     {
-        RemoteTaskNode *head = worker.remoteQueue.exchange(nullptr, std::memory_order_acquire);
+        RemoteTaskNode *head = worker.mailboxFallback.exchange(nullptr, std::memory_order_acquire);
         if (!head)
         {
             return;
@@ -333,9 +481,22 @@ namespace sylar
         }
     }
 
+    bool Scheduler::hasMailboxWork(const Worker &worker) const
+    {
+        if (worker.mailboxFallback.load(std::memory_order_acquire) != nullptr)
+        {
+            return true;
+        }
+
+        size_t enq = worker.mailboxEnqueuePos.load(std::memory_order_acquire);
+        size_t deq = worker.mailboxDequeuePos.load(std::memory_order_acquire);
+        return enq != deq;
+    }
+
     bool Scheduler::popTask(Worker &worker, FiberAndThread &task)
     {
-        drainRemoteQueue(worker);
+        drainMailboxRing(worker, kMailboxDrainBatch);
+        drainMailboxFallback(worker);
 
         Worker::QueueMutexType::Lock lock(worker.queueMutex);
         if (worker.localQueue.empty())
@@ -345,41 +506,9 @@ namespace sylar
 
         task = std::move(worker.localQueue.front());
         worker.localQueue.pop_front();
+        worker.queuedTasks.fetch_sub(1, std::memory_order_relaxed);
         m_pendingTaskCount.fetch_sub(1, std::memory_order_release);
         return true;
-    }
-
-    bool Scheduler::stealTask(Worker &worker, FiberAndThread &task)
-    {
-        for (size_t i = 0; i < m_workers.size(); ++i)
-        {
-            Worker *victim = m_workers[i].get();
-            if (!victim || victim == &worker)
-            {
-                continue;
-            }
-
-            Worker::QueueMutexType::Lock lock(victim->queueMutex);
-            if (victim->localQueue.empty())
-            {
-                continue;
-            }
-
-            for (std::deque<FiberAndThread>::reverse_iterator it = victim->localQueue.rbegin();
-                 it != victim->localQueue.rend(); ++it)
-            {
-                if (it->thread != -1)
-                {
-                    continue;
-                }
-
-                task = std::move(*it);
-                victim->localQueue.erase(std::next(it).base());
-                m_pendingTaskCount.fetch_sub(1, std::memory_order_release);
-                return true;
-            }
-        }
-        return false;
     }
 
     void Scheduler::run(size_t worker_index)
@@ -408,10 +537,7 @@ namespace sylar
         {
             task.reset();
 
-            if (!popTask(worker, task))
-            {
-                stealTask(worker, task);
-            }
+            popTask(worker, task);
 
             if (task.fiber && task.fiber->getState() != Fiber::TERM &&
                 task.fiber->getState() != Fiber::EXCEPT)
@@ -497,6 +623,13 @@ namespace sylar
             }
 
             worker.sleeping.store(true, std::memory_order_release);
+            // 进入 idle 前再检查一次，避免与并发投递竞态导致漏唤醒。
+            if (hasMailboxWork(worker) ||
+                m_pendingTaskCount.load(std::memory_order_acquire) > 0)
+            {
+                worker.sleeping.store(false, std::memory_order_release);
+                continue;
+            }
             m_idleThreadCount.fetch_add(1, std::memory_order_release);
             idle_fiber->resume();
             m_idleThreadCount.fetch_sub(1, std::memory_order_release);

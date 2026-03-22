@@ -1,134 +1,85 @@
-# Allocator 对比基准说明（2026-03-20）
+# Allocator + A/B 拓扑压测说明（更新于 2026-03-22）
 
 ## 1. 对比目标
 
-- A：系统默认分配器（baseline）
-- B1：jemalloc（LD_PRELOAD）
-- B2：tcmalloc（LD_PRELOAD）
+统一对比三种分配器在两种 Reactor 拓扑下的表现：
 
-统一前提：
+- `baseline`（系统默认分配器）
+- `jemalloc`（`LD_PRELOAD`）
+- `tcmalloc`（`LD_PRELOAD`）
 
-- 协程保持跨线程自由调度（不做线程绑定）
-- 统一测试 `use_caller=on/off` 两种模式
-- `threads_total` 使用同一组：`2,4,8`
+拓扑定义：
 
-## 2. 基准程序
+- `mode=a`：主线程运行 `accept_worker`（主线程 `runCaller`）
+- `mode=b`：主线程不运行 worker（`accept/io` 都在后台线程）
+
+> 当前代码约束：`accept_worker` 和 `io_worker` 必须是不同 `IOManager` 实例。
+
+## 2. 基准程序与参数
 
 - 可执行文件：`build/bin/test_benchmark_tcp_allocator`
 - 源码：`tests/test_benchmark_tcp_allocator.cc`
 
-输出 CSV 字段：
+核心参数：
 
-`allocator,mode,workload,threads_total,run_id,total_requests,total_ms,req_per_sec,p50_us,p95_us,p99_us,max_us,errors`
+- `--mode=a|b|all`（兼容 `on/off`，内部会映射到 `a/b`）
+- `--workload=persistent|short|all`
+- `--io_threads=2,4,8`（兼容 `--threads`）
+- `--repeat=3`
+- `--run_id=1`
 
-## 3. 调度拓扑定义
+负载定义：
 
-### mode=on
+- `persistent`：长连接复用
+- `short`：短连接风暴（每请求新建连接）
 
-- `accept_worker` 与 `io_worker` 共用一个 `IOManager(threads=T, use_caller=true)`
+## 3. CSV 输出口径
 
-### mode=off
+单次运行输出字段：
 
-- 主线程：`accept_iom(threads=1, use_caller=true)`，承载 `accept_worker`
-- 子线程：创建并运行 `io_iom(threads=T-1, use_caller=true)`，独占 `io_worker`
+`allocator,mode,workload,io_threads,run_id,total_requests,total_ms,req_per_sec,p50_us,p95_us,p99_us,max_us,errors,status,exit_code`
 
-## 4. 负载类型
+关键字段：
 
-- `persistent`：持久连接，多连接多次收发
-- `short`：短连接风暴，每请求新建连接
+- `status=ok`：该次 run 正常完成
+- `status=start_fail|exception|crash|timeout|...`：失败类型
+- `exit_code`：进程退出码（`ok` 时应为 `0`）
 
-## 5. 一键运行
+## 4. 一键压测脚本
 
 ```bash
 tests/run_allocator_bench.sh
 ```
 
+脚本行为：
+
+- 维度：`allocator × mode(a/b) × workload × io_threads × run_id`
+- 每个组合单独进程执行（隔离崩溃影响）
+- 单 run 失败会记录并继续，不中断整轮压测
+- 支持超时保护（`RUN_TIMEOUT_SEC`）
+
 可选环境变量：
 
-- `JEMALLOC_LIB=/abs/path/libjemalloc.so`
-- `TCMALLOC_LIB=/abs/path/libtcmalloc*.so`
-- `THREADS=2,4,8`
+- `IO_THREADS=2,4,8`
+- `MODES=a,b`
+- `WORKLOADS=persistent,short`
+- `REPEAT=3`
+- `RUN_TIMEOUT_SEC=120`
 - `CONNECTIONS=64`
 - `REQUESTS_PER_CONN=200`
 - `SHORT_TOTAL_REQUESTS=10000`
 - `PAYLOAD_BYTES=256`
+- `STARTUP_DELAY_MS=80`
+- `JEMALLOC_LIB=/abs/path/libjemalloc.so`
+- `TCMALLOC_LIB=/abs/path/libtcmalloc.so`
 
-## 6. 输出文件
+## 5. 输出文件
 
-- 快速筛查（repeat=1）：`result_allocator_matrix_quick.csv`
-- 全量原始（repeat=3）：`result_allocator_matrix_raw.csv`
-- 全量聚合均值：`result_allocator_matrix_avg.csv`
+- 原始结果：`result_allocator_matrix_raw.csv`
+- 成功 run 聚合均值：`result_allocator_matrix_avg.csv`
+- 失败明细：`result_allocator_matrix_failures.csv`
 
-## 7. 本次实测结果总结（2026-03-20）
+说明：
 
-本次实际执行参数（为控制总时长）：
-
-- `THREADS=2,4,8`
-- `CONNECTIONS=32`
-- `REQUESTS_PER_CONN=50`
-- `SHORT_TOTAL_REQUESTS=300`
-- `PAYLOAD_BYTES=256`
-- quick=1 次，full=3 次（脚本默认流程）
-
-数据来源：
-
-- `result_allocator_matrix_avg.csv`
-
-统计口径：
-
-- 吞吐优化(%) = `(B.req_per_sec / A.req_per_sec - 1) * 100%`（越大越好）
-- p95变化(%) = `(B.p95 / A.p95 - 1) * 100%`（越小越好，负值表示 p95 降低）
-
-### 7.1 全局平均（12 个组合：2 mode × 2 workload × 3 threads）
-
-| allocator | 吞吐优化(%) | p95变化(%) |
-| --- | ---: | ---: |
-| jemalloc | -0.92% | -0.84% |
-| tcmalloc | +3.78% | -6.47% |
-
-结论：
-
-- `tcmalloc` 在本次矩阵里整体最优（平均吞吐提升 +3.78%，平均 p95 下降 6.47%）。
-- `jemalloc` 整体接近 baseline（吞吐略降，p95 略好）。
-
-### 7.2 分场景平均（按 mode/workload 聚合 3 个线程点）
-
-| allocator | mode | workload | 吞吐优化(%) | p95变化(%) |
-| --- | --- | --- | ---: | ---: |
-| jemalloc | off | persistent | +6.92% | -10.54% |
-| jemalloc | off | short | -3.59% | +4.70% |
-| jemalloc | on | persistent | -1.85% | -0.79% |
-| jemalloc | on | short | -5.18% | +3.28% |
-| tcmalloc | off | persistent | +10.64% | -14.30% |
-| tcmalloc | off | short | +1.54% | -3.39% |
-| tcmalloc | on | persistent | +5.05% | -7.06% |
-| tcmalloc | on | short | -2.09% | -1.14% |
-
-结论：
-
-- `persistent` 场景中，`tcmalloc` 与 `jemalloc` 均有收益，`tcmalloc` 更稳定。
-- `short` 场景中，分配器收益不稳定，网络层瞬时建连压力更主导结果。
-
-### 7.3 线程维度关键点（相对 baseline）
-
-- `off + persistent + 8`：
-  - `jemalloc`：吞吐 `+25.13%`，p95 `-44.19%`
-  - `tcmalloc`：吞吐 `+40.57%`，p95 `-50.53%`
-- `on + persistent + 4`：
-  - `jemalloc`：吞吐 `+2.65%`，p95 `-8.80%`
-  - `tcmalloc`：吞吐 `+8.12%`，p95 `-11.79%`
-
-### 7.4 错误率说明（short 连接风暴）
-
-- `short` 在 4/8 线程下存在非 0 `avg_errors`（三组 allocator 都出现）。
-- 该现象主要由短连接风暴下的连接队列/超时压力导致，不是 allocator 单点问题。
-
-## 8. 当前决策（2026-03-20）
-
-- 结论：**暂不启用 jemalloc/tcmalloc 作为默认优化方案**，保持当前默认分配器配置。
-- 原因：
-  - 整体收益有限（全局平均维度下，`tcmalloc` 提升存在但幅度不大；`jemalloc` 基本持平）。
-  - `short` 连接风暴场景主要瓶颈不在 allocator，优化优先级应放在连接/调度/超时策略。
-- 后续策略：
-  - 保留本 benchmark 程序与脚本作为回归工具；
-  - 仅当生产 profiling 明确显示分配路径成为热点瓶颈时，再重新评估是否启用 allocator 替换。
+- `avg` 只聚合 `status=ok` 的 run；
+- 失败 run 进入 `failures`，同时在 `raw` 中以失败状态占位，便于后续统计稳定性。

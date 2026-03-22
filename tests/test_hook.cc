@@ -16,11 +16,11 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/uio.h>
+#include <atomic>
+#include <thread>
+#include <chrono>
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
-
-// 全局pipefd，用于不同测试间共享
-static int g_pipefd[2] = {-1, -1};
 
 /**
  * @brief 打印Hook状态说明
@@ -75,23 +75,9 @@ void test_sleep()
 {
     SYLAR_LOG_INFO(g_logger) << "========== 测试2: 睡眠函数Hook测试 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
-
-    // 测试 sleep - 这个sleep会被hook，不阻塞线程
-    iom->schedule([]()
-                  {
-        SYLAR_LOG_INFO(g_logger) << "协程1: 调用sleep(2)，进入协程让出";
-        sleep(2);
-        SYLAR_LOG_INFO(g_logger) << "协程1: sleep结束，协程被唤醒"; });
-
-    // 测试 usleep
-    iom->schedule([]()
-                  {
-        SYLAR_LOG_INFO(g_logger) << "协程2: 调用usleep(500000)x4";
-        for (int i = 0; i < 4; ++i) {
-            usleep(500000);
-        }
-        SYLAR_LOG_INFO(g_logger) << "协程2: usleep循环完成"; });
+    SYLAR_LOG_INFO(g_logger) << "sleep(1) 开始";
+    sleep(1);
+    SYLAR_LOG_INFO(g_logger) << "sleep(1) 结束";
 
     SYLAR_LOG_INFO(g_logger) << "测试2完成: 睡眠函数通过Hook自动让出协程";
     SYLAR_LOG_INFO(g_logger) << "=======================================";
@@ -103,48 +89,43 @@ void test_pipe_io()
 {
     SYLAR_LOG_INFO(g_logger) << "========== 测试3: Pipe读写Hook测试 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
-
-    // 创建pipe
-    if (pipe(g_pipefd) < 0)
+    int sv[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
     {
-        SYLAR_LOG_ERROR(g_logger) << "Pipe创建失败: " << strerror(errno);
+        SYLAR_LOG_ERROR(g_logger) << "socketpair创建失败: " << strerror(errno);
         return;
     }
 
-    fcntl(g_pipefd[0], F_SETFL, O_NONBLOCK);
-    fcntl(g_pipefd[1], F_SETFL, O_NONBLOCK);
+    int writer_fd = sv[1];
+    int reader_fd = sv[0];
 
-    // 读取协程
-    iom->schedule([iom]()
-                  {
-        SYLAR_LOG_INFO(g_logger) << "读取协程: 等待数据...";
-        char buffer[128];
-        ssize_t n = read(g_pipefd[0], buffer, sizeof(buffer) - 1);
-
-        if (n > 0) {
-            buffer[n] = '\0';
-            SYLAR_LOG_INFO(g_logger) << "读取协程: 成功读取 " << n << " 字节: " << buffer;
-        } else if (n < 0) {
-            SYLAR_LOG_ERROR(g_logger) << "读取协程: 读取失败, errno=" << errno;
-        }
-
-        close(g_pipefd[0]); });
-
-    // 写入协程
-    iom->schedule([iom]()
-                  {
-        usleep(1000000);
+    std::thread writer([writer_fd]()
+                       {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         const char* msg = "Hello from Hook!";
-        ssize_t n = write(g_pipefd[1], msg, strlen(msg));
-
+        ssize_t n = write(writer_fd, msg, strlen(msg));
         if (n > 0) {
-            SYLAR_LOG_INFO(g_logger) << "写入协程: 成功写入 " << n << " 字节";
+            SYLAR_LOG_INFO(g_logger) << "写入线程: 成功写入 " << n << " 字节";
         } else {
-            SYLAR_LOG_ERROR(g_logger) << "写入协程: 写入失败, errno=" << errno;
+            SYLAR_LOG_ERROR(g_logger) << "写入线程: 写入失败, errno=" << errno;
         }
+        close(writer_fd); });
 
-        close(g_pipefd[1]); });
+    SYLAR_LOG_INFO(g_logger) << "读取协程: 等待数据...";
+    char buffer[128];
+    ssize_t n = read(reader_fd, buffer, sizeof(buffer) - 1);
+    if (n > 0)
+    {
+        buffer[n] = '\0';
+        SYLAR_LOG_INFO(g_logger) << "读取协程: 成功读取 " << n << " 字节: " << buffer;
+    }
+    else
+    {
+        SYLAR_LOG_ERROR(g_logger) << "读取协程: 读取失败, errno=" << errno;
+    }
+
+    close(reader_fd);
+    writer.join();
 
     SYLAR_LOG_INFO(g_logger) << "测试3完成: Pipe读写函数通过Hook自动协程切换";
     SYLAR_LOG_INFO(g_logger) << "=======================================";
@@ -156,23 +137,19 @@ void test_iov()
 {
     SYLAR_LOG_INFO(g_logger) << "========== 测试4: readv/writev测试 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
-
-    // 创建新pipe
-    if (pipe(g_pipefd) < 0)
+    int sv[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
     {
-        SYLAR_LOG_ERROR(g_logger) << "Pipe创建失败";
+        SYLAR_LOG_ERROR(g_logger) << "socketpair创建失败: " << strerror(errno);
         return;
     }
 
-    fcntl(g_pipefd[0], F_SETFL, O_NONBLOCK);
-    fcntl(g_pipefd[1], F_SETFL, O_NONBLOCK);
+    int writer_fd = sv[1];
+    int reader_fd = sv[0];
 
-    // 写入协程 - 使用 writev
-    iom->schedule([iom]()
-                  {
-        usleep(500000);
-
+    std::thread writer([writer_fd]()
+                       {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         iovec iov[3];
         const char* msg1 = "Hello, ";
         const char* msg2 = "writev";
@@ -186,44 +163,38 @@ void test_iov()
         iov[2].iov_len = strlen(msg3);
 
         ssize_t total_len = iov[0].iov_len + iov[1].iov_len + iov[2].iov_len;
-        ssize_t n = writev(g_pipefd[1], iov, 3);
+        ssize_t n = writev(writer_fd, iov, 3);
 
         if (n == total_len) {
             SYLAR_LOG_INFO(g_logger) << "Iov写入: 成功写入 " << n << " 字节";
         } else {
             SYLAR_LOG_ERROR(g_logger) << "Iov写入: 失败, n=" << n << ", errno=" << errno;
         }
+        close(writer_fd); });
 
-        close(g_pipefd[1]); });
+    char buf1[10] = {0}, buf2[10] = {0}, buf3[10] = {0};
+    iovec iov[3];
 
-    // 读取协程 - 使用 readv
-    iom->schedule([iom]()
-                  {
-        usleep(1500000);
+    iov[0].iov_base = buf1;
+    iov[0].iov_len = sizeof(buf1) - 1;
+    iov[1].iov_base = buf2;
+    iov[1].iov_len = sizeof(buf2) - 1;
+    iov[2].iov_base = buf3;
+    iov[2].iov_len = sizeof(buf3) - 1;
 
-        char buf1[10], buf2[10], buf3[10];
-        iovec iov[3];
+    ssize_t n = readv(reader_fd, iov, 3);
 
-        iov[0].iov_base = buf1;
-        iov[0].iov_len = sizeof(buf1) - 1;
-        iov[1].iov_base = buf2;
-        iov[1].iov_len = sizeof(buf2) - 1;
-        iov[2].iov_base = buf3;
-        iov[2].iov_len = sizeof(buf3) - 1;
-
-        ssize_t n = readv(g_pipefd[0], iov, 3);
-
-        if (n > 0) {
-            buf1[iov[0].iov_len] = '\0';
-            buf2[iov[1].iov_len] = '\0';
-            buf3[iov[2].iov_len] = '\0';
-            SYLAR_LOG_INFO(g_logger) << "Iov读取: 成功读取 " << n << " 字节";
-            SYLAR_LOG_INFO(g_logger) << "buf1=[" << buf1 << "] buf2=[" << buf2 << "] buf3=[" << buf3 << "]";
-        } else if (n < 0) {
-            SYLAR_LOG_ERROR(g_logger) << "Iov读取: 失败, errno=" << errno;
-        }
-
-        close(g_pipefd[0]); });
+    if (n > 0)
+    {
+        SYLAR_LOG_INFO(g_logger) << "Iov读取: 成功读取 " << n << " 字节";
+        SYLAR_LOG_INFO(g_logger) << "buf1=[" << buf1 << "] buf2=[" << buf2 << "] buf3=[" << buf3 << "]";
+    }
+    else
+    {
+        SYLAR_LOG_ERROR(g_logger) << "Iov读取: 失败, errno=" << errno;
+    }
+    close(reader_fd);
+    writer.join();
 
     SYLAR_LOG_INFO(g_logger) << "测试4完成: readv/writev函数通过Hook自动协程切换";
     SYLAR_LOG_INFO(g_logger) << "=======================================";
@@ -235,23 +206,24 @@ void test_fcntl_nonblock()
 {
     SYLAR_LOG_INFO(g_logger) << "========== 测试5: fcntl非阻塞测试 ==========";
 
+    int pipefd[2] = {-1, -1};
     // 创建新pipe
-    if (pipe(g_pipefd) < 0)
+    if (pipe(pipefd) < 0)
     {
         SYLAR_LOG_ERROR(g_logger) << "Pipe创建失败";
         return;
     }
 
-    int flags0 = fcntl(g_pipefd[0], F_GETFL, 0);
-    int flags1 = fcntl(g_pipefd[1], F_GETFL, 0);
+    int flags0 = fcntl(pipefd[0], F_GETFL, 0);
+    int flags1 = fcntl(pipefd[1], F_GETFL, 0);
 
     SYLAR_LOG_INFO(g_logger) << "原始flags: fd0=" << flags0 << ", fd1=" << flags1;
 
-    fcntl(g_pipefd[0], F_SETFL, flags0 | O_NONBLOCK);
-    fcntl(g_pipefd[1], F_SETFL, flags1 | O_NONBLOCK);
+    fcntl(pipefd[0], F_SETFL, flags0 | O_NONBLOCK);
+    fcntl(pipefd[1], F_SETFL, flags1 | O_NONBLOCK);
 
-    int new_flags0 = fcntl(g_pipefd[0], F_GETFL, 0);
-    int new_flags1 = fcntl(g_pipefd[1], F_GETFL, 0);
+    int new_flags0 = fcntl(pipefd[0], F_GETFL, 0);
+    int new_flags1 = fcntl(pipefd[1], F_GETFL, 0);
 
     SYLAR_LOG_INFO(g_logger) << "设置后flags: fd0=" << new_flags0 << ", fd1=" << new_flags1;
 
@@ -264,8 +236,8 @@ void test_fcntl_nonblock()
         SYLAR_LOG_ERROR(g_logger) << "fcntl测试: O_NONBLOCK标志设置失败";
     }
 
-    close(g_pipefd[0]);
-    close(g_pipefd[1]);
+    close(pipefd[0]);
+    close(pipefd[1]);
 
     SYLAR_LOG_INFO(g_logger) << "测试5完成: fcntl被正确Hook处理";
     SYLAR_LOG_INFO(g_logger) << "=======================================";
@@ -277,51 +249,49 @@ void test_setsockopt_timeout()
 {
     SYLAR_LOG_INFO(g_logger) << "========== 测试6: setsockopt超时测试 ==========";
 
-    sylar::IOManager *iom = sylar::IOManager::GetThis();
-
-    // 创建新pipe
-    if (pipe(g_pipefd) < 0)
+    int sv[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
     {
-        SYLAR_LOG_ERROR(g_logger) << "Pipe创建失败";
+        SYLAR_LOG_ERROR(g_logger) << "socketpair创建失败: " << strerror(errno);
         return;
     }
-
-    fcntl(g_pipefd[0], F_SETFL, O_NONBLOCK);
 
     struct timeval tv;
     tv.tv_sec = 1;
     tv.tv_usec = 0;
 
-    int ret = setsockopt(g_pipefd[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    int ret = setsockopt(sv[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     if (ret < 0)
     {
         SYLAR_LOG_ERROR(g_logger) << "setsockopt失败: " << strerror(errno);
+        close(sv[0]);
+        close(sv[1]);
+        return;
     }
     else
     {
         SYLAR_LOG_INFO(g_logger) << "setsockopt成功: 设置SO_RCVTIMEO=1秒";
     }
 
-    // 读取协程 - 尝试从空pipe读取
-    iom->schedule([iom]()
-                  {
-        char buffer[128];
-        ssize_t n = read(g_pipefd[0], buffer, sizeof(buffer));
-
-        if (n < 0) {
-            if (errno == ETIMEDOUT) {
-                SYLAR_LOG_INFO(g_logger) << "超时测试: 成功捕获ETIMEDOUT (Hook生效，超时机制工作)";
-            } else if (errno == EAGAIN) {
-                SYLAR_LOG_INFO(g_logger) << "超时测试: 返回EAGAIN (fd不是socket，超时可能未生效)";
-            } else {
-                SYLAR_LOG_INFO(g_logger) << "超时测试: errno=" << errno << " (" << strerror(errno) << ")";
-            }
-        } else {
-            SYLAR_LOG_INFO(g_logger) << "超时测试: 意外读取到 " << n << " 字节";
+    char buffer[128];
+    ssize_t n = read(sv[0], buffer, sizeof(buffer));
+    if (n < 0)
+    {
+        if (errno == ETIMEDOUT)
+        {
+            SYLAR_LOG_INFO(g_logger) << "超时测试: 成功捕获ETIMEDOUT (Hook生效，超时机制工作)";
         }
-
-        close(g_pipefd[0]);
-        close(g_pipefd[1]); });
+        else
+        {
+            SYLAR_LOG_ERROR(g_logger) << "超时测试: errno=" << errno << " (" << strerror(errno) << ")";
+        }
+    }
+    else
+    {
+        SYLAR_LOG_ERROR(g_logger) << "超时测试: 意外读取到 " << n << " 字节";
+    }
+    close(sv[0]);
+    close(sv[1]);
 
     SYLAR_LOG_INFO(g_logger) << "测试6完成: setsockopt超时设置被Hook正确处理";
     SYLAR_LOG_INFO(g_logger) << "=======================================";
@@ -352,28 +322,22 @@ int main(int argc, char **argv)
     // 创建IOManager运行其他测试
     sylar::IOManager iom(1, true, "HookTest");
 
-    // 初始化pipe
-    if (pipe(g_pipefd) < 0)
-    {
-        SYLAR_LOG_ERROR(g_logger) << "初始化Pipe失败";
-        return 1;
-    }
-
-    // 运行测试2-6
-    iom.schedule(test_sleep);              // 测试2: 睡眠函数Hook
-    iom.schedule(test_pipe_io);            // 测试3: Pipe读写Hook
-    iom.schedule(test_iov);                // 测试4: readv/writev
-    iom.schedule(test_fcntl_nonblock);     // 测试5: fcntl非阻塞
-    iom.schedule(test_setsockopt_timeout); // 测试6: setsockopt超时
-
-    // 10秒后自动停止
-    iom.addTimer(10000, [&iom]()
+    iom.schedule([&iom]()
                  {
+        SYLAR_LOG_INFO(g_logger) << "[orchestrator] begin test_pipe_io";
+        test_pipe_io();
+        SYLAR_LOG_INFO(g_logger) << "[orchestrator] begin test_iov";
+        test_iov();
+        SYLAR_LOG_INFO(g_logger) << "[orchestrator] begin test_fcntl_nonblock";
+        test_fcntl_nonblock();
+        SYLAR_LOG_INFO(g_logger) << "[orchestrator] begin test_setsockopt_timeout";
+        test_setsockopt_timeout();
         SYLAR_LOG_INFO(g_logger) << "";
         SYLAR_LOG_INFO(g_logger) << "========================================";
         SYLAR_LOG_INFO(g_logger) << "     所有测试已完成";
         SYLAR_LOG_INFO(g_logger) << "========================================";
         iom.stop(); });
 
+    iom.runCaller();
     return 0;
 }

@@ -87,6 +87,8 @@ namespace sylar
                              Fiber::ptr fiber, uint64_t timeout_ms, uint64_t *wait_token);
         bool cancelEventInternal(int fd, Event event, Fiber::WaitResult result);
         void onEventTimeout(int fd, Event event, uint64_t wait_token);
+        int runOnOwnerSyncInt(size_t owner, const std::function<int()> &fn);
+        bool runOnOwnerSyncBool(size_t owner, const std::function<bool()> &fn);
         FdContext *getFdContext(int fd, bool auto_create);
         size_t selectEventWorker() const;
 

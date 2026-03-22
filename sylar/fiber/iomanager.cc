@@ -59,6 +59,12 @@ namespace sylar
     {
         SYLAR_ASSERT(events & event);
         events = static_cast<Event>(events & ~event);
+        if (events == NONE)
+        {
+            // fd 上最后一个事件被消费后，释放 worker 归属。
+            // 否则 fd 复用时可能沿用旧 owner，导致跨 worker 错投递。
+            ownerWorker = Scheduler::kInvalidWorker;
+        }
 
         EventContext &ctx = getEventContext(event);
         Timer::ptr timeout = ctx.timeoutTimer;
@@ -74,11 +80,11 @@ namespace sylar
             {
                 ctx.fiber->setWaitResult(ctx.waitToken, result);
             }
-            ctx.scheduler->schedule(&ctx.fiber, ctx.thread);
+            ctx.scheduler->scheduleCommand(ctx.fiber, ctx.thread);
         }
         else if (ctx.cb)
         {
-            ctx.scheduler->schedule(&ctx.cb, ctx.thread);
+            ctx.scheduler->scheduleCommand(ctx.cb, ctx.thread);
         }
 
         resetEventContext(ctx);
@@ -195,6 +201,54 @@ namespace sylar
         return m_eventWorkerCursor.load(std::memory_order_relaxed) % getWorkerCount();
     }
 
+    int IOManager::runOnOwnerSyncInt(size_t owner, const std::function<int()> &fn)
+    {
+        if (owner == Scheduler::kInvalidWorker || owner >= getWorkerCount())
+        {
+            errno = EINVAL;
+            return -1;
+        }
+
+        if (getCurrentWorkerIndex() == owner)
+        {
+            return fn();
+        }
+
+        int result = -1;
+        Semaphore sem(0);
+        int owner_thread = getWorkerThreadId(owner);
+        scheduleCommand([&]()
+                        {
+            result = fn();
+            sem.notify(); }, owner_thread);
+        sem.wait();
+        return result;
+    }
+
+    bool IOManager::runOnOwnerSyncBool(size_t owner, const std::function<bool()> &fn)
+    {
+        if (owner == Scheduler::kInvalidWorker || owner >= getWorkerCount())
+        {
+            errno = EINVAL;
+            return false;
+        }
+
+        if (getCurrentWorkerIndex() == owner)
+        {
+            return fn();
+        }
+
+        bool result = false;
+        Semaphore sem(0);
+        int owner_thread = getWorkerThreadId(owner);
+        scheduleCommand([&]()
+                        {
+            result = fn();
+            sem.notify(); }, owner_thread);
+        sem.wait();
+        return result;
+    }
+
     int IOManager::addEvent(int fd, Event event, std::function<void()> cb)
     {
         return addEventInternal(fd, event, std::move(cb), nullptr, ~0ull, nullptr);
@@ -234,14 +288,8 @@ namespace sylar
         size_t owner = Scheduler::kInvalidWorker;
         {
             FdContext::MutexType::Lock lock(fd_ctx->mutex);
-            if (SYLAR_UNLIKELY(fd_ctx->events & event))
-            {
-                errno = EEXIST;
-                return -1;
-            }
-
             owner = fd_ctx->ownerWorker;
-            if (owner == Scheduler::kInvalidWorker)
+            if (owner == Scheduler::kInvalidWorker || fd_ctx->events == NONE)
             {
                 owner = getCurrentWorkerIndex();
                 if (owner == Scheduler::kInvalidWorker)
@@ -250,8 +298,19 @@ namespace sylar
                 }
                 fd_ctx->ownerWorker = owner;
             }
+        }
 
-            WorkerContext &worker = m_workerContexts[owner];
+        std::function<void()> local_cb = std::move(cb);
+        return runOnOwnerSyncInt(owner, [this, fd_ctx, fd, event, owner, local_cb, fiber, timeout_ms, wait_token]() mutable -> int
+                                 {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (SYLAR_UNLIKELY(fd_ctx->events & event))
+            {
+                errno = EEXIST;
+                return -1;
+            }
+
+            WorkerContext& worker = m_workerContexts[owner];
             int op = fd_ctx->events ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
             epoll_event epevent;
             memset(&epevent, 0, sizeof(epevent));
@@ -270,14 +329,14 @@ namespace sylar
             ++m_pendingEventCount;
             fd_ctx->events = static_cast<Event>(fd_ctx->events | event);
 
-            FdContext::EventContext &event_ctx = fd_ctx->getEventContext(event);
+            FdContext::EventContext& event_ctx = fd_ctx->getEventContext(event);
             SYLAR_ASSERT(!event_ctx.scheduler && !event_ctx.fiber && !event_ctx.cb);
             event_ctx.scheduler = this;
             event_ctx.thread = getWorkerThreadId(owner);
 
-            if (cb)
+            if (local_cb)
             {
-                event_ctx.cb.swap(cb);
+                event_ctx.cb.swap(local_cb);
             }
             else
             {
@@ -300,9 +359,8 @@ namespace sylar
                     false,
                     owner);
             }
-        }
 
-        return 0;
+            return 0; });
     }
 
     bool IOManager::delEvent(int fd, Event event)
@@ -313,39 +371,54 @@ namespace sylar
             return false;
         }
 
-        FdContext::MutexType::Lock lock(fd_ctx->mutex);
-        if (!(fd_ctx->events & event))
+        size_t owner = Scheduler::kInvalidWorker;
         {
-            return false;
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!(fd_ctx->events & event))
+            {
+                return false;
+            }
+            owner = fd_ctx->ownerWorker;
         }
 
-        size_t owner = fd_ctx->ownerWorker;
-        WorkerContext &worker = m_workerContexts[owner];
-        Event new_events = static_cast<Event>(fd_ctx->events & ~event);
-        int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-        epoll_event epevent;
-        memset(&epevent, 0, sizeof(epevent));
-        epevent.events = ToEpollEvents(new_events);
-        epevent.data.ptr = fd_ctx;
+        return runOnOwnerSyncBool(owner, [this, fd_ctx, fd, event, owner]() -> bool
+                                  {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!(fd_ctx->events & event))
+            {
+                return false;
+            }
 
-        int rt = epoll_ctl(worker.epfd, op, fd, &epevent);
-        if (rt)
-        {
-            SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
-                                      << op << "," << fd << "," << epevent.events << "):"
-                                      << rt << " (" << errno << ") (" << strerror(errno) << ")";
-            return false;
-        }
+            WorkerContext& worker = m_workerContexts[owner];
+            Event new_events = static_cast<Event>(fd_ctx->events & ~event);
+            int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
+            epoll_event epevent;
+            memset(&epevent, 0, sizeof(epevent));
+            epevent.events = ToEpollEvents(new_events);
+            epevent.data.ptr = fd_ctx;
 
-        --m_pendingEventCount;
-        fd_ctx->events = new_events;
-        FdContext::EventContext &event_ctx = fd_ctx->getEventContext(event);
-        if (event_ctx.timeoutTimer)
-        {
-            event_ctx.timeoutTimer->cancel();
-        }
-        fd_ctx->resetEventContext(event_ctx);
-        return true;
+            int rt = epoll_ctl(worker.epfd, op, fd, &epevent);
+            if (rt)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
+                                          << op << "," << fd << "," << epevent.events << "):"
+                                          << rt << " (" << errno << ") (" << strerror(errno) << ")";
+                return false;
+            }
+
+            --m_pendingEventCount;
+            fd_ctx->events = new_events;
+            if (new_events == NONE)
+            {
+                fd_ctx->ownerWorker = Scheduler::kInvalidWorker;
+            }
+            FdContext::EventContext& event_ctx = fd_ctx->getEventContext(event);
+            if (event_ctx.timeoutTimer)
+            {
+                event_ctx.timeoutTimer->cancel();
+            }
+            fd_ctx->resetEventContext(event_ctx);
+            return true; });
     }
 
     bool IOManager::cancelEvent(int fd, Event event)
@@ -361,33 +434,48 @@ namespace sylar
             return false;
         }
 
-        FdContext::MutexType::Lock lock(fd_ctx->mutex);
-        if (!(fd_ctx->events & event))
+        size_t owner = Scheduler::kInvalidWorker;
         {
-            return false;
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!(fd_ctx->events & event))
+            {
+                return false;
+            }
+            owner = fd_ctx->ownerWorker;
         }
 
-        size_t owner = fd_ctx->ownerWorker;
-        WorkerContext &worker = m_workerContexts[owner];
-        Event new_events = static_cast<Event>(fd_ctx->events & ~event);
-        int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-        epoll_event epevent;
-        memset(&epevent, 0, sizeof(epevent));
-        epevent.events = ToEpollEvents(new_events);
-        epevent.data.ptr = fd_ctx;
+        return runOnOwnerSyncBool(owner, [this, fd_ctx, fd, event, result, owner]() -> bool
+                                  {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!(fd_ctx->events & event))
+            {
+                return false;
+            }
 
-        int rt = epoll_ctl(worker.epfd, op, fd, &epevent);
-        if (rt)
-        {
-            SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
-                                      << op << "," << fd << "," << epevent.events << "):"
-                                      << rt << " (" << errno << ") (" << strerror(errno) << ")";
-            return false;
-        }
+            WorkerContext& worker = m_workerContexts[owner];
+            Event new_events = static_cast<Event>(fd_ctx->events & ~event);
+            int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
+            epoll_event epevent;
+            memset(&epevent, 0, sizeof(epevent));
+            epevent.events = ToEpollEvents(new_events);
+            epevent.data.ptr = fd_ctx;
 
-        fd_ctx->triggerEvent(event, result);
-        --m_pendingEventCount;
-        return true;
+            int rt = epoll_ctl(worker.epfd, op, fd, &epevent);
+            if (rt)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
+                                          << op << "," << fd << "," << epevent.events << "):"
+                                          << rt << " (" << errno << ") (" << strerror(errno) << ")";
+                return false;
+            }
+
+            fd_ctx->triggerEvent(event, result);
+            --m_pendingEventCount;
+            if (fd_ctx->events == NONE)
+            {
+                fd_ctx->ownerWorker = Scheduler::kInvalidWorker;
+            }
+            return true; });
     }
 
     bool IOManager::cancelAll(int fd)
@@ -398,40 +486,54 @@ namespace sylar
             return false;
         }
 
-        FdContext::MutexType::Lock lock(fd_ctx->mutex);
-        if (!fd_ctx->events)
+        size_t owner = Scheduler::kInvalidWorker;
         {
-            return false;
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!fd_ctx->events)
+            {
+                return false;
+            }
+            owner = fd_ctx->ownerWorker;
         }
 
-        size_t owner = fd_ctx->ownerWorker;
-        WorkerContext &worker = m_workerContexts[owner];
+        return runOnOwnerSyncBool(owner, [this, fd_ctx, fd, owner]() -> bool
+                                  {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!fd_ctx->events)
+            {
+                return false;
+            }
 
-        epoll_event epevent;
-        memset(&epevent, 0, sizeof(epevent));
-        epevent.events = 0;
-        epevent.data.ptr = fd_ctx;
+            WorkerContext& worker = m_workerContexts[owner];
+            epoll_event epevent;
+            memset(&epevent, 0, sizeof(epevent));
+            epevent.events = 0;
+            epevent.data.ptr = fd_ctx;
 
-        int rt = epoll_ctl(worker.epfd, EPOLL_CTL_DEL, fd, &epevent);
-        if (rt)
-        {
-            SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
-                                      << EPOLL_CTL_DEL << "," << fd << "," << epevent.events << "):"
-                                      << rt << " (" << errno << ") (" << strerror(errno) << ")";
-            return false;
-        }
+            int rt = epoll_ctl(worker.epfd, EPOLL_CTL_DEL, fd, &epevent);
+            if (rt)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
+                                          << EPOLL_CTL_DEL << "," << fd << "," << epevent.events << "):"
+                                          << rt << " (" << errno << ") (" << strerror(errno) << ")";
+                return false;
+            }
 
-        if (fd_ctx->events & READ)
-        {
-            fd_ctx->triggerEvent(READ, Fiber::WAIT_CANCELLED);
-            --m_pendingEventCount;
-        }
-        if (fd_ctx->events & WRITE)
-        {
-            fd_ctx->triggerEvent(WRITE, Fiber::WAIT_CANCELLED);
-            --m_pendingEventCount;
-        }
-        return true;
+            if (fd_ctx->events & READ)
+            {
+                fd_ctx->triggerEvent(READ, Fiber::WAIT_CANCELLED);
+                --m_pendingEventCount;
+            }
+            if (fd_ctx->events & WRITE)
+            {
+                fd_ctx->triggerEvent(WRITE, Fiber::WAIT_CANCELLED);
+                --m_pendingEventCount;
+            }
+            if (fd_ctx->events == NONE)
+            {
+                fd_ctx->ownerWorker = Scheduler::kInvalidWorker;
+            }
+            return true; });
     }
 
     void IOManager::tickle(size_t worker)

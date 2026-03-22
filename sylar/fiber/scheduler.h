@@ -6,6 +6,7 @@
 #define __SYLAR_SCHEDULER_H__
 
 #include <atomic>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -46,8 +47,11 @@ namespace sylar
             {
                 return;
             }
-            scheduleTask(std::move(task));
+            scheduleTask(std::move(task), false);
         }
+
+        void scheduleCommand(const Fiber::ptr &fiber, int thread = -1);
+        void scheduleCommand(const std::function<void()> &cb, int thread = -1);
 
         template <class InputIterator>
         void schedule(InputIterator begin, InputIterator end)
@@ -126,6 +130,16 @@ namespace sylar
         struct Worker
         {
             typedef Spinlock QueueMutexType;
+            struct MailboxRingSlot
+            {
+                std::atomic<size_t> seq;
+                FiberAndThread task;
+
+                MailboxRingSlot()
+                    : seq(0)
+                {
+                }
+            };
 
             size_t index = 0;
             int threadId = -1;
@@ -133,27 +147,48 @@ namespace sylar
             Thread::ptr thread;
             QueueMutexType queueMutex;
             std::deque<FiberAndThread> localQueue;
-            std::atomic<RemoteTaskNode *> remoteQueue;
+            size_t mailboxRingSize = 0;
+            size_t mailboxRingMask = 0;
+            std::unique_ptr<MailboxRingSlot[]> mailboxRing;
+            std::atomic<size_t> mailboxEnqueuePos;
+            std::atomic<size_t> mailboxDequeuePos;
+            std::atomic<RemoteTaskNode *> mailboxFallback;
+            std::atomic<uint32_t> queuedTasks;
             std::atomic<bool> sleeping;
 
-            Worker()
-                : remoteQueue(nullptr), sleeping(false)
+            explicit Worker(size_t ring_size)
+                : mailboxRingSize(ring_size),
+                  mailboxRingMask(ring_size - 1),
+                  mailboxRing(new MailboxRingSlot[ring_size]),
+                  mailboxEnqueuePos(0),
+                  mailboxDequeuePos(0),
+                  mailboxFallback(nullptr),
+                  queuedTasks(0),
+                  sleeping(false)
             {
+                for (size_t i = 0; i < mailboxRingSize; ++i)
+                {
+                    mailboxRing[i].seq.store(i, std::memory_order_relaxed);
+                }
             }
         };
 
         void run(size_t worker_index);
-        void scheduleTask(FiberAndThread task);
+        void scheduleTask(FiberAndThread task, bool allow_cross_worker);
         size_t selectWorker(int thread) const;
         void enqueueStartupTask(FiberAndThread task);
         void flushStartupTasks();
         void enqueueLocal(Worker &worker, FiberAndThread task);
-        void enqueueRemote(Worker &worker, FiberAndThread task);
-        void drainRemoteQueue(Worker &worker);
+        bool tryEnqueueMailboxRing(Worker &worker, FiberAndThread &task);
+        void enqueueMailboxFallback(Worker &worker, FiberAndThread task);
+        void drainMailboxRing(Worker &worker, size_t max_batch = 64);
+        void drainMailboxFallback(Worker &worker);
+        bool hasMailboxWork(const Worker &worker) const;
         bool popTask(Worker &worker, FiberAndThread &task);
-        bool stealTask(Worker &worker, FiberAndThread &task);
 
     private:
+        static constexpr size_t kMailboxRingSize = 1024;
+        static constexpr size_t kMailboxDrainBatch = 64;
         std::string m_name;
         Mutex m_startupMutex;
         std::vector<FiberAndThread> m_startupTasks;

@@ -113,10 +113,11 @@ namespace
     struct Options
     {
         std::string allocatorLabel = "baseline";
-        std::string mode = "all";          // on/off/all
+        std::string mode = "all";          // a/b/all (兼容 on/off)
         std::string workload = "all";      // persistent/short/all
-        std::vector<int> threadSet = {2, 4, 8};
+        std::vector<int> threadSet = {2, 4, 8}; // io_threads 集合
         int repeat = 3;
+        int runIdBase = 1;
         size_t payloadBytes = 256;
         int connections = 64;
         int requestsPerConn = 200;
@@ -129,13 +130,38 @@ namespace
         std::string allocator;
         std::string mode;
         std::string workload;
-        int threadsTotal = 0;
+        int ioThreads = 0;
         int runId = 0;
         uint64_t totalRequests = 0;
         uint64_t totalUs = 0;
         std::vector<uint64_t> latUs;
         uint64_t errors = 0;
+        std::string status = "ok";
+        int exitCode = 0;
     };
+
+    uint64_t expectedTotalRequests(const Options &opt, const std::string &workload)
+    {
+        return (workload == "persistent")
+                   ? static_cast<uint64_t>(opt.connections) * static_cast<uint64_t>(opt.requestsPerConn)
+                   : static_cast<uint64_t>(opt.shortTotalRequests);
+    }
+
+    BenchResult initBenchResult(const Options &opt,
+                                const std::string &mode,
+                                const std::string &workload,
+                                int ioThreads,
+                                int runId)
+    {
+        BenchResult r;
+        r.allocator = opt.allocatorLabel;
+        r.mode = mode;
+        r.workload = workload;
+        r.ioThreads = ioThreads;
+        r.runId = runId;
+        r.totalRequests = expectedTotalRequests(opt, workload);
+        return r;
+    }
 
     class EchoBenchServer : public std::enable_shared_from_this<EchoBenchServer>
     {
@@ -144,13 +170,28 @@ namespace
 
         EchoBenchServer(sylar::IOManager *ioWorker,
                         sylar::IOManager *acceptWorker,
-                        size_t payloadBytes)
-            : m_ioWorker(ioWorker), m_acceptWorker(acceptWorker), m_payloadBytes(payloadBytes)
+                        size_t payloadBytes,
+                        bool singleShotPerConn)
+            : m_ioWorker(ioWorker),
+              m_acceptWorker(acceptWorker),
+              m_payloadBytes(payloadBytes),
+              m_singleShotPerConn(singleShotPerConn)
         {
         }
 
         bool start()
         {
+            if (!m_ioWorker || !m_acceptWorker)
+            {
+                debugLog("EchoBenchServer start failed: null io/accept worker");
+                return false;
+            }
+            if (m_ioWorker == m_acceptWorker)
+            {
+                debugLog("EchoBenchServer start failed: accept_worker and io_worker must be different");
+                return false;
+            }
+
             const uint64_t seed = nowUs() ^ static_cast<uint64_t>(sylar::GetThreadId());
             const int kBasePort = 20000;
             const int kPortSpan = 30000;
@@ -258,8 +299,10 @@ namespace
                     }
                     continue;
                 }
-                client->setRecvTimeout(5000);
-                client->setSendTimeout(5000);
+                // Short-connection benchmark prefers quick fail-fast to avoid long drain at stop.
+                const int64_t io_timeout = m_singleShotPerConn ? 1000 : 5000;
+                client->setRecvTimeout(io_timeout);
+                client->setSendTimeout(io_timeout);
                 if (!m_running.load(std::memory_order_acquire))
                 {
                     client->close();
@@ -275,6 +318,23 @@ namespace
         void handleClient(const sylar::Socket::ptr &client)
         {
             std::vector<char> buf(m_payloadBytes, 0);
+            if (m_singleShotPerConn)
+            {
+                if (!recvAll(client, buf.data(), m_payloadBytes))
+                {
+                    client->close();
+                    return;
+                }
+                if (!sendAll(client, buf.data(), m_payloadBytes))
+                {
+                    client->close();
+                    return;
+                }
+                m_handledRequests.fetch_add(1, std::memory_order_relaxed);
+                client->close();
+                return;
+            }
+
             while (true)
             {
                 if (!recvAll(client, buf.data(), m_payloadBytes))
@@ -295,79 +355,10 @@ namespace
         sylar::IOManager *m_acceptWorker = nullptr;
         sylar::Socket::ptr m_listenSock;
         size_t m_payloadBytes = 0;
+        bool m_singleShotPerConn = false;
         std::string m_endpoint;
         std::atomic<bool> m_running = {false};
         std::atomic<uint64_t> m_handledRequests = {0};
-    };
-
-    class OffModeIoHost
-    {
-    public:
-        explicit OffModeIoHost(int ioThreads)
-            : m_ioThreads(ioThreads)
-        {
-        }
-
-        void start()
-        {
-            m_thread = std::thread([this]()
-                                   { this->threadMain(); });
-
-            std::unique_lock<std::mutex> lock(m_mutex);
-            m_cv.wait(lock, [this]()
-                      { return m_ready; });
-        }
-
-        sylar::IOManager *ioManager()
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            return m_iom;
-        }
-
-        void stop()
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_iom)
-            {
-                m_iom->stop();
-            }
-        }
-
-        void join()
-        {
-            if (m_thread.joinable())
-            {
-                m_thread.join();
-            }
-        }
-
-    private:
-        void threadMain()
-        {
-            sylar::IOManager iom(m_ioThreads, true, "bench_off_io");
-
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_iom = &iom;
-                m_ready = true;
-            }
-            m_cv.notify_one();
-
-            iom.runCaller();
-
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_iom = nullptr;
-            }
-        }
-
-    private:
-        int m_ioThreads = 1;
-        std::thread m_thread;
-        std::mutex m_mutex;
-        std::condition_variable m_cv;
-        bool m_ready = false;
-        sylar::IOManager *m_iom = nullptr;
     };
 
     uint64_t runPersistentClients(const std::string &endpoint,
@@ -498,130 +489,108 @@ namespace
         return errCount.load(std::memory_order_relaxed);
     }
 
-    BenchResult runModeOn(const Options &opt, const std::string &workload, int threadsTotal, int runId)
+    uint64_t runClientsForWorkload(const std::string &workload,
+                                   const std::string &endpoint,
+                                   const Options &opt,
+                                   std::vector<uint64_t> &latUs)
     {
-        debugLog("runModeOn begin workload=" + workload + " threads=" + std::to_string(threadsTotal));
-        BenchResult r;
-        r.allocator = opt.allocatorLabel;
-        r.mode = "on";
-        r.workload = workload;
-        r.threadsTotal = threadsTotal;
-        r.runId = runId;
-        r.totalRequests = (workload == "persistent")
-                              ? static_cast<uint64_t>(opt.connections) * static_cast<uint64_t>(opt.requestsPerConn)
-                              : static_cast<uint64_t>(opt.shortTotalRequests);
+        if (workload == "persistent")
+        {
+            return runPersistentClients(endpoint, opt, latUs);
+        }
+        return runShortConnectionClients(endpoint, opt, latUs);
+    }
 
-        sylar::IOManager iom(static_cast<size_t>(threadsTotal), true, "bench_on");
-
-        EchoBenchServer::ptr server(new EchoBenchServer(&iom, &iom, opt.payloadBytes));
+    BenchResult runModeA(const Options &opt, const std::string &workload, int ioThreads, int runId)
+    {
+        debugLog("runModeA begin workload=" + workload + " io_threads=" + std::to_string(ioThreads));
+        BenchResult r = initBenchResult(opt, "a", workload, ioThreads, runId);
+        sylar::IOManager ioIom(static_cast<size_t>(ioThreads), false, "bench_a_io");
+        sylar::IOManager acceptIom(1, true, "bench_a_accept");
+        EchoBenchServer::ptr server(new EchoBenchServer(&ioIom, &acceptIom, opt.payloadBytes, workload == "short"));
         if (!server->start())
         {
-            debugLog("runModeOn server start failed");
+            debugLog("runModeA server start failed");
             r.errors = r.totalRequests;
+            r.status = "start_fail";
+            r.exitCode = 2;
             return r;
         }
         std::string endpoint = server->endpoint();
-        debugLog("runModeOn endpoint=" + endpoint);
+        debugLog("runModeA endpoint=" + endpoint);
 
-        uint64_t errCount = 0;
+        std::atomic<uint64_t> errCount(0);
         std::atomic<uint64_t> workUs(0);
         std::thread clientThread([&]()
                                  {
             std::this_thread::sleep_for(std::chrono::milliseconds(opt.startupDelayMs));
-            debugLog("runModeOn client begin");
+            debugLog("runModeA client begin");
             uint64_t w0 = nowUs();
-            if (workload == "persistent")
-            {
-                errCount = runPersistentClients(endpoint, opt, r.latUs);
-            }
-            else
-            {
-                errCount = runShortConnectionClients(endpoint, opt, r.latUs);
-            }
+            uint64_t err = runClientsForWorkload(workload, endpoint, opt, r.latUs);
             uint64_t w1 = nowUs();
             workUs.store(w1 - w0, std::memory_order_relaxed);
-            debugLog("runModeOn client done err=" + std::to_string(errCount) + " succ_lat=" + std::to_string(r.latUs.size()));
-            server->stop();
-            iom.stop(); });
+            errCount.store(err, std::memory_order_relaxed);
+            debugLog("runModeA client done err=" + std::to_string(err) + " succ_lat=" + std::to_string(r.latUs.size()));
+            acceptIom.schedule([server, &acceptIom]()
+                               {
+                server->stop();
+                acceptIom.stop(); });
+        });
 
-        debugLog("runModeOn iom.runCaller enter");
-        iom.runCaller();
-        debugLog("runModeOn iom.runCaller leave");
+        debugLog("runModeA acceptIom.runCaller enter");
+        acceptIom.runCaller();
+        debugLog("runModeA acceptIom.runCaller leave");
 
         clientThread.join();
+        debugLog("runModeA ioIom.stop enter");
+        ioIom.stop();
+        debugLog("runModeA ioIom.stop leave");
         r.totalUs = workUs.load(std::memory_order_relaxed);
-        r.errors = errCount;
+        r.errors = errCount.load(std::memory_order_relaxed);
         return r;
     }
 
-    BenchResult runModeOff(const Options &opt, const std::string &workload, int threadsTotal, int runId)
+    BenchResult runModeB(const Options &opt, const std::string &workload, int ioThreads, int runId)
     {
-        debugLog("runModeOff begin workload=" + workload + " threads=" + std::to_string(threadsTotal));
-        BenchResult r;
-        r.allocator = opt.allocatorLabel;
-        r.mode = "off";
-        r.workload = workload;
-        r.threadsTotal = threadsTotal;
-        r.runId = runId;
-        r.totalRequests = (workload == "persistent")
-                              ? static_cast<uint64_t>(opt.connections) * static_cast<uint64_t>(opt.requestsPerConn)
-                              : static_cast<uint64_t>(opt.shortTotalRequests);
+        debugLog("runModeB begin workload=" + workload + " io_threads=" + std::to_string(ioThreads));
+        BenchResult r = initBenchResult(opt, "b", workload, ioThreads, runId);
+        sylar::IOManager ioIom(static_cast<size_t>(ioThreads), false, "bench_b_io");
+        sylar::IOManager acceptIom(1, false, "bench_b_accept");
 
-        const int ioThreads = std::max(1, threadsTotal - 1);
-        OffModeIoHost ioHost(ioThreads);
-        ioHost.start();
-        sylar::IOManager *ioIom = ioHost.ioManager();
-        if (!ioIom)
-        {
-            debugLog("runModeOff io host failed");
-            r.errors = r.totalRequests;
-            ioHost.join();
-            return r;
-        }
-
-        sylar::IOManager acceptIom(1, true, "bench_off_accept");
-
-        EchoBenchServer::ptr server(new EchoBenchServer(ioIom, &acceptIom, opt.payloadBytes));
+        EchoBenchServer::ptr server(new EchoBenchServer(&ioIom, &acceptIom, opt.payloadBytes, workload == "short"));
         if (!server->start())
         {
-            debugLog("runModeOff server start failed");
+            debugLog("runModeB server start failed");
             r.errors = r.totalRequests;
-            ioHost.join();
+            r.status = "start_fail";
+            r.exitCode = 2;
             return r;
         }
         std::string endpoint = server->endpoint();
-        debugLog("runModeOff endpoint=" + endpoint);
+        debugLog("runModeB endpoint=" + endpoint);
 
-        uint64_t errCount = 0;
+        std::atomic<uint64_t> errCount(0);
         std::atomic<uint64_t> workUs(0);
         std::thread clientThread([&]()
                                  {
             std::this_thread::sleep_for(std::chrono::milliseconds(opt.startupDelayMs));
-            debugLog("runModeOff client begin");
+            debugLog("runModeB client begin");
             uint64_t w0 = nowUs();
-            if (workload == "persistent")
-            {
-                errCount = runPersistentClients(endpoint, opt, r.latUs);
-            }
-            else
-            {
-                errCount = runShortConnectionClients(endpoint, opt, r.latUs);
-            }
+            uint64_t err = runClientsForWorkload(workload, endpoint, opt, r.latUs);
             uint64_t w1 = nowUs();
             workUs.store(w1 - w0, std::memory_order_relaxed);
-            debugLog("runModeOff client done err=" + std::to_string(errCount) + " succ_lat=" + std::to_string(r.latUs.size()));
-            server->stop();
-            acceptIom.stop();
-            ioHost.stop(); });
-
-        debugLog("runModeOff acceptIom.runCaller enter");
-        acceptIom.runCaller();
-        debugLog("runModeOff acceptIom.runCaller leave");
+            errCount.store(err, std::memory_order_relaxed);
+            debugLog("runModeB client done err=" + std::to_string(err) + " succ_lat=" + std::to_string(r.latUs.size())); });
 
         clientThread.join();
-        ioHost.join();
+        debugLog("runModeB stopping");
+        server->stop();
+        acceptIom.stop();
+        ioIom.stop();
+        debugLog("runModeB stopped");
+
         r.totalUs = workUs.load(std::memory_order_relaxed);
-        r.errors = errCount;
+        r.errors = errCount.load(std::memory_order_relaxed);
         return r;
     }
 
@@ -641,7 +610,7 @@ namespace
         std::cout << r.allocator << ","
                   << r.mode << ","
                   << r.workload << ","
-                  << r.threadsTotal << ","
+                  << r.ioThreads << ","
                   << r.runId << ","
                   << r.totalRequests << ","
                   << std::fixed << std::setprecision(3) << totalMs << ","
@@ -650,7 +619,9 @@ namespace
                   << p95 << ","
                   << p99 << ","
                   << maxv << ","
-                  << r.errors << "\n";
+                  << r.errors << ","
+                  << r.status << ","
+                  << r.exitCode << "\n";
     }
 
     bool parseOptions(int argc, char **argv, Options &opt)
@@ -688,10 +659,24 @@ namespace
                 continue;
             }
 
+            v = getArgValue(arg, "io_threads");
+            if (!v.empty())
+            {
+                opt.threadSet = parseThreadSet(v);
+                continue;
+            }
+
             v = getArgValue(arg, "repeat");
             if (!v.empty())
             {
                 opt.repeat = std::atoi(v.c_str());
+                continue;
+            }
+
+            v = getArgValue(arg, "run_id");
+            if (!v.empty())
+            {
+                opt.runIdBase = std::atoi(v.c_str());
                 continue;
             }
 
@@ -734,7 +719,16 @@ namespace
             return false;
         }
 
-        if (opt.mode != "on" && opt.mode != "off" && opt.mode != "all")
+        if (opt.mode == "on")
+        {
+            opt.mode = "a";
+        }
+        else if (opt.mode == "off")
+        {
+            opt.mode = "b";
+        }
+
+        if (opt.mode != "a" && opt.mode != "b" && opt.mode != "all")
         {
             std::cerr << "invalid mode: " << opt.mode << std::endl;
             return false;
@@ -749,7 +743,7 @@ namespace
             std::cerr << "threads set is empty" << std::endl;
             return false;
         }
-        if (opt.repeat <= 0 || opt.payloadBytes == 0 || opt.connections <= 0 || opt.requestsPerConn <= 0 || opt.shortTotalRequests <= 0)
+        if (opt.repeat <= 0 || opt.runIdBase <= 0 || opt.payloadBytes == 0 || opt.connections <= 0 || opt.requestsPerConn <= 0 || opt.shortTotalRequests <= 0)
         {
             std::cerr << "invalid numeric options" << std::endl;
             return false;
@@ -767,10 +761,11 @@ int main(int argc, char **argv)
     {
         std::cerr << "Usage:\n"
                   << "  --allocator_label=baseline|jemalloc|tcmalloc\n"
-                  << "  --mode=on|off|all\n"
+                  << "  --mode=a|b|all (兼容 on/off)\n"
                   << "  --workload=persistent|short|all\n"
-                  << "  --threads=2,4,8\n"
+                  << "  --io_threads=2,4,8 (兼容 --threads)\n"
                   << "  --repeat=3\n"
+                  << "  --run_id=1\n"
                   << "  --payload_bytes=256\n"
                   << "  --connections=64\n"
                   << "  --requests_per_conn=200\n"
@@ -782,8 +777,8 @@ int main(int argc, char **argv)
     std::vector<std::string> modes;
     if (opt.mode == "all")
     {
-        modes.push_back("on");
-        modes.push_back("off");
+        modes.push_back("a");
+        modes.push_back("b");
     }
     else
     {
@@ -801,29 +796,47 @@ int main(int argc, char **argv)
         workloads.push_back(opt.workload);
     }
 
-    std::cout << "allocator,mode,workload,threads_total,run_id,total_requests,total_ms,req_per_sec,p50_us,p95_us,p99_us,max_us,errors\n";
+    std::cout << "allocator,mode,workload,io_threads,run_id,total_requests,total_ms,req_per_sec,p50_us,p95_us,p99_us,max_us,errors,status,exit_code\n";
     for (size_t mi = 0; mi < modes.size(); ++mi)
     {
         for (size_t wi = 0; wi < workloads.size(); ++wi)
         {
             for (size_t ti = 0; ti < opt.threadSet.size(); ++ti)
             {
-                int threadsTotal = opt.threadSet[ti];
-                if (threadsTotal < 2)
+                int ioThreads = opt.threadSet[ti];
+                if (ioThreads < 1)
                 {
-                    std::cerr << "skip invalid threads_total=" << threadsTotal << " (must >=2)" << std::endl;
+                    std::cerr << "skip invalid io_threads=" << ioThreads << " (must >=1)" << std::endl;
                     continue;
                 }
-                for (int runId = 1; runId <= opt.repeat; ++runId)
+                for (int runOffset = 0; runOffset < opt.repeat; ++runOffset)
                 {
-                    BenchResult r;
-                    if (modes[mi] == "on")
+                    int runId = opt.runIdBase + runOffset;
+                    BenchResult r = initBenchResult(opt, modes[mi], workloads[wi], ioThreads, runId);
+                    try
                     {
-                        r = runModeOn(opt, workloads[wi], threadsTotal, runId);
+                        if (modes[mi] == "a")
+                        {
+                            r = runModeA(opt, workloads[wi], ioThreads, runId);
+                        }
+                        else
+                        {
+                            r = runModeB(opt, workloads[wi], ioThreads, runId);
+                        }
                     }
-                    else
+                    catch (const std::exception &ex)
                     {
-                        r = runModeOff(opt, workloads[wi], threadsTotal, runId);
+                        r.errors = r.totalRequests;
+                        r.status = "exception";
+                        r.exitCode = 3;
+                        std::cerr << "benchmark exception: " << ex.what() << std::endl;
+                    }
+                    catch (...)
+                    {
+                        r.errors = r.totalRequests;
+                        r.status = "exception";
+                        r.exitCode = 3;
+                        std::cerr << "benchmark unknown exception" << std::endl;
                     }
                     printResult(r);
                     std::cout.flush();

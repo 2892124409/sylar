@@ -117,6 +117,17 @@ namespace sylar
 
         bool TcpServer::start()
         {
+            if (!m_ioWorker || !m_acceptWorker)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "TcpServer start failed: io_worker or accept_worker is null";
+                return false;
+            }
+            if (m_ioWorker == m_acceptWorker)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "TcpServer start failed: accept_worker and io_worker must be different IOManager instances";
+                return false;
+            }
+
             bool expected = true;
             if (!m_isStop.compare_exchange_strong(expected, false, std::memory_order_acq_rel))
             {

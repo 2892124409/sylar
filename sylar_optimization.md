@@ -4,21 +4,20 @@
 
 这份文档不是单纯的开发日志，而是按“源码理解 + 性能优化复盘 + 面试表达”三个目标来整理的。
 
-我目前把项目里的优化拆成两个阶段：
+我目前把项目里的优化整理成两个阶段（中间过渡方案不展开）：
 
 | 阶段 | 核心改动 | 主要解决的问题 |
 | --- | --- | --- |
 | 第一阶段 | 协程上下文切换从 `ucontext` 改成手写汇编 | 切换路径太重，单次切换开销高 |
-| 第二阶段 | 调度器、IOManager、Timer、hook、`TcpServer` 拓扑重构 | 全局锁竞争、共享 `epoll` 争用、全局 timer 热点、`accept` 线程模型不清晰 |
+| 第二阶段（当前终态） | 调度器、IOManager、Timer、hook、`TcpServer` 一体化重构 | 全局锁竞争、共享 `epoll`/wakeup 热点、timer 热点、跨线程语义过松、`accept` 拓扑不清晰 |
 
 ### 0.1 阅读建议
 
 如果是为了准备面试，建议按这个顺序读：
 
 1. 第一部分的 `1.1` 和 `1.5`，先拿到“上下文切换为什么快”的主线。
-2. 第二部分的 `2.1`、`2.2`、`2.3`、`2.4`，先拿到“网络层为什么重构”的主线。
-3. 第二部分的 `2.6`、`2.7`，看这轮最容易被面试官追问的语义细节。
-4. 最后再回来看时序图、汇编伪代码和下一阶段优化方向。
+2. 第二部分的 `2.1`、`2.2`、`2.3`，先拿到“网络层终态怎么设计”的主线。
+3. 第二部分的 `2.4`、`2.6`、`2.8`，看最容易被追问的工程细节和稳定性修复。
 
 ### 0.2 关键代码落点
 
@@ -276,717 +275,508 @@ void sylar_coctx_swap(Context* from, const Context* to) {
 
 ---
 
-## 第二部分：协程网络层与调度优化专题 (2026-03-21)
+## 第二部分：协程网络层与调度优化终态 (2026-03-22)
 
-### 2.1 这一轮到底在解决什么问题
+这一部分只描述当前代码已经落地的终态，不展开中间过渡过程。
 
-第二阶段不是单点优化，而是把整个协程网络层里几个互相耦合的热点一起拆开：
+### 2.1 终态目标与约束
 
-1. `Scheduler` 用的是全局任务链表 + 全局锁
-2. `IOManager` 用的是共享 `epoll` + 共享唤醒管道
-3. `TimerManager` 用的是全局定时器集合
-4. `use_caller` 更像“停机时顺便进 run loop”，不适合当主线程 Reactor
+当前阶段的目标可以概括成五条：
 
-这些问题叠在一起，高并发下会出现几个典型现象：
+1. 主从 Reactor 拓扑明确化（`accept` 与 IO 处理解耦）
+2. 调度与 IO 热路径局部化（每 worker 独立资源）
+3. 跨线程分发负载均衡化（从 RR 升级到 P2C）
+4. 等待语义显式化（`WaitResult + token`）
+5. 停机与短连接场景稳定性补齐
 
-- 大量线程竞争同一把任务队列锁
-- 所有 IO 事件增删改查都打到一个 `epoll`
-- 所有唤醒都写同一组 wakeup fd
-- 所有 timer 都走同一个全局容器
-- `accept` 线程模型不够清晰，主线程不是真正意义上的 Reactor
+当前代码层面的硬约束：
 
-### 2.2 优化后的整体架构
+- `TcpServer` 启动时要求 `accept_worker != io_worker`（不同 `IOManager` 实例）
+- 不再支持“accept/io 共用同一个 IOM”的旧模式
 
-优化后的推荐拓扑是：
+### 2.2 终态拓扑
+
+推荐拓扑（A 案）：
 
 ```text
 main thread
   accept_iom(1, true)
     runCaller()
-    - accept fibers
-    - epoll_0
-    - eventfd_0
-    - timer_heap_0
+    - accept loop
+    - epoll_0 / eventfd_0 / timer_bucket_0
 
-io worker threads
+io worker pool
   io_iom(N, false)
     worker_i:
       - localQueue
-      - remoteQueue
-      - work stealing
-      - epoll_i
-      - eventfd_i
-      - timer_heap_i
+      - mailboxRing(热路径)
+      - mailboxFallback(无界链表兜底)
+      - epoll_i / eventfd_i / timer_bucket_i
       - handleClient/read/write/timer callbacks
 ```
 
-也就是说：
+可选拓扑（B 案）：
 
-- 主线程主要负责 `accept`
-- 连接建立后，把 client 投递到 IO worker 池处理
-- 每个 worker 自己维护任务、IO 等待和 timer
+- 主线程不进入任何 worker run loop，仅做编排；
+- `accept_iom(1, false)` 与 `io_iom(N, false)` 都在后台线程运行。
 
-这套结构已经很接近“主 Reactor + 子 Reactor”。
+### 2.3 Scheduler 终态：无全局任务链表 + 命令通道分层
 
-### 2.3 Scheduler 重构：从全局任务链表到线程局部队列
+`Scheduler` 的核心结构：
 
-#### 2.3.1 旧版本的问题
+- 每个 worker 本地 `localQueue`
+- 每个 worker 跨线程收件箱分成两层：
+  - `mailboxRing`：有界无锁环形队列（热路径）
+  - `mailboxFallback`：无界无锁链表（ring 满时兜底）
+- 全局计数器：`pending/active/idle`
 
-旧版本的 `Scheduler` 核心是：
+关键语义（当前实现）：
 
-- 一个全局 `m_fibers`
-- 一个全局互斥锁
-- 所有线程 schedule / 抢任务 都围绕这个全局容器转
+1. 已去掉 work stealing
+   - worker 不再从其他 worker 的本地队列偷任务。
+2. 普通 `schedule(...)` 强调本地执行
+   - 当 worker 内部把普通任务投到其他 worker 时，降级回本地队列。
+3. 新增 `scheduleCommand(...)` 作为跨线程命令路径
+   - IO 控制命令、owner 执行命令走这个通道。
 
-这在功能上没问题，但它天然是一个争用点。
+4. worker 选择从 RR 升级到 P2C（Power of Two Choices）
+   - 未指定 `thread` 的远程投递，不再直接轮询，而是从两个候选 worker 里选 `queuedTasks` 更小的一个。
+   - `queuedTasks` 是每 worker 的原子近似负载：任务入队时增加、任务真正弹出执行时减少。
+   - 保留 caller 语义：caller 未激活时，候选集合仍可跳过 caller worker。
 
-#### 2.3.2 新版本的数据结构
+5. 命令邮箱采用“ring 优先 + 链表兜底”
+   - 远程命令优先入 `mailboxRing`（减少 `new/delete` 与指针追踪）。
+   - ring 满时降级到 `mailboxFallback`，语义仍然是不丢任务。
 
-现在 `Scheduler` 里每个 worker 都有：
+6. 唤醒路径做了“按需唤醒 + idle 前二次检查”
+   - 跨线程入队时，仅当目标 worker 处于 `sleeping=true` 才 `tickle(worker)`。
+   - worker 进入 idle 休眠前，先二次检查本地队列/邮箱/pending，避免“任务刚到但还没 sleep”导致的漏唤醒窗口。
 
-- `localQueue`
-- `remoteQueue`
-- `sleeping` 标志
+这使得“普通业务任务”与“跨线程控制命令”在语义上分层，避免无限制互投。
 
-此外调度器层面还有：
+P2C 的面试讲法（30 秒）：
 
-- `m_pendingTaskCount`
-- `m_activeThreadCount`
-- `m_idleThreadCount`
-- `m_workerCursor`
-- `m_callerActive`
+- 轮询分发在突发短连接下容易把慢 worker 继续打满；
+- P2C 每次只比较两个候选，但负载均衡效果明显优于纯 RR；
+- 工程上用 `queuedTasks` 做近似指标，成本低、易落地、压测可验证。
 
-核心变化是：**全局任务链表已经没有了。**
+### 2.4 IOManager 终态：每 worker 独立 epoll + owner 执行
 
-#### 2.3.3 任务现在怎么流动
+IO 资源按 worker 分片：
 
-现在的任务流动大致是这样：
+- `WorkerContext{epfd, wakeFd}`
+- 每个 worker 独立 `epoll_wait`
+- `tickle(worker)` 定向唤醒
 
-1. 如果任务投递给当前 worker 自己，直接进 `localQueue`
-2. 如果是跨线程投递，进目标 worker 的 `remoteQueue`
-3. worker 执行前先把 `remoteQueue` 批量倒入自己的 `localQueue`
-4. 如果自己没活，再去别人的 `localQueue` 里偷任务
+唤醒优化的直接目的：
 
-也就是说：
+- 减少无效 `eventfd` 写入，降低高并发下 wakeup 风暴
+- 降低“过度唤醒 + 空转”带来的系统调用与上下文切换成本
+- 在不引入 work stealing 的前提下，保证跨线程命令投递后的可见性与及时唤醒
 
-- 别的线程**可以投递**任务给某个 worker
-- 但不是直接抢它的 `localQueue` 锁去塞任务，而是写它的 `remoteQueue`
-- 别的线程**也可以偷任务**
-- 但偷的是对方 `localQueue` 里没有线程亲和性的任务
+fd 事件管理采用 owner 模型：
 
-这正好对应你前面问过的两个点：
+- `FdContext::ownerWorker` 记录 fd 所属 worker
+- `addEvent/delEvent/cancelEvent/cancelAll` 的核心修改在 owner worker 执行
+- 跨线程转发通过 `scheduleCommand(...) + Semaphore` 同步到 owner 执行
 
-1. 现在没有全局任务链表了吗？
-   - 对，已经没有全局任务链表了。
-2. 每个线程本地队列，别的线程还能投递和偷取吗？
-   - 能。投递走 `remoteQueue`，偷取走 `localQueue`。
+等待恢复路径：
 
-#### 2.3.4 为什么要分成 `localQueue` 和 `remoteQueue`
+- `triggerEvent()` 写入 `WaitResult`
+- 再通过命令通道恢复 fiber/callback
 
-因为这两种写入场景的冲突模型不一样：
+短连接稳定性补丁（当前已落地）：
 
-- `localQueue` 主要是 worker 自己频繁 push/pop
-- `remoteQueue` 主要是别的线程偶发跨线程投递
+- 当 fd 事件清空（`events == NONE`）时，重置 `ownerWorker`
+- `addEvent` 在 `owner invalid` 或 `events == NONE` 时重新绑定 owner
 
-把它们分开以后，worker 自己处理本地任务时不必总和远端投递者抢同一把锁。
+目的：避免 fd 复用沿用旧 owner，导致恢复投递到错误 worker。
 
-#### 2.3.5 work stealing 的边界
+### 2.5 Timer 终态：每 worker 分桶最小堆
 
-work stealing 不是“什么都偷”，而是有边界的：
+`TimerManager` 已从全局容器切到 per-worker bucket：
 
-- 只偷没有显式线程亲和性的任务
-- 优先自己本地执行
-- 只有本地空了才偷
+- 每个 worker 一套最小堆
+- timer 带 `worker` 归属
+- `IOManager::idle()` 在事件轮询后处理本 worker 的过期回调
 
-所以它的目标不是平均分配一切，而是：
+收益不是“单点计时器更快”，而是 timer 与 IO 事件循环天然同 worker 局部化。
 
-- 尽量局部化
-- 但在局部化失败时提供负载兜底
+### 2.6 Hook / wait 终态：显式等待结果
 
-#### 2.3.6 `use_caller` 语义这次也顺手补正了
+hook 路径的等待语义：
 
-新版本新增了 `Scheduler::runCaller()`，caller 线程不再需要靠 `stop()` 阶段“顺便进 run loop”。  
-这让主线程可以真正承担一个 Reactor。
+1. `waitEvent()` 为当前 fiber 生成 `waitToken`
+2. 事件上下文保存 token
+3. `triggerEvent()` 写回 `WAIT_READY/WAIT_TIMEOUT/WAIT_CANCELLED`
+4. fiber 恢复后 `consumeWaitResult(token)` 判定结果
 
-同时又补了一条很重要的语义：
+对外仍保持 POSIX 习惯（例如 timeout 对应 `ETIMEDOUT`），但运行时内部语义已经显式化。
 
-- 当 `use_caller=true`
-- 且 caller 还没有真正进入 run loop
-- 如果还有其他 worker 可用
-- 那么未绑定线程的任务默认不会先投到 caller worker
+### 2.7 TcpServer 与主线程角色
 
-否则任务会提前堆在 caller worker 上，caller 线程还没开始跑，就会形成“任务被卡在入口处”的问题。
+`TcpServer` 终态语义：
 
-### 2.4 IOManager 重构：从共享 `epoll` 到每线程独立 `epoll`
+- `start()` 显式校验 `accept_worker` 与 `io_worker` 非空且不同实例
+- `stop()` 在 `acceptWorker` 上异步清理监听 socket，确保 accept loop 可退出
 
-#### 2.4.1 旧版本的问题
+主线程角色可以按场景选择：
 
-旧版本的 `IOManager` 是一个共享 `epoll`：
+1. 主线程跑 `accept_worker`（推荐默认）
+   - 更标准的主从 Reactor，接入路径清晰。
+2. 主线程两个都不做
+   - 适合做纯编排/测试驱动。
 
-- 全部 fd 都注册到同一个 `m_epfd`
-- 全部唤醒都走同一组 `m_tickleFds`
-- 事件上下文也都集中在同一套调度路径上
+但无论哪种角色，都不再回到“accept/io 共用同一 IOM”的旧模型。
 
-这意味着：
+### 2.8 工程改动落点（终态）
 
-- `epoll_ctl` 热点集中
-- wakeup 热点集中
-- 所有 IO 事件调度天然更容易互相打架
+本轮核心改动文件：
 
-#### 2.4.2 新版本的基本结构
+- `sylar/fiber/scheduler.*`
+  - 去 stealing、普通跨 worker 投递降级、命令通道 `scheduleCommand(...)`
+  - 负载均衡：`selectWorker` 从 RR 升级到 P2C（基于 `queuedTasks`）
+  - 命令邮箱升级为 `MPSC ring + 无界链表兜底`
+  - 唤醒优化：按 `sleeping` 状态定向 tickle、idle 前二次检查防漏唤醒
+- `sylar/fiber/iomanager.*`
+  - per-worker `epoll/eventfd`、fd owner 执行、owner 生命周期修复
+- `sylar/fiber/timer.*`
+  - per-worker timer bucket
+- `sylar/fiber/hook.cc`、`sylar/fiber/fiber.*`
+  - `WaitResult + token` 等待恢复语义
+- `sylar/net/tcp_server.*`
+  - accept/io worker 分离约束、主从 Reactor 停机路径
+- `tests/test_benchmark_tcp_allocator.cc`、`tests/run_allocator_bench.sh`
+  - A/B 拓扑压测、失败记录与聚合输出
 
-现在每个 worker 都有自己的：
+### 2.9 验证与压测结论（当前状态）
 
-- `epfd`
-- `wakeFd`
+验证口径：
 
-也就是每线程独立：
+- `test_tcp_server`：主从 Reactor 功能路径
+- `test_benchmark_tcp_allocator`：`mode=a|b`、`persistent|short`
 
-- 一套 `epoll`
-- 一套 `eventfd`
+全矩阵压测（2026-03-22）：
 
-对应数据结构是 `WorkerContext`。
+- 三分配器（baseline/jemalloc/tcmalloc）
+- 两拓扑（A/B）
+- 两负载（persistent/short）
+- 线程集（`io_threads=2,4,8`）
+- `repeat=3`
 
-#### 2.4.3 fd owner 绑定
+结果：
 
-新版本引入了一个很关键的概念：`ownerWorker`。
+- 脚本全矩阵跑通
+- `failures.csv` 无失败行（仅表头）
+- `short` 不再出现此前的 `exit 139` 进程崩溃
+- P2C 版本在同口径矩阵下稳定运行，无新增崩溃/超时
 
-某个 fd 第一次注册事件时，会绑定一个 owner worker：
+### 2.10 面试怎么讲（终态版）
 
-- 如果当前就在某个 worker 线程里，就优先绑定当前 worker
-- 否则用 round-robin 分配一个 worker
+30 秒版本：
 
-绑定之后，这个 fd 后续的：
+> 第一阶段我把协程切换从 `ucontext` 换成手写汇编，先把最热切换路径降开销。第二阶段我直接把网络层收敛到终态：调度器去全局队列和 stealing，worker 选择从 RR 升级到 P2C，命令通道改成每 worker 的 `MPSC ring` 热路径加无界链表兜底，IOManager 改为每 worker 独立 `epoll/eventfd`，fd 控制统一在 owner worker 执行，等待语义改成 `WaitResult + token`，并把 `TcpServer` 固化为 accept/io 分离的主从 Reactor。同时在调度层做了按需唤醒和 idle 前二次检查，减少唤醒风暴与漏唤醒窗口。最后补了 fd 复用下 owner 生命周期问题，短连接压测稳定通过。
 
-- `addEvent`
-- `delEvent`
-- `cancelEvent`
-- timeout 处理
+2 分钟版本关键词：
 
-都会围绕这个 owner worker 走。
-
-这相当于给 fd 建了线程归属。
-
-#### 2.4.4 事件是怎么被唤醒并恢复协程的
-
-新版本的路径是：
-
-1. `addEventInternal` 把事件注册到 owner 的 `epoll`
-2. 同时在 `FdContext::EventContext` 里记住：
-   - scheduler
-   - fiber / cb
-   - timeoutTimer
-   - thread
-   - waitToken
-3. owner worker 的 `idle()` 里跑自己的 `epoll_wait`
-4. 事件到了以后，`triggerEvent()`：
-   - 取消 timeoutTimer
-   - 设置 wait 结果
-   - 把 fiber 或回调重新 schedule 回去
-
-因为每个 worker 有自己的 `epoll`，所以事件分发天然更局部化。
-
-#### 2.4.5 为什么 `eventfd` 比共享 pipe 更合适
-
-新版本用的是每 worker 一个 `eventfd`，而不是共享管道。
-
-这样做的好处是：
-
-- 唤醒目标更明确
-- 写入模型更简单
-- 少掉共享 wakeup 点上的争用
-
-它本质上就是“把 tickle 也做线程局部化”。
-
-### 2.5 Timer 重构：从全局 `set` 到每线程最小堆
-
-#### 2.5.1 旧版本的问题
-
-旧版本 `TimerManager` 的核心是：
-
-- 一个全局 `std::set<Timer::ptr>`
-- 一把全局读写锁
-
-这有两个问题：
-
-1. 所有 timer 插入、删除、取最近超时都走同一处
-2. `set` 的数据结构和缓存局部性对高频 timer 热路径并不友好
-
-#### 2.5.2 新版本的结构
-
-新版本把 timer 改成了按 worker 分桶：
-
-- `m_buckets`
-- 每个 bucket 一个最小堆 `heap`
-- 每个 timer 记录自己属于哪个 worker
-
-timer 的关键字段现在有：
-
-- `m_worker`
-- `m_heapIndex`
-- `m_next`
-- `m_sequence`
-
-这意味着 timer 不是全局漂浮的，而是天然带 worker 归属。
-
-#### 2.5.3 为什么改成最小堆
-
-最小堆在这里很适合“只关心最近一个到期 timer”的场景：
-
-- 取最近 timer：看堆顶
-- 插入/删除：`O(logN)`
-- 数据局部性比树结构更好
-
-同时 `m_sequence` 作为打平局的次序号，保证相同过期时间下的稳定顺序。
-
-#### 2.5.4 为什么改用 `CLOCK_MONOTONIC`
-
-旧版本更偏 wall clock 语义，还要考虑“系统时间回拨”。
-
-新版本用单调时钟：
-
-- 不受手工校时和 NTP 调整影响
-- 对 timeout/timer 语义更稳定
-- 更适合 runtime 内部的相对时间管理
-
-#### 2.5.5 Timer 和 IO worker 为什么要绑定
-
-这次 timer 的真正价值，不只是“容器更快”，而是和 IO worker 局部化一起形成闭环：
-
-- 某个 worker 上注册的 IO 等待
-- 其 timeout timer 也尽量落在同一个 worker
-- `idle()` 在 `epoll_wait` 之后，顺手取本 worker 的过期 timer 回调
-
-这样 timer 不再是“全局旁路系统”，而是直接融进每个 worker 的事件循环里。
-
-### 2.6 Hook / wait 路径修正：从“隐式改 `errno`”到显式等待结果
-
-#### 2.6.1 旧版本的问题
-
-旧版本 `do_io()` / `connect_with_timeout()` 的 timeout 路径，本质上是：
-
-- 定时器回调触发
-- 回调里取消 IO 事件
-- 再通过副作用去影响等待方的错误语义
-
-这种模型能工作，但语义有点“绕”：
-
-- timeout 结果不是协程显式拿到的
-- 协程恢复后要靠外部副作用判断是不是超时
-- 当 timer、cancel、resume 交织时，理解和维护成本偏高
-
-#### 2.6.2 新版本怎么做
-
-新版本在 `Fiber` 里引入了：
-
-- `WaitResult`
-- `waitToken`
-
-等待流程变成：
-
-1. `waitEvent()` 给当前 fiber 生成一个 `waitToken`
-2. `addEventInternal()` 把这个 token 记到 `EventContext`
-3. 如果发生：
-   - 正常 IO ready -> `WAIT_READY`
-   - timeout -> `WAIT_TIMEOUT`
-   - cancel -> `WAIT_CANCELLED`
-4. `triggerEvent()` 在恢复 fiber 前先把结果写回 fiber
-5. `waitEvent()` 恢复后显式 `consumeWaitResult(token)`
-
-这样等待结果不再是“猜出来的”，而是“明确传回来的”。
-
-#### 2.6.3 为什么这比直接改 `errno` 更干净
-
-因为 `errno` 是线程局部错误码，不适合拿来承载完整的等待状态机。  
-新版本把“等待结果”从 `errno` 里拆出来以后，语义边界更清楚：
-
-- `WAIT_TIMEOUT` 是协程等待结果
-- `errno = ETIMEDOUT` 只是对外保留的 POSIX 风格兼容表现
-
-也就是说：
-
-- 运行时内部看 `WaitResult`
-- 对用户接口仍然保持熟悉的 `errno`
-
-#### 2.6.4 这轮还顺手补了一个主线程 Reactor 相关 bugfix
-
-主线程 `accept` 模式下，监听 socket 往往在进入 caller run loop 之前就已经创建好了。  
-如果 hook 路径第一次访问这个 fd 时，`FdManager` 里还没有对应 `FdCtx`，`accept()` 可能会退化成阻塞系统调用。
-
-所以新版本在 hook 入口做了“懒注册 `FdCtx`”：
-
-- 只有当当前线程真正进入 hook I/O 路径时，才补建 `FdCtx`
-- 这样既能保证主线程 `accept` 进入非阻塞 + epoll 路径
-- 又不会把所有非 hook 线程里的普通 socket 语义都提前改掉
-
-这个点很小，但非常工程化。
-
-### 2.7 主线程 `accept` Reactor 化
-
-#### 2.7.1 为什么 `accept` 适合单线程
-
-`accept` 本身不是重 CPU 逻辑，它更像一个轻量分发入口。  
-默认把它放在一个线程里，通常更稳妥：
-
-- 模型简单
-- 监听 fd 归属清晰
-- 少掉多线程 `accept` 之间的协调和抢占
-
-尤其在当前这个协程网络层里，真正重的工作在后面的：
-
-- 读写
-- 协议处理
-- 业务回调
-
-这些都应该交给 IO worker 池。
-
-#### 2.7.2 当前推荐拓扑
-
-这一轮之后，推荐写法是：
-
-- `accept_iom(1, true)`：主线程 reactor
-- `io_iom(N, false)`：真正的 IO worker 池
-- `TcpServer(io_worker=&io_iom, accept_worker=&accept_iom)`
-- 主线程调用 `accept_iom.runCaller()`
-
-这就对应你前面说的那种 Reactor 结构：
-
-- 主线程负责监听和接入
-- 子线程池负责连接处理
-
-#### 2.7.3 `use_caller` 现在能开吗
-
-现在能开，但要分场景理解：
-
-- 对 `accept_iom(1, true)` 这种主线程 Reactor，**推荐开**
-- 对纯 worker 池，如果你不打算让主线程真正进入 run loop，就**不要为了开而开**
-
-换句话说，`use_caller` 现在已经不再是“不能碰”的状态了，但它应该对应一个明确角色：
-
-- caller 线程就是一个真实 worker
-- 而不是“最后 stop 时顺便跑一圈”
-
-#### 2.7.4 `runCaller()` 为什么重要
-
-没有 `runCaller()` 之前，caller 线程更像“预留席位”。  
-有了 `runCaller()` 之后，主线程可以显式进入调度循环。
-
-这带来两个好处：
-
-1. 架构表达更自然
-   - main thread 真的是 accept reactor
-2. benchmark / test 不需要再靠 guard timer 或 stop hack 去把 caller 拉起来
-
-#### 2.7.5 `TcpServer` 停机路径现在怎么工作
-
-现在主线程 accept 拓扑下，`TcpServer::stop()` 的逻辑是：
-
-1. 先把 `m_isStop` 置成 `true`
-2. 再把清理动作 schedule 到 `acceptWorker`
-3. 清理动作里：
-   - `cancelAll()`
-   - `close()` 监听 socket
-4. 监听 fd 被关闭后，`startAccept()` 的等待会被唤醒并退出循环
-
-这保证了：
-
-- accept loop 不会永远卡在监听 fd 上
-- stop 路径是可控退出，而不是粗暴打断
-
-### 2.8 benchmark 与测试拓扑也跟着改了
-
-这轮不只是改库代码，也把验证方式改成了和新架构一致的拓扑：
-
-- `tests/test_tcp_server.cc`
-  - 主线程跑 `accept_iom.runCaller()`
-  - `io_iom` 负责客户端连接处理
-- `tests/test_benchmark_tcp_allocator.cc`
-  - on-mode/off-mode 都不再依赖旧的 guard timer hack
-  - caller 线程通过 `runCaller()` 正式进入事件循环
-
-这样 benchmark 测到的，不再是“旧拓扑 + 新局部实现”的混合物，而是完整新架构。
-
-### 2.9 这一轮实际验证了什么
-
-这一轮至少验证了下面几件事：
-
-1. `test_tcp_server`
-   - 主线程 accept
-   - 多监听端口
-   - echo 正常
-   - stop 能优雅退出
-2. `test_benchmark_tcp_allocator`
-   - off-mode 下主线程 accept 拓扑能正常跑通
-3. `test_benchmark_fiber`
-   - 第一阶段的 fiber 基础能力没有被第二阶段回归破坏
-
-### 2.10 本轮收益与边界
-
-#### 收益
-
-这一轮最核心的收益有四个：
-
-1. 全局任务链表大锁被拆掉了
-2. 共享 `epoll/wakeup` 热点被拆成 per-worker 资源
-3. timer 从全局资源变成 worker 局部资源
-4. `accept` 拓扑明确成了主线程 Reactor
-
-#### 代价和边界
-
-这并不意味着“以后完全没有同步开销”。
-
-当前还存在的代价包括：
-
-- `remoteQueue` 跨线程投递仍然有同步和内存分配成本
-- work stealing 天生会带来跨核缓存干扰
-- fd 绑定 owner 后，事件局部性更好，但线程归属也更固定
-
-所以第二阶段更准确的描述不是“消灭锁”，而是：
-
-> 把高频共享热点拆散，把大部分热路径局部化。
-
-### 2.11 面试怎么讲
-
-第二部分适合讲成“我把网络层运行时从共享热点架构改成了局部化架构”。
-
-一个 30 秒版本：
-
-> 第二轮我主要处理的是高并发下的共享热点问题。旧版本里任务调度、IO 事件、timer 和 accept 拓扑都偏全局化，所以我把它们统一改成了 per-worker 局部化模型：调度器改成每线程本地队列加远程投递和 stealing，IOManager 改成每线程独立 `epoll + eventfd`，timer 改成每线程最小堆，accept 固定放到主线程 Reactor 上。
-
-一个 2 分钟版本最好按“问题 -> 改法 -> 价值”来讲：
-
-1. 调度器
-   - 旧版是全局任务链表大锁。
-   - 新版是 `localQueue + remoteQueue + work stealing`。
-   - 价值是把大部分任务流动局部化，只在真正跨线程时同步。
-2. IOManager
-   - 旧版是共享 `epoll + pipe`。
-   - 新版是 per-worker `epoll + eventfd`，并给 fd 绑定 owner。
-   - 价值是把事件注册、等待、唤醒、恢复尽量放回同一个 worker。
-3. Timer
-   - 旧版是全局 `set`。
-   - 新版是每线程最小堆，且和 worker 事件循环绑定。
-   - 价值是 timer 不再是全局旁路系统。
-4. Hook / wait
-   - 旧版 timeout 更依赖外部副作用。
-   - 新版用 `WaitResult + token` 显式表达等待结果。
-   - 价值是语义更清楚，也更容易排查复杂时序问题。
-5. accept 拓扑
-   - 现在主线程通过 `runCaller()` 作为真正的 accept reactor。
-   - 连接建立后交给 IO worker 池处理。
-
-如果被追问“你这一轮最本质的设计思想是什么”，最稳的回答是：
-
-> 不是追求绝对无锁，而是把全局共享热点拆成线程局部资源，把高频热路径局部化。
-
-如果被追问“为什么 accept 只放一个线程”，可以直接答：
-
-> `accept` 本身是轻量入口，默认一个线程模型更简单、更稳，真正该扩的是后面的读写和业务处理线程。
+- `hot path slimming`（阶段一）
+- `per-worker resource partitioning`
+- `ownership + command channel`
+- `P2C load balancing over queuedTasks`
+- `explicit wait semantics`
+- `master-sub reactor with clear accept/io boundary`
 
 ---
 
-## 第三部分：下一阶段优化方向
+## 第三部分：无锁队列模型与代码模板（理论）
 
-第三阶段我不准备再优先去拆成“一个线程一个 `IOManager` 对象”，而是先把当前这套 per-worker 局部化模型继续收紧成更明确的 ownership 模型。
+这一部分不绑定具体项目，只讲并发队列模型本身。
 
-当前第二阶段虽然已经没有全局任务链表，也把 `epoll/timer/wakeup` 做到了 per-worker，但 worker 之间依然保留了：
+### 3.1 六种组合总览
 
-- 普通任务互相投递
-- work stealing
+- 环形队列（有界）：
+  - MPSC：多生产者，单消费者
+  - SPMC：单生产者，多消费者
+  - MPMC：多生产者，多消费者
+- 无界链表（无界）：
+  - MPSC：多生产者，单消费者
+  - SPMC：单生产者，多消费者
+  - MPMC：多生产者，多消费者
 
-这说明当前模型本质上还是“局部化线程池”，而不是“强 ownership 的分片模型”。  
-第三阶段要解决的，就是把这条边界继续收紧。
+这六种里，最难的是多消费者侧（`SPMC/MPMC`）的并发出队和安全回收。
 
-### 3.1 第三阶段的目标
-
-第三阶段的目标可以概括成四条：
-
-1. 保留 `accept -> worker` 分发
-2. 去掉 worker 之间普通任务互投
-3. 去掉 work stealing
-4. 把跨线程行为收缩成 mailbox / command queue 语义
-
-也就是说，下一阶段不是“完全没有跨线程通信”，而是：
-
-- 保留入口线程到 worker 的连接分发
-- 保留主控线程到 worker 的控制命令
-- 取消 worker 和 worker 之间任意扔普通业务任务的能力
-
-### 3.2 为什么第三阶段不先做“一线程一个 IOM 对象”
-
-这个问题要先讲清楚。
-
-当前实现虽然对象层面还是一个 `io_iom(N, false)`，但逻辑层面其实已经是：
-
-- 每个 worker 一套 `epoll`
-- 每个 worker 一套 `eventfd`
-- 每个 worker 一套 timer bucket
-- 每个 worker 一套本地任务队列
-
-所以性能上的“大共享热点”其实已经拆掉了。  
-如果第三阶段直接改成“一个线程一个 `IOManager` 实例”，会先遇到一批工程复杂度问题：
-
-- 生命周期管理变复杂
-- `TcpServer` 上层接口会更碎
-- fd owner / timer owner / stop 路径要重新拆分
-- 很多本来在一个调度器内部完成的协作，要变成多个对象之间的协作
-
-但这些额外复杂度，并不会天然带来和第二阶段同量级的性能收益。
-
-所以更合理的顺序是：
-
-1. 先把运行语义收紧
-2. 再决定以后要不要真的拆成多个 `IOManager` 实例
-
-### 3.3 为什么要去掉 worker 间普通任务互投
-
-第二阶段里，worker 之间普通任务互投还能工作，但它会破坏几个第三阶段想保住的东西：
-
-- 线程归属稳定性
-- cache 局部性
-- fd / timer / callback 的 ownership 纯度
-
-如果 worker A 可以随时给 worker B 丢一个普通业务任务，那么即使：
-
-- fd owner 已经绑定了
-- timer 已经局部化了
-- epoll 已经按 worker 分片了
-
-业务执行路径仍然可能被跨线程打散。
-
-所以第三阶段的方向是：
-
-> worker 默认只处理自己本地拥有的任务，不再接受其他 worker 随手丢过来的普通业务任务。
-
-这会让“谁拥有这个连接 / 这个 timer / 这个回调”变得更稳定。
-
-### 3.4 为什么要去掉 work stealing
-
-work stealing 在第二阶段是有价值的，因为它给局部化模型补了一个负载均衡兜底。  
-但如果第三阶段更强调 ownership，那么 stealing 反而会开始和目标冲突：
-
-- 它会破坏线程局部性
-- 它会增加跨核缓存干扰
-- 它会削弱“任务归属”和“连接归属”的一致性
-
-所以第三阶段的默认方向应该是：
-
-- 不再启用 work stealing
-- worker 只跑自己的本地任务
-- 负载均衡只发生在入口分发阶段
-
-也就是：
-
-- 新连接刚接入时做一次 worker 选择
-- 一旦绑定，就尽量不再迁移
-
-这样模型会更接近“分片化 reactor / actor”，而不是共享线程池。
-
-### 3.5 mailbox / command queue 语义到底是什么意思
-
-这不是说“彻底禁止跨线程通信”，而是说：
-
-> 跨线程传递的不再是任意普通任务，而是少数几种明确的命令。
-
-可以把第二阶段的 `remoteQueue` 理解成“远程任务队列”，  
-第三阶段则更想把它收敛成“收件箱”。
-
-也就是说，跨线程只允许传这些东西：
-
-- `accept -> worker`：新连接移交
-- 管理线程 -> worker：停止、取消、关闭 fd
-- 必要时：唤醒 worker 处理 mailbox
-
-而不再允许这种事情：
-
-- worker A 直接给 worker B 塞一个普通业务 callback
-- worker A 指望 worker B 帮它跑一段无归属的普通任务
-
-如果把它写成抽象语义，可以理解成：
+### 3.2 MPMC 有界环形队列（代码模板）
 
 ```cpp
-enum class WorkerCmdType {
-    NewConnection,
-    CancelFd,
-    StopWorker,
+template <typename T, size_t CapacityPow2>
+class MpmcBoundedRing {
+    static_assert((CapacityPow2 & (CapacityPow2 - 1)) == 0, "pow2");
+    struct Cell {
+        std::atomic<size_t> seq;
+        T data;
+    };
+
+    static constexpr size_t kMask = CapacityPow2 - 1;
+    alignas(64) Cell buffer_[CapacityPow2];
+    alignas(64) std::atomic<size_t> enqueuePos_{0};
+    alignas(64) std::atomic<size_t> dequeuePos_{0};
+
+public:
+    MpmcBoundedRing() {
+        for (size_t i = 0; i < CapacityPow2; ++i) {
+            buffer_[i].seq.store(i, std::memory_order_relaxed);
+        }
+    }
+
+    bool try_enqueue(T v) {
+        size_t pos = enqueuePos_.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& cell = buffer_[pos & kMask];
+            size_t seq = cell.seq.load(std::memory_order_acquire);
+            intptr_t diff = (intptr_t)seq - (intptr_t)pos;
+            if (diff == 0) {
+                if (enqueuePos_.compare_exchange_weak(
+                        pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                    cell.data = std::move(v);
+                    cell.seq.store(pos + 1, std::memory_order_release);
+                    return true;
+                }
+            } else if (diff < 0) {
+                return false; // full
+            } else {
+                pos = enqueuePos_.load(std::memory_order_relaxed);
+            }
+        }
+    }
+
+    bool try_dequeue(T& out) {
+        size_t pos = dequeuePos_.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& cell = buffer_[pos & kMask];
+            size_t seq = cell.seq.load(std::memory_order_acquire);
+            intptr_t diff = (intptr_t)seq - (intptr_t)(pos + 1);
+            if (diff == 0) {
+                if (dequeuePos_.compare_exchange_weak(
+                        pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                    out = std::move(cell.data);
+                    cell.seq.store(pos + CapacityPow2, std::memory_order_release);
+                    return true;
+                }
+            } else if (diff < 0) {
+                return false; // empty
+            } else {
+                pos = dequeuePos_.load(std::memory_order_relaxed);
+            }
+        }
+    }
 };
 ```
 
+### 3.3 MPMC 无界链表队列（代码模板）
+
 ```cpp
-struct WorkerCmd {
-    WorkerCmdType type;
-    int fd;
-    Socket::ptr sock;
+template <typename T, typename RetireFn>
+class MpmcUnboundedLinked {
+    struct Node {
+        std::atomic<Node*> next;
+        T value;
+        bool hasValue;
+        Node() : next(nullptr), value(), hasValue(false) {} // dummy
+        explicit Node(T v) : next(nullptr), value(std::move(v)), hasValue(true) {}
+    };
+
+    std::atomic<Node*> head_;
+    std::atomic<Node*> tail_;
+    RetireFn retire_;
+
+public:
+    explicit MpmcUnboundedLinked(RetireFn retire) : retire_(retire) {
+        Node* dummy = new Node();
+        head_.store(dummy, std::memory_order_relaxed);
+        tail_.store(dummy, std::memory_order_relaxed);
+    }
+
+    bool enqueue(T v) {
+        Node* n = new Node(std::move(v));
+        for (;;) {
+            Node* tail = tail_.load(std::memory_order_acquire);
+            Node* next = tail->next.load(std::memory_order_acquire);
+            if (tail != tail_.load(std::memory_order_acquire)) continue;
+            if (next == nullptr) {
+                if (tail->next.compare_exchange_weak(
+                        next, n, std::memory_order_release, std::memory_order_relaxed)) {
+                    tail_.compare_exchange_strong(
+                        tail, n, std::memory_order_release, std::memory_order_relaxed);
+                    return true;
+                }
+            } else {
+                tail_.compare_exchange_weak(
+                    tail, next, std::memory_order_release, std::memory_order_relaxed);
+            }
+        }
+    }
+
+    bool try_dequeue(T& out) {
+        for (;;) {
+            Node* head = head_.load(std::memory_order_acquire);
+            Node* tail = tail_.load(std::memory_order_acquire);
+            Node* next = head->next.load(std::memory_order_acquire);
+            if (head != head_.load(std::memory_order_acquire)) continue;
+            if (next == nullptr) return false; // empty
+            if (head == tail) {
+                tail_.compare_exchange_weak(
+                    tail, next, std::memory_order_release, std::memory_order_relaxed);
+                continue;
+            }
+            T tmp = next->value;
+            if (head_.compare_exchange_weak(
+                    head, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                out = std::move(tmp);
+                retire_(head); // 必须是安全回收（Hazard Pointer / Epoch）
+                return true;
+            }
+        }
+    }
 };
 ```
 
-重点不是这个结构体本身，而是设计边界：
+### 3.4 MPSC 的出队代码（因为入队可复用 MPMC 入队侧）
 
-- 远程入口里放的是命令
-- 不是任意 fiber / 任意 callback
+环形队列（MPSC）出队：消费者独占 `dequeuePos`，不再需要 CAS 抢占出队位。
 
-这会让系统更容易继续往 actor / shard 方向演化。
-
-### 3.6 第三阶段的推荐拓扑
-
-第三阶段的推荐拓扑可以写成：
-
-```text
-main thread
-  accept reactor
-    - accept
-    - choose target worker
-    - send NewConnection cmd
-
-worker_i
-  - local task queue
-  - mailbox / command queue
-  - epoll_i
-  - eventfd_i
-  - timer_heap_i
-  - no work stealing
-  - no ordinary task push from other workers
+```cpp
+bool try_dequeue_mpsc(T& out) {
+    size_t pos = dequeuePos_.load(std::memory_order_relaxed);
+    Cell& cell = buffer_[pos & kMask];
+    size_t seq = cell.seq.load(std::memory_order_acquire);
+    intptr_t diff = (intptr_t)seq - (intptr_t)(pos + 1);
+    if (diff < 0) return false; // empty
+    out = std::move(cell.data);
+    dequeuePos_.store(pos + 1, std::memory_order_relaxed);
+    cell.seq.store(pos + CapacityPow2, std::memory_order_release);
+    return true;
+}
 ```
 
-这里最重要的语义变化有三条：
+无界链表（MPSC）出队：单消费者可直接推进 `head`，不需要多消费者 CAS 竞争。
 
-1. 负载均衡主要发生在连接接入那一刻
-2. 连接绑定 worker 后，后续读写、timer、callback 尽量留在该 worker
-3. 跨线程通信只做“移交”和“控制”，不做普通业务任务外包
+```cpp
+bool try_dequeue_mpsc(T& out) {
+    Node* head = head_.load(std::memory_order_relaxed);
+    Node* next = head->next.load(std::memory_order_acquire);
+    if (!next) return false;
+    out = std::move(next->value);
+    head_.store(next, std::memory_order_relaxed);
+    retire_(head); // 仍需安全回收策略
+    return true;
+}
+```
 
-### 3.7 第三阶段的实现优先级
+### 3.5 SPMC 的入队代码（因为出队可复用 MPMC 出队侧）
 
-如果真按这条路线继续做，我会这样排优先级：
+环形队列（SPMC）入队：生产者独占 `enqueuePos`，不再需要 CAS 抢占入队位。
 
-1. 先限制跨线程 `schedule` 的语义
-   - 只保留 `accept -> worker`
-   - 只保留管理命令 -> worker
-2. 去掉 work stealing
-3. 把 `remoteQueue` 从“远程任务队列”收敛成 mailbox / command queue
-4. 再补更系统的 benchmark / profiling
-5. 最后再评估是否需要进一步拆成多个 `IOManager` 实例
+```cpp
+bool try_enqueue_spmc(T v) {
+    size_t pos = enqueuePos_.load(std::memory_order_relaxed);
+    Cell& cell = buffer_[pos & kMask];
+    size_t seq = cell.seq.load(std::memory_order_acquire);
+    intptr_t diff = (intptr_t)seq - (intptr_t)pos;
+    if (diff < 0) return false; // full
+    cell.data = std::move(v);
+    enqueuePos_.store(pos + 1, std::memory_order_relaxed);
+    cell.seq.store(pos + 1, std::memory_order_release);
+    return true;
+}
+```
 
-这个顺序的好处是：
+无界链表（SPMC）入队：生产者独占尾指针，可顺序 append。
 
-- 先收紧运行语义
-- 再决定对象边界要不要继续拆
+```cpp
+bool enqueue_spmc(T v) {
+    Node* n = new Node(std::move(v));
+    Node* tail = tail_.load(std::memory_order_relaxed);
+    tail->next.store(n, std::memory_order_release);
+    tail_.store(n, std::memory_order_relaxed);
+    return true;
+}
+```
 
-也就是先把“系统应该怎么工作”想清楚，再决定“对象要怎么分”。
+### 3.6 ABA 问题：是什么、在哪出现、怎么解
 
-### 3.8 面试怎么讲
+ABA 的本质是：一个原子值从 `A -> B -> A`，CAS 只看到“还是 A”，却看不到中间语义已经变了。
 
-第三阶段最适合讲成“从局部化线程池继续演进到 ownership 更强的分片模型”。
+1. 在有界 ring（sequence-slot）里
+   - 典型实现通常不直接 CAS 指针，而是比较 `seq` 与位置，ABA 风险天然较低。
+   - 真正风险是“序号回绕”导致旧值被误认成新轮次。
+   - 工程做法：`seq` 用足够宽的无符号整型（常见 `uint64_t/size_t`），并保证容量与更新规则正确。
+2. 在无界链表（MS queue）里
+   - 风险集中在 `head/tail/next` 指针 CAS，节点被回收并复用后最容易出现 ABA。
+   - 工程做法：不要裸 `delete`，必须配合安全回收机制。
+3. 常见治理策略
+   - Tagged Pointer（指针+版本号）避免“同地址同版本”误判。
+   - Hazard Pointer（读前发布 hazard，回收前扫描）避免节点被提前释放。
+   - Epoch/RCU（批次延迟回收）把回收延后到所有线程离开旧 epoch。
 
-一个简洁版本：
+一句话面试回答：
+“ABA 不是 CAS 指令本身的问题，是对象生命周期与地址复用问题；链表结构必须把 CAS 和内存回收一起设计。”
 
-> 下一阶段我不会立刻把系统拆成一个线程一个 `IOManager` 对象，因为当前每个 worker 已经有独立的 `epoll/eventfd/timer` 了，主要热点已经拆掉。更值得优先做的是把运行语义继续收紧：保留 `accept -> worker` 分发，去掉 worker 间普通任务互投和 work stealing，把跨线程通信收缩成 mailbox 里的少数命令，比如新连接移交和控制命令。这样连接、timer、回调的 ownership 会更稳定，系统也会更接近分片化 reactor/actor。
+### 3.7 无锁链表的安全回收（最容易被追问）
 
-这段回答最好让面试官听到三个关键词：
+如果只讲“CAS 成功就 pop”，但没讲回收，通常会被继续追问。
 
-- `ownership`
-- `mailbox / command queue`
-- `load balance at ingress`
+1. Hazard Pointer
+   - 优点：精确、可实时回收。
+   - 代价：每次读路径需要发布/检查 hazard，代码复杂度较高。
+2. Epoch Based Reclamation
+   - 优点：实现相对简单，吞吐通常更好。
+   - 代价：长尾线程可能拖慢回收，峰值内存上升。
+3. 引用计数
+   - 优点：语义直观。
+   - 代价：原子增减开销大，在高并发队列里往往不是最优。
 
-如果被追问“为什么不直接一个线程一个 IOM”，可以直接答：
+工程上常见结论是：
+`MPMC` 无界链表通常优先 `Hazard Pointer` 或 `Epoch`，不建议“无保护直接 delete”。
 
-> 因为当前已经做到了 per-worker IO 上下文，下一步更关键的是先把跨线程执行语义收紧；否则对象拆得更碎，但运行语义还是松的，收益不会成比例增长。
+### 3.8 内存序怎么讲（简版）
+
+面试里不需要背标准条文，但要说清“发布-可见”关系：
+
+1. 生产者写数据后用 `release` 发布“可消费标记”（如 ring 的 `seq` 或链表的 `next`）。
+2. 消费者读取可消费标记时用 `acquire`，确保读到的数据体是完整可见的。
+3. 计数器、游标抢位等纯竞争变量可用 `relaxed`，但不能破坏上面两条数据可见性链。
+
+一句话面试回答：
+“我把内存序拆成两类：数据发布链路必须 `release/acquire`，纯竞争元数据尽量 `relaxed`。”
+
+### 3.9 伪共享与缓存抖动
+
+无锁不等于高性能，缓存行为经常是第一瓶颈。
+
+1. `head/tail` 或 `enqueuePos/dequeuePos` 尽量 cache line 对齐分离（常见 `alignas(64)`）。
+2. 高频写热点分散，避免多个线程反复写同一 cache line。
+3. 环形队列优点是连续内存、预取友好；链表缺点是指针跳转与分配器压力。
+
+### 3.10 满队列/空队列语义（有界结构必问）
+
+有界 ring 必须先定义清楚“满了怎么办”，这属于功能语义，不只是性能策略。
+
+1. `try_enqueue` 直接失败（上层重试或降级）。
+2. 阻塞/自旋等待（延迟更不可控，容易放大尾延迟）。
+3. 降级到兜底通道（工程里常见“ring 热路径 + 无界 fallback”）。
+
+面试时要明确说：
+“我优先保证语义正确（不丢任务/可退化），再谈吞吐最优。”
+
+### 3.11 高频追问清单（答题模板）
+
+1. Q: 为什么 `MPSC/SPMC` 不能说成“MPMC 删一半 CAS”？
+   - A: 并发参与者变了，不变量也变了；单侧独占后应重写该侧协议，而不是机械删 CAS。
+2. Q: 线性化点在哪里？
+   - A: ring 通常是发布 `seq` 的那一刻；链表通常是成功链接 `next` 或成功推进 `head` 的 CAS 点。
+3. Q: 无锁是不是一定比加锁快？
+   - A: 不一定。低并发或临界区很短时锁可能更稳，复杂无锁可能输在缓存和回收成本。
+4. Q: 怎么验证你的无锁实现正确？
+   - A: 压测只证明“好像能跑”，还需要模型测试/线性化检查/TSAN/故障注入做并发语义验证。
+5. Q: 怎么选 ring 还是链表？
+   - A: 有界且追求 cache 友好选 ring；需要弹性容量选链表，但必须接受回收复杂度与分配开销。
