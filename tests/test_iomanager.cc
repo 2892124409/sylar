@@ -2,6 +2,8 @@
 #include "sylar/log/logger.h"
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <string.h>
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
 int pipe_fds[2];
@@ -33,8 +35,15 @@ void test_fiber_sync()
     // 如果这里是传统的 read，线程就卡死了，上面的 test_busy_work 就没机会打印了。
     // 正因为我们 Yield 了，线程才会在等数据的间隙跑去执行 test_busy_work。
 
-    char byte;
-    read(pipe_fds[0], &byte, 1);
+    char byte = '\0';
+    ssize_t n = read(pipe_fds[0], &byte, 1);
+    if (n != 1)
+    {
+        SYLAR_LOG_ERROR(g_logger) << "同步协程读取失败, n=" << n
+                                  << ", errno=" << errno
+                                  << ", errstr=" << strerror(errno);
+        return;
+    }
     SYLAR_LOG_INFO(g_logger) << "同步协程：数据终于到了，读到: " << byte;
 }
 
@@ -42,7 +51,12 @@ void test_iomanager()
 {
     sylar::IOManager iom(1, false, "SINGLE_THREAD"); // 我们只用 1 个线程测试
 
-    pipe(pipe_fds);
+    if (pipe(pipe_fds) != 0)
+    {
+        SYLAR_LOG_ERROR(g_logger) << "pipe 创建失败, errno=" << errno
+                                  << ", errstr=" << strerror(errno);
+        return;
+    }
     fcntl(pipe_fds[0], F_SETFL, O_NONBLOCK);
 
     iom.schedule(&test_fiber_sync);
@@ -51,7 +65,12 @@ void test_iomanager()
     iom.schedule([]()
                  {
         sleep(3);
-        write(pipe_fds[1], "Z", 1); });
+        ssize_t n = write(pipe_fds[1], "Z", 1);
+        if (n != 1) {
+            SYLAR_LOG_ERROR(g_logger) << "写入 pipe 失败, n=" << n
+                                      << ", errno=" << errno
+                                      << ", errstr=" << strerror(errno);
+        } });
 }
 
 int main()

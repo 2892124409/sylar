@@ -9,7 +9,7 @@
 #include "log_level.h"
 #include "log_formatter.h"
 #include "log_appender.h"
-#include "../base/util.h"
+#include "sylar/base/util.h"
 
 namespace sylar
 {
@@ -225,3 +225,17 @@ namespace sylar
 #define SYLAR_LOG_NAME(name) sylar::LoggerMgr::GetInstance()->getLogger(name)
 
 #endif
+
+// HTTP 框架兼容层：将 base::Logger 和 BASE_LOG_* 桥接到 sylar:: API
+namespace base
+{
+using Logger = sylar::Logger;
+} // namespace base
+
+#define BASE_LOG_NAME(name)   SYLAR_LOG_NAME(name)
+#define BASE_LOG_ROOT()       SYLAR_LOG_ROOT()
+#define BASE_LOG_INFO(logger) SYLAR_LOG_INFO(logger)
+#define BASE_LOG_WARN(logger) SYLAR_LOG_WARN(logger)
+#define BASE_LOG_ERROR(logger) SYLAR_LOG_ERROR(logger)
+#define BASE_LOG_FATAL(logger) SYLAR_LOG_FATAL(logger)
+#define BASE_LOG_DEBUG(logger) SYLAR_LOG_DEBUG(logger)

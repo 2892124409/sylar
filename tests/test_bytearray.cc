@@ -7,6 +7,7 @@
 #include "sylar/log/logger.h"
 #include <iostream>
 #include <cassert>
+#include <cstdlib>
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
@@ -105,7 +106,11 @@ void test_varint()
     for (auto v : values32)
     {
         uint32_t r = ba->readUint32();
-        assert(r == v);
+        if (r != v)
+        {
+            std::cerr << "Varint32 校验失败, expect=" << v << ", actual=" << r << std::endl;
+            std::abort();
+        }
     }
 
     ba->clear();
@@ -124,7 +129,11 @@ void test_varint()
     for (auto v : svalues32)
     {
         int32_t r = ba->readInt32();
-        assert(r == v);
+        if (r != v)
+        {
+            std::cerr << "Zigzag32 校验失败, expect=" << v << ", actual=" << r << std::endl;
+            std::abort();
+        }
     }
 
     ba->clear();
@@ -227,8 +236,11 @@ void test_position()
 
     // 随机位置读取
     ba->setPosition(4);
-    int32_t v = ba->readFint32(); // 读取第二个 int32
-    assert(v == 200);
+    if (ba->readFint32() != 200) // 读取第二个 int32
+    {
+        std::cerr << "位置读取校验失败: 第二个 int32 不是 200" << std::endl;
+        std::abort();
+    }
 
     std::cout << "✓ 位置操作测试通过" << std::endl;
 }
@@ -320,8 +332,11 @@ void test_file()
     // 验证数据
     assert(ba2->readFint32() == 12345);
     assert(ba2->readStringF32() == "Hello, File!");
-    double d = ba2->readDouble();
-    assert(std::abs(d - 3.14159) < 0.00001);
+    if (std::abs(ba2->readDouble() - 3.14159) >= 0.00001)
+    {
+        std::cerr << "文件读回 double 校验失败" << std::endl;
+        std::abort();
+    }
 
     std::cout << "✓ 文件读写测试通过" << std::endl;
 }
