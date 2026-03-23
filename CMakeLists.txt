@@ -38,6 +38,21 @@ include_directories(.)
 include_directories(src)
 include_directories(src/base)
 
+find_package(CURL REQUIRED)
+if(CURL_INCLUDE_DIRS)
+    include_directories(${CURL_INCLUDE_DIRS})
+endif()
+
+find_library(MYSQLCLIENT_LIBRARY NAMES mysqlclient mariadb)
+if(NOT MYSQLCLIENT_LIBRARY)
+    message(FATAL_ERROR "mysqlclient or mariadb client library not found")
+endif()
+
+find_library(RABBITMQ_LIBRARY NAMES rabbitmq)
+if(NOT RABBITMQ_LIBRARY)
+    message(FATAL_ERROR "librabbitmq library not found")
+endif()
+
 # 所有的核心模块源文件
 set(SYLAR_SOURCES
     src/base/log/log_level.cc
@@ -102,9 +117,64 @@ find_package(OpenSSL REQUIRED)
 add_library(http SHARED ${HTTP_SOURCES})
 target_link_libraries(http sylar OpenSSL::SSL OpenSSL::Crypto)
 
+# AI 应用层源文件（排除各可执行入口）
+set(AI_SOURCES
+    src/ai/common/ai_utils.cc
+    src/ai/config/ai_app_config.cc
+    src/ai/http/ai_http_api.cc
+    src/ai/http/ai_http_handlers.cc
+    src/ai/llm/anthropic_client.cc
+    src/ai/llm/fiber_curl_session.cc
+    src/ai/llm/llm_client_factory.cc
+    src/ai/llm/llm_client_registry.cc
+    src/ai/llm/llm_router.cc
+    src/ai/llm/openai_compatible_client.cc
+    src/ai/llm/provider_key_pool.cc
+    src/ai/middleware/auth_middleware.cc
+    src/ai/middleware/request_id_middleware.cc
+    src/ai/mq/rabbitmq_amqp_client.cc
+    src/ai/mq/rabbitmq_message_sink.cc
+    src/ai/rag/embedding_client.cc
+    src/ai/rag/rag_http_client.cc
+    src/ai/rag/rag_indexer.cc
+    src/ai/rag/rag_retriever.cc
+    src/ai/rag/vector_store.cc
+    src/ai/service/auth_service.cc
+    src/ai/service/chat_service.cc
+    src/ai/storage/api_key_pool_repository.cc
+    src/ai/storage/async_mysql_writer.cc
+    src/ai/storage/auth_repository.cc
+    src/ai/storage/chat_message_persister.cc
+    src/ai/storage/chat_repository.cc
+    src/ai/storage/mysql_connection_pool.cc
+)
+
+add_library(ai SHARED ${AI_SOURCES})
+target_link_libraries(ai
+    PUBLIC
+        http
+        sylar
+        ${CURL_LIBRARIES}
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        ${MYSQLCLIENT_LIBRARY}
+        ${RABBITMQ_LIBRARY}
+        yaml-cpp
+)
+
 # 定义输出路径
 set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/bin)
 set(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR}/lib)
+
+# AI 应用可执行程序
+add_executable(ai_chat_server src/ai/main.cc)
+target_link_libraries(ai_chat_server ai)
+
+add_executable(ai_auth_chat_client src/ai/client/auth_chat_client.cc)
+target_link_libraries(ai_auth_chat_client ${CURL_LIBRARIES})
+
+add_executable(ai_mq_consumer src/ai/mq/main_mq_consumer.cc)
+target_link_libraries(ai_mq_consumer ai)
 
 # 编译测试程序
 add_executable(test_log tests/test_log.cc)
@@ -154,19 +224,25 @@ target_link_libraries(test_stream sylar)
 add_executable(test_tcp_server tests/test_tcp_server.cc)
 target_link_libraries(test_tcp_server sylar)
 
-add_executable(test_memorypool tests/test_memorypool.cc)
+add_executable(test_memorypool tests/test_memory_pool.cc)
 target_link_libraries(test_memorypool pthread)
 
-add_executable(test_benchmark_fiber tests/test_benchmark_fiber.cc)
-target_link_libraries(test_benchmark_fiber sylar)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark_fiber.cc)
+    add_executable(test_benchmark_fiber tests/test_benchmark_fiber.cc)
+    target_link_libraries(test_benchmark_fiber sylar)
+endif()
 
-add_executable(test_benchmark_tcp_allocator tests/test_benchmark_tcp_allocator.cc)
-target_link_libraries(test_benchmark_tcp_allocator sylar)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark_tcp_allocator.cc)
+    add_executable(test_benchmark_tcp_allocator tests/test_benchmark_tcp_allocator.cc)
+    target_link_libraries(test_benchmark_tcp_allocator sylar)
+endif()
 
-add_executable(test_context_switch_pingpong tests/test_context_switch_pingpong.cc)
-target_link_libraries(test_context_switch_pingpong sylar)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(test_context_switch_pingpong PRIVATE -O3)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_context_switch_pingpong.cc)
+    add_executable(test_context_switch_pingpong tests/test_context_switch_pingpong.cc)
+    target_link_libraries(test_context_switch_pingpong sylar)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test_context_switch_pingpong PRIVATE -O3)
+    endif()
 endif()
 
 add_executable(test_http_server tests/test_http_server.cc)
@@ -175,8 +251,18 @@ target_link_libraries(test_http_server sylar http)
 add_executable(test_http_parser tests/test_http_parser.cc)
 target_link_libraries(test_http_parser sylar http)
 
-add_executable(test_fd_manager tests/test_fd_manager.cc)
-target_link_libraries(test_fd_manager sylar)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fd_manager.cc)
+    add_executable(test_fd_manager tests/test_fd_manager.cc)
+    target_link_libraries(test_fd_manager sylar)
+endif()
 
-add_executable(http_bench_server tests/http_bench_server.cc)
-target_link_libraries(http_bench_server sylar http)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/http_bench_server.cc)
+    add_executable(http_bench_server tests/http_bench_server.cc)
+    target_link_libraries(http_bench_server sylar http)
+endif()
+
+add_executable(test_ai_chat_service tests/test_ai_chat_service.cc)
+target_link_libraries(test_ai_chat_service ai)
+
+add_executable(test_rag_indexer tests/test_rag_indexer.cc)
+target_link_libraries(test_rag_indexer ai)

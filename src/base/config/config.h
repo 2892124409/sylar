@@ -499,7 +499,7 @@ namespace sylar
             }
 
             // 校验名字合法性，sylar约定只允许小写字母、数字、点
-            if (name.find_first_not_of("abcdefghijklmnopqrstuvwxyz._0123456789") != std::string::npos)
+            if (name.find_first_not_of("abcdefghijklmnopqrstuvwxyz-._0123456789") != std::string::npos)
             {
                 // 这里可以记录错误日志
                 throw std::invalid_argument(name);

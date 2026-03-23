@@ -1,0 +1,782 @@
+# Sylar Optimization Notes
+
+## 0. 文档说明
+
+这份文档不是单纯的开发日志，而是按“源码理解 + 性能优化复盘 + 面试表达”三个目标来整理的。
+
+我目前把项目里的优化整理成两个阶段（中间过渡方案不展开）：
+
+| 阶段 | 核心改动 | 主要解决的问题 |
+| --- | --- | --- |
+| 第一阶段 | 协程上下文切换从 `ucontext` 改成手写汇编 | 切换路径太重，单次切换开销高 |
+| 第二阶段（当前终态） | 调度器、IOManager、Timer、hook、`TcpServer` 一体化重构 | 全局锁竞争、共享 `epoll`/wakeup 热点、timer 热点、跨线程语义过松、`accept` 拓扑不清晰 |
+
+### 0.1 阅读建议
+
+如果是为了准备面试，建议按这个顺序读：
+
+1. 第一部分的 `1.1` 和 `1.5`，先拿到“上下文切换为什么快”的主线。
+2. 第二部分的 `2.1`、`2.2`、`2.3`，先拿到“网络层终态怎么设计”的主线。
+3. 第二部分的 `2.4`、`2.6`、`2.8`，看最容易被追问的工程细节和稳定性修复。
+
+### 0.2 关键代码落点
+
+- 协程切换：`sylar/fiber/context.*`、`sylar/fiber/coctx_swap_x86_64.S`
+- 调度器：`sylar/fiber/scheduler.*`
+- IO 事件：`sylar/fiber/iomanager.*`
+- 定时器：`sylar/fiber/timer.*`
+- hook / 等待语义：`sylar/fiber/hook.cc`、`sylar/fiber/fiber.*`
+- 服务端样例：`sylar/net/tcp_server.cc`、`tests/test_tcp_server.cc`
+- benchmark：`tests/test_benchmark_tcp_allocator.cc`、`tests/test_benchmark_fiber.cc`
+
+---
+
+## 第一部分：协程上下文切换优化专题 (2026-03-21)
+
+### 1.1 优化背景与结论
+
+第一阶段做的事情很明确：把协程上下文切换从 `ucontext` 路径改成了手写汇编路径。
+
+目标不是“功能变多”，而是把协程切换这条热路径瘦身：
+
+- 少保存不必要的上下文
+- 少走库层的通用逻辑
+- 让 `resume/yield` 更接近“最小必要切换”
+
+最终结论是：在协作式协程场景里，手写汇编只保存最小必要寄存器集合就够了，而且性能收益非常明显。
+
+### 1.2 协程为什么能“暂停再继续”
+
+协程本质上是“用户态可暂停函数”。  
+它不是被内核抢占，而是在明确的切换点主动让出执行权，比如：
+
+- `Fiber::resume()`
+- `Fiber::yield()`
+- `Fiber::YieldToHold()`
+- `Fiber::YieldToReady()`
+
+之所以能“下次从上次的位置继续”，核心靠两类信息：
+
+1. CPU 现场
+   - 下一条指令在哪里执行
+   - 当前栈顶在哪里
+   - 哪些寄存器值要恢复
+2. 协程自己的栈
+   - 局部变量还在
+   - 函数调用链还在
+   - 返回地址还在
+
+所以恢复协程时，本质上是“把 CPU 看向原来那块栈，并从原来的指令地址继续跑”。
+
+### 1.3 CPU 现场与 `ucontext`
+
+“CPU 现场”可以先粗暴理解成一份“继续执行所需的快照”。
+
+最低限度包括：
+
+- 指令位置
+- 栈顶位置
+- 需要跨函数保存的寄存器
+
+`ucontext_t` 的语义更完整，通常包含：
+
+1. 机器上下文
+2. 栈描述
+3. 后继上下文
+4. 信号屏蔽字
+
+这也是为什么 `ucontext` 适合做“通用用户态上下文机制”，但不适合在高频协程切换里做极致性能方案。  
+它保存得更全，抽象更重，通用性更强，但热路径更长。
+
+### 1.4 当前汇编后端到底保存了什么
+
+当前 `x86_64` 汇编后端保存的是最小必要集合：
+
+1. `rsp`
+2. `rip`
+3. `rbx`
+4. `rbp`
+5. `r12`
+6. `r13`
+7. `r14`
+8. `r15`
+
+这套选择直接对应 `x86_64 SysV ABI` 的“被调用者保存寄存器”集合，再加上控制执行流所必须的 `rsp/rip`。
+
+首次切入协程时，`InitChildContext` 会把：
+
+- `rip` 设成协程入口函数
+- `rsp` 设到协程栈顶
+- 再压一个兜底返回地址
+
+这样第一次切进去时就能直接开始执行。
+
+### 1.5 为什么只保存这些也能正确工作
+
+这个问题是面试里最常见的追问。
+
+核心原因有三个：
+
+#### 1.5.1 这是协作式切换，不是抢占式中断
+
+切换发生在明确的函数调用边界，不是 CPU 在任意一条指令中间被打断。  
+因此不需要像内核抢占那样托管一整套“全量上下文”。
+
+#### 1.5.2 ABI 已经帮我们定义了寄存器责任边界
+
+在 `x86_64 SysV ABI` 下：
+
+- 被调用者保存寄存器要在函数前后保持不变
+- 调用者保存寄存器由调用方自己负责
+
+协程切换函数本质上也是一种“受 ABI 约束的切换边界”，所以只保存被调用者保存集是成立的。
+
+#### 1.5.3 真正的大量业务状态本来就躺在协程栈里
+
+很多人会误以为“协程切换需要把整个函数状态拷来拷去”。其实不用。  
+局部变量、临时值、返回地址、调用链已经天然在协程栈里。
+
+协程切换真正需要做的是：
+
+- 记住从哪条指令继续
+- 记住回到哪块栈
+- 把少量必须恢复的寄存器还原
+
+### 1.6 为什么手写汇编切换更快
+
+性能优势主要来自三点：
+
+#### 1.6.1 保存和恢复的数据更少
+
+`ucontext` 的语义更全，处理的上下文也更多。  
+手写汇编只处理最小必要集合，内存读写明显减少。
+
+#### 1.6.2 调用路径更短
+
+手写汇编几乎就是：
+
+- 固定偏移写寄存器
+- 固定偏移读寄存器
+- `jmp` 到目标地址
+
+没有额外的通用库层语义负担。
+
+#### 1.6.3 场景更专用
+
+`ucontext` 是通用 API，汇编后端是“只服务本项目协程模型”的专用实现。  
+通用性和极致性能往往是互相拉扯的。
+
+#### 1.6.4 当前版本的 microbenchmark 结论
+
+在双 Fiber ping-pong、单线程、绑核条件下，实测数据是：
+
+- `ucontext`：`~264.81 ns/switch(net)`
+- 汇编后端：`~7.03 ns/switch(net)`
+- 加速比：`~37.65x`
+
+这个数量级是符合预期的。
+
+### 1.7 一次真实调用链时序（以 `test_fiber` 为例）
+
+一个典型时序是这样的：
+
+1. 主协程执行 `Fiber::GetThis()`，建立线程主协程。
+2. 创建子协程，分配独立 `m_stack`。
+3. 第一次 `fiber->resume()`，切到子协程栈。
+4. 子协程进入 `Fiber::MainFunc()`，开始执行业务函数。
+5. 业务函数里调用 `YieldToHold()`。
+6. 切回主协程，主协程从 `resume()` 之后继续跑。
+7. 第二次 `resume()`，恢复上次子协程保存的 `rsp/rip`，从上次暂停点继续执行。
+8. 子协程执行结束，状态变成 `TERM`，再切回主协程。
+
+可以把它想成两个独立栈之间来回切换：
+
+```text
+主协程栈:
+  test_fiber()
+    -> fiber->resume()
+    -> resume 返回后的下一行
+
+子协程栈:
+  Fiber::MainFunc()
+    -> user_cb()
+    -> YieldToHold() 之后的位置
+```
+
+### 1.8 `extern "C"` 与 `.S` 文件的关系
+
+像下面这行：
+
+```cpp
+extern "C" void sylar_coctx_swap(Context* from, const Context* to);
+```
+
+它只是声明，不是实现。
+
+它的作用是告诉 C++ 编译器：
+
+- 这个函数符号叫 `sylar_coctx_swap`
+- 参数长这样
+- 按 C 链接方式导出，不做 C++ 名字改编
+
+真正的实现是在汇编文件 `.S` 里。  
+链接阶段，C++ 调用点会和汇编里的全局符号名对上。
+
+### 1.9 看懂 `coctx_swap_x86_64.S` 的最低门槛
+
+只要记住三个前置知识就够了：
+
+1. 第 1 个参数在 `rdi`，第 2 个参数在 `rsi`
+2. 栈向低地址增长
+3. `rsp` 是当前栈顶，`rip` 是下一条指令地址
+
+把 `sylar_coctx_swap` 当成伪代码看，其实就是：
+
+```cpp
+void sylar_coctx_swap(Context* from, const Context* to) {
+    from->rsp = rsp + 8;
+    from->rip = *(void**)rsp;
+    from->rbx = rbx; from->rbp = rbp;
+    from->r12 = r12; from->r13 = r13;
+    from->r14 = r14; from->r15 = r15;
+
+    rbx = to->rbx; rbp = to->rbp;
+    r12 = to->r12; r13 = to->r13;
+    r14 = to->r14; r15 = to->r15;
+    rsp = to->rsp;
+    goto *to->rip;
+}
+```
+
+### 1.10 面试怎么讲
+
+第一部分适合讲成“我先优化协程 runtime 的最热路径”。
+
+一个 30 秒版本：
+
+> 我第一轮优化先不碰业务逻辑，专门处理协程上下文切换这条热路径，把通用 `ucontext` 切换换成了手写汇编实现。原因是这里是协作式切换，不需要保存完整通用上下文，只要保存 `rsp/rip` 和被调用者保存寄存器就够了，所以状态更少、路径更短，实测切换开销有明显下降。
+
+一个 2 分钟版本最好覆盖四点：
+
+1. 为什么 `ucontext` 慢
+   - 通用语义重，保存的信息更多，路径更长。
+2. 为什么汇编方案安全
+   - 这里是受控的协作式切换，不是异步抢占；再加上 ABI 保证，只保存最小集合就成立。
+3. 为什么不是“汇编天然快”
+   - 真正快的原因是 runtime 模型被收窄了，不是因为“手写汇编”四个字本身。
+4. 你真的看过底层吗
+   - 可以把 `coctx_swap` 直接翻成伪代码，说清楚它就是“保存当前上下文、恢复目标上下文、跳到目标 rip”。
+
+这一部分最常见的追问关键词有三个：
+
+- “协作式切换”
+- “callee-saved / caller-saved”
+- “最小保存集合”
+
+---
+
+## 第二部分：协程网络层与调度优化终态 (2026-03-22)
+
+这一部分只描述当前代码已经落地的终态，不展开中间过渡过程。
+
+### 2.1 终态目标与约束
+
+当前阶段的目标可以概括成五条：
+
+1. 主从 Reactor 拓扑明确化（`accept` 与 IO 处理解耦）
+2. 调度与 IO 热路径局部化（每 worker 独立资源）
+3. 跨线程分发负载均衡化（从 RR 升级到 P2C）
+4. 等待语义显式化（`WaitResult + token`）
+5. 停机与短连接场景稳定性补齐
+
+当前代码层面的硬约束：
+
+- `TcpServer` 启动时要求 `accept_worker != io_worker`（不同 `IOManager` 实例）
+- 不再支持“accept/io 共用同一个 IOM”的旧模式
+
+### 2.2 终态拓扑
+
+推荐拓扑（A 案）：
+
+```text
+main thread
+  accept_iom(1, true)
+    runCaller()
+    - accept loop
+    - epoll_0 / eventfd_0 / timer_bucket_0
+
+io worker pool
+  io_iom(N, false)
+    worker_i:
+      - localQueue
+      - mailboxRing(热路径)
+      - mailboxFallback(无界链表兜底)
+      - epoll_i / eventfd_i / timer_bucket_i
+      - handleClient/read/write/timer callbacks
+```
+
+可选拓扑（B 案）：
+
+- 主线程不进入任何 worker run loop，仅做编排；
+- `accept_iom(1, false)` 与 `io_iom(N, false)` 都在后台线程运行。
+
+### 2.3 Scheduler 终态：无全局任务链表 + 命令通道分层
+
+`Scheduler` 的核心结构：
+
+- 每个 worker 本地 `localQueue`
+- 每个 worker 跨线程收件箱分成两层：
+  - `mailboxRing`：有界无锁环形队列（热路径）
+  - `mailboxFallback`：无界无锁链表（ring 满时兜底）
+- 全局计数器：`pending/active/idle`
+
+关键语义（当前实现）：
+
+1. 已去掉 work stealing
+   - worker 不再从其他 worker 的本地队列偷任务。
+2. 普通 `schedule(...)` 强调本地执行
+   - 当 worker 内部把普通任务投到其他 worker 时，降级回本地队列。
+3. 新增 `scheduleCommand(...)` 作为跨线程命令路径
+   - IO 控制命令、owner 执行命令走这个通道。
+
+4. worker 选择从 RR 升级到 P2C（Power of Two Choices）
+   - 未指定 `thread` 的远程投递，不再直接轮询，而是从两个候选 worker 里选 `queuedTasks` 更小的一个。
+   - `queuedTasks` 是每 worker 的原子近似负载：任务入队时增加、任务真正弹出执行时减少。
+   - 保留 caller 语义：caller 未激活时，候选集合仍可跳过 caller worker。
+
+5. 命令邮箱采用“ring 优先 + 链表兜底”
+   - 远程命令优先入 `mailboxRing`（减少 `new/delete` 与指针追踪）。
+   - ring 满时降级到 `mailboxFallback`，语义仍然是不丢任务。
+
+6. 唤醒路径做了“按需唤醒 + idle 前二次检查”
+   - 跨线程入队时，仅当目标 worker 处于 `sleeping=true` 才 `tickle(worker)`。
+   - worker 进入 idle 休眠前，先二次检查本地队列/邮箱/pending，避免“任务刚到但还没 sleep”导致的漏唤醒窗口。
+
+这使得“普通业务任务”与“跨线程控制命令”在语义上分层，避免无限制互投。
+
+P2C 的面试讲法（30 秒）：
+
+- 轮询分发在突发短连接下容易把慢 worker 继续打满；
+- P2C 每次只比较两个候选，但负载均衡效果明显优于纯 RR；
+- 工程上用 `queuedTasks` 做近似指标，成本低、易落地、压测可验证。
+
+### 2.4 IOManager 终态：每 worker 独立 epoll + owner 执行
+
+IO 资源按 worker 分片：
+
+- `WorkerContext{epfd, wakeFd}`
+- 每个 worker 独立 `epoll_wait`
+- `tickle(worker)` 定向唤醒
+
+唤醒优化的直接目的：
+
+- 减少无效 `eventfd` 写入，降低高并发下 wakeup 风暴
+- 降低“过度唤醒 + 空转”带来的系统调用与上下文切换成本
+- 在不引入 work stealing 的前提下，保证跨线程命令投递后的可见性与及时唤醒
+
+fd 事件管理采用 owner 模型：
+
+- `FdContext::ownerWorker` 记录 fd 所属 worker
+- `addEvent/delEvent/cancelEvent/cancelAll` 的核心修改在 owner worker 执行
+- 跨线程转发通过 `scheduleCommand(...) + Semaphore` 同步到 owner 执行
+
+等待恢复路径：
+
+- `triggerEvent()` 写入 `WaitResult`
+- 再通过命令通道恢复 fiber/callback
+
+短连接稳定性补丁（当前已落地）：
+
+- 当 fd 事件清空（`events == NONE`）时，重置 `ownerWorker`
+- `addEvent` 在 `owner invalid` 或 `events == NONE` 时重新绑定 owner
+
+目的：避免 fd 复用沿用旧 owner，导致恢复投递到错误 worker。
+
+### 2.5 Timer 终态：每 worker 分桶最小堆
+
+`TimerManager` 已从全局容器切到 per-worker bucket：
+
+- 每个 worker 一套最小堆
+- timer 带 `worker` 归属
+- `IOManager::idle()` 在事件轮询后处理本 worker 的过期回调
+
+收益不是“单点计时器更快”，而是 timer 与 IO 事件循环天然同 worker 局部化。
+
+### 2.6 Hook / wait 终态：显式等待结果
+
+hook 路径的等待语义：
+
+1. `waitEvent()` 为当前 fiber 生成 `waitToken`
+2. 事件上下文保存 token
+3. `triggerEvent()` 写回 `WAIT_READY/WAIT_TIMEOUT/WAIT_CANCELLED`
+4. fiber 恢复后 `consumeWaitResult(token)` 判定结果
+
+对外仍保持 POSIX 习惯（例如 timeout 对应 `ETIMEDOUT`），但运行时内部语义已经显式化。
+
+### 2.7 TcpServer 与主线程角色
+
+`TcpServer` 终态语义：
+
+- `start()` 显式校验 `accept_worker` 与 `io_worker` 非空且不同实例
+- `stop()` 在 `acceptWorker` 上异步清理监听 socket，确保 accept loop 可退出
+
+主线程角色可以按场景选择：
+
+1. 主线程跑 `accept_worker`（推荐默认）
+   - 更标准的主从 Reactor，接入路径清晰。
+2. 主线程两个都不做
+   - 适合做纯编排/测试驱动。
+
+但无论哪种角色，都不再回到“accept/io 共用同一 IOM”的旧模型。
+
+### 2.8 工程改动落点（终态）
+
+本轮核心改动文件：
+
+- `sylar/fiber/scheduler.*`
+  - 去 stealing、普通跨 worker 投递降级、命令通道 `scheduleCommand(...)`
+  - 负载均衡：`selectWorker` 从 RR 升级到 P2C（基于 `queuedTasks`）
+  - 命令邮箱升级为 `MPSC ring + 无界链表兜底`
+  - 唤醒优化：按 `sleeping` 状态定向 tickle、idle 前二次检查防漏唤醒
+- `sylar/fiber/iomanager.*`
+  - per-worker `epoll/eventfd`、fd owner 执行、owner 生命周期修复
+- `sylar/fiber/timer.*`
+  - per-worker timer bucket
+- `sylar/fiber/hook.cc`、`sylar/fiber/fiber.*`
+  - `WaitResult + token` 等待恢复语义
+- `sylar/net/tcp_server.*`
+  - accept/io worker 分离约束、主从 Reactor 停机路径
+- `tests/test_benchmark_tcp_allocator.cc`、`tests/run_allocator_bench.sh`
+  - A/B 拓扑压测、失败记录与聚合输出
+
+### 2.9 验证与压测结论（当前状态）
+
+验证口径：
+
+- `test_tcp_server`：主从 Reactor 功能路径
+- `test_benchmark_tcp_allocator`：`mode=a|b`、`persistent|short`
+
+全矩阵压测（2026-03-22）：
+
+- 三分配器（baseline/jemalloc/tcmalloc）
+- 两拓扑（A/B）
+- 两负载（persistent/short）
+- 线程集（`io_threads=2,4,8`）
+- `repeat=3`
+
+结果：
+
+- 脚本全矩阵跑通
+- `failures.csv` 无失败行（仅表头）
+- `short` 不再出现此前的 `exit 139` 进程崩溃
+- P2C 版本在同口径矩阵下稳定运行，无新增崩溃/超时
+
+### 2.10 面试怎么讲（终态版）
+
+30 秒版本：
+
+> 第一阶段我把协程切换从 `ucontext` 换成手写汇编，先把最热切换路径降开销。第二阶段我直接把网络层收敛到终态：调度器去全局队列和 stealing，worker 选择从 RR 升级到 P2C，命令通道改成每 worker 的 `MPSC ring` 热路径加无界链表兜底，IOManager 改为每 worker 独立 `epoll/eventfd`，fd 控制统一在 owner worker 执行，等待语义改成 `WaitResult + token`，并把 `TcpServer` 固化为 accept/io 分离的主从 Reactor。同时在调度层做了按需唤醒和 idle 前二次检查，减少唤醒风暴与漏唤醒窗口。最后补了 fd 复用下 owner 生命周期问题，短连接压测稳定通过。
+
+2 分钟版本关键词：
+
+- `hot path slimming`（阶段一）
+- `per-worker resource partitioning`
+- `ownership + command channel`
+- `P2C load balancing over queuedTasks`
+- `explicit wait semantics`
+- `master-sub reactor with clear accept/io boundary`
+
+---
+
+## 第三部分：无锁队列模型与代码模板（理论）
+
+这一部分不绑定具体项目，只讲并发队列模型本身。
+
+### 3.1 六种组合总览
+
+- 环形队列（有界）：
+  - MPSC：多生产者，单消费者
+  - SPMC：单生产者，多消费者
+  - MPMC：多生产者，多消费者
+- 无界链表（无界）：
+  - MPSC：多生产者，单消费者
+  - SPMC：单生产者，多消费者
+  - MPMC：多生产者，多消费者
+
+这六种里，最难的是多消费者侧（`SPMC/MPMC`）的并发出队和安全回收。
+
+### 3.2 MPMC 有界环形队列（代码模板）
+
+```cpp
+template <typename T, size_t CapacityPow2>
+class MpmcBoundedRing {
+    static_assert((CapacityPow2 & (CapacityPow2 - 1)) == 0, "pow2");
+    struct Cell {
+        std::atomic<size_t> seq;
+        T data;
+    };
+
+    static constexpr size_t kMask = CapacityPow2 - 1;
+    alignas(64) Cell buffer_[CapacityPow2];
+    alignas(64) std::atomic<size_t> enqueuePos_{0};
+    alignas(64) std::atomic<size_t> dequeuePos_{0};
+
+public:
+    MpmcBoundedRing() {
+        for (size_t i = 0; i < CapacityPow2; ++i) {
+            buffer_[i].seq.store(i, std::memory_order_relaxed);
+        }
+    }
+
+    bool try_enqueue(T v) {
+        size_t pos = enqueuePos_.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& cell = buffer_[pos & kMask];
+            size_t seq = cell.seq.load(std::memory_order_acquire);
+            intptr_t diff = (intptr_t)seq - (intptr_t)pos;
+            if (diff == 0) {
+                if (enqueuePos_.compare_exchange_weak(
+                        pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                    cell.data = std::move(v);
+                    cell.seq.store(pos + 1, std::memory_order_release);
+                    return true;
+                }
+            } else if (diff < 0) {
+                return false; // full
+            } else {
+                pos = enqueuePos_.load(std::memory_order_relaxed);
+            }
+        }
+    }
+
+    bool try_dequeue(T& out) {
+        size_t pos = dequeuePos_.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& cell = buffer_[pos & kMask];
+            size_t seq = cell.seq.load(std::memory_order_acquire);
+            intptr_t diff = (intptr_t)seq - (intptr_t)(pos + 1);
+            if (diff == 0) {
+                if (dequeuePos_.compare_exchange_weak(
+                        pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                    out = std::move(cell.data);
+                    cell.seq.store(pos + CapacityPow2, std::memory_order_release);
+                    return true;
+                }
+            } else if (diff < 0) {
+                return false; // empty
+            } else {
+                pos = dequeuePos_.load(std::memory_order_relaxed);
+            }
+        }
+    }
+};
+```
+
+### 3.3 MPMC 无界链表队列（代码模板）
+
+```cpp
+template <typename T, typename RetireFn>
+class MpmcUnboundedLinked {
+    struct Node {
+        std::atomic<Node*> next;
+        T value;
+        bool hasValue;
+        Node() : next(nullptr), value(), hasValue(false) {} // dummy
+        explicit Node(T v) : next(nullptr), value(std::move(v)), hasValue(true) {}
+    };
+
+    std::atomic<Node*> head_;
+    std::atomic<Node*> tail_;
+    RetireFn retire_;
+
+public:
+    explicit MpmcUnboundedLinked(RetireFn retire) : retire_(retire) {
+        Node* dummy = new Node();
+        head_.store(dummy, std::memory_order_relaxed);
+        tail_.store(dummy, std::memory_order_relaxed);
+    }
+
+    bool enqueue(T v) {
+        Node* n = new Node(std::move(v));
+        for (;;) {
+            Node* tail = tail_.load(std::memory_order_acquire);
+            Node* next = tail->next.load(std::memory_order_acquire);
+            if (tail != tail_.load(std::memory_order_acquire)) continue;
+            if (next == nullptr) {
+                if (tail->next.compare_exchange_weak(
+                        next, n, std::memory_order_release, std::memory_order_relaxed)) {
+                    tail_.compare_exchange_strong(
+                        tail, n, std::memory_order_release, std::memory_order_relaxed);
+                    return true;
+                }
+            } else {
+                tail_.compare_exchange_weak(
+                    tail, next, std::memory_order_release, std::memory_order_relaxed);
+            }
+        }
+    }
+
+    bool try_dequeue(T& out) {
+        for (;;) {
+            Node* head = head_.load(std::memory_order_acquire);
+            Node* tail = tail_.load(std::memory_order_acquire);
+            Node* next = head->next.load(std::memory_order_acquire);
+            if (head != head_.load(std::memory_order_acquire)) continue;
+            if (next == nullptr) return false; // empty
+            if (head == tail) {
+                tail_.compare_exchange_weak(
+                    tail, next, std::memory_order_release, std::memory_order_relaxed);
+                continue;
+            }
+            T tmp = next->value;
+            if (head_.compare_exchange_weak(
+                    head, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                out = std::move(tmp);
+                retire_(head); // 必须是安全回收（Hazard Pointer / Epoch）
+                return true;
+            }
+        }
+    }
+};
+```
+
+### 3.4 MPSC 的出队代码（因为入队可复用 MPMC 入队侧）
+
+环形队列（MPSC）出队：消费者独占 `dequeuePos`，不再需要 CAS 抢占出队位。
+
+```cpp
+bool try_dequeue_mpsc(T& out) {
+    size_t pos = dequeuePos_.load(std::memory_order_relaxed);
+    Cell& cell = buffer_[pos & kMask];
+    size_t seq = cell.seq.load(std::memory_order_acquire);
+    intptr_t diff = (intptr_t)seq - (intptr_t)(pos + 1);
+    if (diff < 0) return false; // empty
+    out = std::move(cell.data);
+    dequeuePos_.store(pos + 1, std::memory_order_relaxed);
+    cell.seq.store(pos + CapacityPow2, std::memory_order_release);
+    return true;
+}
+```
+
+无界链表（MPSC）出队：单消费者可直接推进 `head`，不需要多消费者 CAS 竞争。
+
+```cpp
+bool try_dequeue_mpsc(T& out) {
+    Node* head = head_.load(std::memory_order_relaxed);
+    Node* next = head->next.load(std::memory_order_acquire);
+    if (!next) return false;
+    out = std::move(next->value);
+    head_.store(next, std::memory_order_relaxed);
+    retire_(head); // 仍需安全回收策略
+    return true;
+}
+```
+
+### 3.5 SPMC 的入队代码（因为出队可复用 MPMC 出队侧）
+
+环形队列（SPMC）入队：生产者独占 `enqueuePos`，不再需要 CAS 抢占入队位。
+
+```cpp
+bool try_enqueue_spmc(T v) {
+    size_t pos = enqueuePos_.load(std::memory_order_relaxed);
+    Cell& cell = buffer_[pos & kMask];
+    size_t seq = cell.seq.load(std::memory_order_acquire);
+    intptr_t diff = (intptr_t)seq - (intptr_t)pos;
+    if (diff < 0) return false; // full
+    cell.data = std::move(v);
+    enqueuePos_.store(pos + 1, std::memory_order_relaxed);
+    cell.seq.store(pos + 1, std::memory_order_release);
+    return true;
+}
+```
+
+无界链表（SPMC）入队：生产者独占尾指针，可顺序 append。
+
+```cpp
+bool enqueue_spmc(T v) {
+    Node* n = new Node(std::move(v));
+    Node* tail = tail_.load(std::memory_order_relaxed);
+    tail->next.store(n, std::memory_order_release);
+    tail_.store(n, std::memory_order_relaxed);
+    return true;
+}
+```
+
+### 3.6 ABA 问题：是什么、在哪出现、怎么解
+
+ABA 的本质是：一个原子值从 `A -> B -> A`，CAS 只看到“还是 A”，却看不到中间语义已经变了。
+
+1. 在有界 ring（sequence-slot）里
+   - 典型实现通常不直接 CAS 指针，而是比较 `seq` 与位置，ABA 风险天然较低。
+   - 真正风险是“序号回绕”导致旧值被误认成新轮次。
+   - 工程做法：`seq` 用足够宽的无符号整型（常见 `uint64_t/size_t`），并保证容量与更新规则正确。
+2. 在无界链表（MS queue）里
+   - 风险集中在 `head/tail/next` 指针 CAS，节点被回收并复用后最容易出现 ABA。
+   - 工程做法：不要裸 `delete`，必须配合安全回收机制。
+3. 常见治理策略
+   - Tagged Pointer（指针+版本号）避免“同地址同版本”误判。
+   - Hazard Pointer（读前发布 hazard，回收前扫描）避免节点被提前释放。
+   - Epoch/RCU（批次延迟回收）把回收延后到所有线程离开旧 epoch。
+
+一句话面试回答：
+“ABA 不是 CAS 指令本身的问题，是对象生命周期与地址复用问题；链表结构必须把 CAS 和内存回收一起设计。”
+
+### 3.7 无锁链表的安全回收（最容易被追问）
+
+如果只讲“CAS 成功就 pop”，但没讲回收，通常会被继续追问。
+
+1. Hazard Pointer
+   - 优点：精确、可实时回收。
+   - 代价：每次读路径需要发布/检查 hazard，代码复杂度较高。
+2. Epoch Based Reclamation
+   - 优点：实现相对简单，吞吐通常更好。
+   - 代价：长尾线程可能拖慢回收，峰值内存上升。
+3. 引用计数
+   - 优点：语义直观。
+   - 代价：原子增减开销大，在高并发队列里往往不是最优。
+
+工程上常见结论是：
+`MPMC` 无界链表通常优先 `Hazard Pointer` 或 `Epoch`，不建议“无保护直接 delete”。
+
+### 3.8 内存序怎么讲（简版）
+
+面试里不需要背标准条文，但要说清“发布-可见”关系：
+
+1. 生产者写数据后用 `release` 发布“可消费标记”（如 ring 的 `seq` 或链表的 `next`）。
+2. 消费者读取可消费标记时用 `acquire`，确保读到的数据体是完整可见的。
+3. 计数器、游标抢位等纯竞争变量可用 `relaxed`，但不能破坏上面两条数据可见性链。
+
+一句话面试回答：
+“我把内存序拆成两类：数据发布链路必须 `release/acquire`，纯竞争元数据尽量 `relaxed`。”
+
+### 3.9 伪共享与缓存抖动
+
+无锁不等于高性能，缓存行为经常是第一瓶颈。
+
+1. `head/tail` 或 `enqueuePos/dequeuePos` 尽量 cache line 对齐分离（常见 `alignas(64)`）。
+2. 高频写热点分散，避免多个线程反复写同一 cache line。
+3. 环形队列优点是连续内存、预取友好；链表缺点是指针跳转与分配器压力。
+
+### 3.10 满队列/空队列语义（有界结构必问）
+
+有界 ring 必须先定义清楚“满了怎么办”，这属于功能语义，不只是性能策略。
+
+1. `try_enqueue` 直接失败（上层重试或降级）。
+2. 阻塞/自旋等待（延迟更不可控，容易放大尾延迟）。
+3. 降级到兜底通道（工程里常见“ring 热路径 + 无界 fallback”）。
+
+面试时要明确说：
+“我优先保证语义正确（不丢任务/可退化），再谈吞吐最优。”
+
+### 3.11 高频追问清单（答题模板）
+
+1. Q: 为什么 `MPSC/SPMC` 不能说成“MPMC 删一半 CAS”？
+   - A: 并发参与者变了，不变量也变了；单侧独占后应重写该侧协议，而不是机械删 CAS。
+2. Q: 线性化点在哪里？
+   - A: ring 通常是发布 `seq` 的那一刻；链表通常是成功链接 `next` 或成功推进 `head` 的 CAS 点。
+3. Q: 无锁是不是一定比加锁快？
+   - A: 不一定。低并发或临界区很短时锁可能更稳，复杂无锁可能输在缓存和回收成本。
+4. Q: 怎么验证你的无锁实现正确？
+   - A: 压测只证明“好像能跑”，还需要模型测试/线性化检查/TSAN/故障注入做并发语义验证。
+5. Q: 怎么选 ring 还是链表？
+   - A: 有界且追求 cache 友好选 ring；需要弹性容量选链表，但必须接受回收复杂度与分配开销。
