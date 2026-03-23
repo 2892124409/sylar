@@ -76,6 +76,12 @@ class HttpSession : public sylar::SocketStream
         return m_context.isRequestTooLarge();
     }
 
+    /// 最近一次解析错误类型
+    HttpRequestParser::ErrorCode getParserErrorCode() const
+    {
+        return m_context.getErrorCode();
+    }
+
   private:
     /// HTTP 请求解析上下文：负责连接级 parser/buffer 状态。
     HttpContext m_context;

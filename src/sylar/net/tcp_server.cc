@@ -206,6 +206,10 @@ namespace sylar
                     {
                         break;
                     }
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        continue;
+                    }
                     SYLAR_LOG_ERROR(g_logger) << "accept errno=" << errno
                                               << " str=" << strerror(errno);
                     // 如果是致命错误（socket已关闭），退出循环

@@ -171,3 +171,12 @@ endif()
 
 add_executable(test_http_server tests/test_http_server.cc)
 target_link_libraries(test_http_server sylar http)
+
+add_executable(test_http_parser tests/test_http_parser.cc)
+target_link_libraries(test_http_parser sylar http)
+
+add_executable(test_fd_manager tests/test_fd_manager.cc)
+target_link_libraries(test_fd_manager sylar)
+
+add_executable(http_bench_server tests/http_bench_server.cc)
+target_link_libraries(http_bench_server sylar http)

@@ -61,6 +61,12 @@ class HttpContext
         return m_parser.isRequestTooLarge();
     }
 
+    /// 最近一次解析错误类型。
+    HttpRequestParser::ErrorCode getErrorCode() const
+    {
+        return m_parser.getErrorCode();
+    }
+
     /// 重置解析器错误状态（通常为调试或显式复位预留）。
     void reset();
 

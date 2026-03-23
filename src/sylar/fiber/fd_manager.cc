@@ -245,13 +245,21 @@ namespace sylar
         // 情况2：fd 在范围内
         else
         {
-            // 如果已存在 或 不需要自动创建，直接返回
-            // m_datas[fd] 可能是 nullptr（从未创建过）或有效指针
-            if (m_datas[fd] || !auto_create)
+            // 如果已有可用上下文，或者调用方不允许创建，直接返回。
+            // 对于已关闭的旧上下文，auto_create=true 时要走重建路径，
+            // 否则 fd 被快速复用时会把新连接误判成“已关闭”。
+            if (m_datas[fd])
             {
-                return m_datas[fd];
+                if (!auto_create || !m_datas[fd]->isClose())
+                {
+                    return m_datas[fd];
+                }
             }
-            // 如果不存在且需要创建，跳到慢速路径
+            else if (!auto_create)
+            {
+                return nullptr;
+            }
+            // 如果不存在，或命中了已关闭的旧上下文且允许创建，跳到慢速路径。
         }
 
         // 手动释放读锁，准备获取写锁
@@ -261,10 +269,6 @@ namespace sylar
         // ========== 慢速路径：写锁保护的创建 ==========
         RWMutexType::WriteLock lock2(m_mutex);
 
-        // 创建新的 FdCtx 对象
-        // 构造函数会自动调用 init() 检测 fd 类型并设置属性
-        FdCtx::ptr ctx(new FdCtx(fd));
-
         // 如果 fd 超出当前容量，需要扩容
         if (fd >= (int)m_datas.size())
         {
@@ -273,6 +277,16 @@ namespace sylar
             // 这样可以减少后续的扩容次数
             m_datas.resize(fd * 1.5);
         }
+
+        // 写锁下再次检查，避免并发创建或复用掉别的线程刚补上的有效上下文。
+        if (m_datas[fd] && !m_datas[fd]->isClose())
+        {
+            return m_datas[fd];
+        }
+
+        // 创建新的 FdCtx 对象
+        // 构造函数会自动调用 init() 检测 fd 类型并设置属性
+        FdCtx::ptr ctx(new FdCtx(fd));
 
         // 将新创建的 FdCtx 存入 vector
         m_datas[fd] = ctx;

@@ -1,0 +1,16 @@
+# HTTP Benchmark Summary
+
+| Tool | Case | Endpoint | Body | Conn | IO Threads | Session | Client Threads | Connections | Duration/Requests | Total Requests | RPS | Avg Latency (ms) | P99 (ms) | Transfer/s | Errors |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| wrk | wrk_ping_io1_c256 | /ping | none | keepalive | 1 | 0 | 8 | 256 | 5s | 130489 | 25584.41 | 9.850 | 13.440 | 2.81MB | 0 |
+| wrk | wrk_ping_io4_c256 | /ping | none | keepalive | 4 | 0 | 8 | 256 | 5s | 251123 | 49239.61 | 5.140 | 9.840 | 5.40MB | 0 |
+| wrk | wrk_ping_io8_c256 | /ping | none | keepalive | 8 | 0 | 8 | 256 | 5s | 322693 | 63732.46 | 3.960 | 8.630 | 6.99MB | 0 |
+| wrk | wrk_ping_io16_c256 | /ping | none | keepalive | 16 | 0 | 8 | 256 | 5s | 246375 | 48434.07 | 5.420 | 17.650 | 5.31MB | 0 |
+| wrk | wrk_ping_c64 | /ping | none | keepalive | 8 | 0 | 8 | 64 | 5s | 249220 | 48871.77 | 1.300 | 2.880 | 5.36MB | 0 |
+| wrk | wrk_ping_c256 | /ping | none | keepalive | 8 | 0 | 8 | 256 | 5s | 312120 | 61226.02 | 4.100 | 8.680 | 6.71MB | 0 |
+| wrk | wrk_ping_c1024 | /ping | none | keepalive | 8 | 0 | 8 | 1024 | 5s | 292111 | 57646.51 | 17.350 | 34.440 | 6.32MB | 0 |
+| wrk | wrk_echo_content_length_c256 | /echo | content-length | keepalive | 8 | 0 | 8 | 256 | 5s | 259655 | 50911.94 | 4.950 | 9.320 | 5.97MB | 0 |
+| wrk | wrk_echo_chunked_c256 | /echo | chunked | keepalive | 8 | 0 | 8 | 256 | 5s | 275627 | 54072.24 | 4.670 | 9.710 | 6.34MB | 0 |
+| wrk | wrk_ping_session_on_c256 | /ping | none | keepalive | 8 | 1 | 8 | 256 | 5s | 214477 | 42052.99 | 6.060 | 13.150 | 6.84MB | 0 |
+| wrk | wrk_ping_short_c256 | /ping | none | short | 8 | 0 | 8 | 256 | 5s | 54543 | 10806.34 | 21.290 | 28.060 | 0.90MB | 0 |
+| wrk | wrk_echo_short_c256 | /echo | content-length | short | 8 | 0 | 8 | 256 | 5s | 226662 | 44830.66 | 5.640 | 11.240 | 5.26MB | 0 |

@@ -212,11 +212,16 @@ void HttpServer::handleClient(sylar::Socket::ptr client)
             if (session->hasParserError())
             {
                 HttpResponse::ptr response = std::make_shared<HttpResponse>();
-                if (session->isRequestTooLarge())
+                HttpRequestParser::ErrorCode error_code = session->getParserErrorCode();
+                if (error_code == HttpRequestParser::ERROR_REQUEST_TOO_LARGE)
                 {
                     response->setStatus(static_cast<HttpStatus>(413));
                     response->setReason("Payload Too Large");
                     ApplyErrorResponse(response, static_cast<HttpStatus>(413), "Payload Too Large", session->getParserError());
+                }
+                else if (error_code == HttpRequestParser::ERROR_NOT_IMPLEMENTED)
+                {
+                    ApplyErrorResponse(response, HttpStatus::NOT_IMPLEMENTED, "Not Implemented", session->getParserError());
                 }
                 else
                 {

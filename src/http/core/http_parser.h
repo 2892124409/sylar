@@ -33,6 +33,7 @@ class HttpRequestParser
         ERROR_NONE = 0,
         ERROR_INVALID_REQUEST,
         ERROR_REQUEST_TOO_LARGE,
+        ERROR_NOT_IMPLEMENTED,
     };
 
     /// 构造一个干净的解析器
@@ -65,6 +66,12 @@ class HttpRequestParser
     bool isRequestTooLarge() const
     {
         return m_errorCode == ERROR_REQUEST_TOO_LARGE;
+    }
+
+    /// 当前错误是否属于框架尚未实现的 HTTP 能力
+    bool isNotImplemented() const
+    {
+        return m_errorCode == ERROR_NOT_IMPLEMENTED;
     }
 
     /// 错误原因字符串，便于调试或返回 400

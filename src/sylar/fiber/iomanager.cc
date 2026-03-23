@@ -688,8 +688,9 @@ namespace sylar
                 {
                     real_events |= WRITE;
                 }
+                real_events &= fd_ctx->events;
 
-                if ((fd_ctx->events & real_events) == NONE)
+                if (real_events == NONE)
                 {
                     continue;
                 }

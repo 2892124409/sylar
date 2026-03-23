@@ -464,13 +464,15 @@ extern "C"
                 }
             }
         }
-        int rt = close_f(fd);
-        if (ctx && (rt == 0 || errno == EBADF))
+
+        // 在真正 close 前先把上下文标记为关闭并从管理器摘除，
+        // 避免 close_f 返回后 fd 立即被复用时，新的连接误命中旧上下文。
+        if (ctx)
         {
             ctx->setClose(true);
             sylar::FdMgr::GetInstance()->del(fd);
         }
-        return rt;
+        return close_f(fd);
     }
 
     int fcntl(int fd, int cmd, ...)
