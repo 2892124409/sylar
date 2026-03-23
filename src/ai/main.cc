@@ -25,7 +25,6 @@
 #include "http/server/http_server.h"
 #include "http/ssl/ssl_config.h"
 #include "log/logger.h"
-#include "sylar/fiber/fiber_framework_config.h"
 #include "sylar/fiber/hook.h"
 #include "sylar/net/address.h"
 
@@ -53,6 +52,9 @@ namespace
 static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 /** @brief 进程停止标志，由信号处理函数置位，主循环轮询读取。 */
 std::atomic<bool> g_stop_requested(false);
+/** @brief IOManager 是否启用 caller 模式。 */
+sylar::ConfigVar<bool>::ptr g_iomanager_use_caller =
+    sylar::Config::Lookup<bool>("iomanager.use_caller", true, "iomanager use_caller");
 
 /**
  * @brief POSIX 信号处理函数，仅设置停止标志。
@@ -80,7 +82,7 @@ bool LoadConfigFromFile(const std::string& config_file, std::string& error)
     try
     {
         YAML::Node node = YAML::LoadFile(config_file);
-        base::Config::LoadFromYaml(node);
+        sylar::Config::LoadFromYaml(node);
         return true;
     }
     catch (const std::exception& ex)
@@ -146,8 +148,8 @@ int main(int argc, char** argv)
     /// 让后续网络/定时等待等阻塞点在 IOManager 线程内可被 fiber 化调度，
     /// 降低“一个阻塞调用占死一个工作线程”的风险。
     sylar::set_hook_enable(true);
-    BASE_LOG_ROOT()->setLevel(base::LogLevel::INFO);
-    BASE_LOG_NAME("system")->setLevel(base::LogLevel::INFO);
+    BASE_LOG_ROOT()->setLevel(sylar::LogLevel::INFO);
+    BASE_LOG_NAME("system")->setLevel(sylar::LogLevel::INFO);
 
     /// @brief Step 1: 解析命令行配置路径并加载 YAML 到全局配置中心。
     std::string config_file = ParseConfigFilePath(argc, argv);
@@ -397,26 +399,27 @@ int main(int argc, char** argv)
     ai::service::ChatService::ptr chat_service(new ai::service::ChatService(
         chat_settings, llm_router, chat_repository, message_sink, rag_settings, rag_retriever, rag_indexer));
 
-    /// @brief Step 9: 按配置创建 HTTP worker（benchmark 同款模式）。
+    /// @brief Step 9: 按配置创建 HTTP worker。
     /// @details
-    /// - use_caller=true: 单 IOM，io/accept 共用同一个调度器。
-    /// - use_caller=false: 双 IOM，accept 与 io 分离。
+    /// TcpServer 约束 accept_worker 与 io_worker 必须是不同实例，因此这里始终分离。
+    /// - use_caller=true: io_worker 由 caller 驱动；accept_worker 独立 worker-only。
+    /// - use_caller=false: io_worker 与 accept_worker 均为 worker-only。
     const uint32_t io_worker_threads = http::HttpFrameworkConfig::GetIOWorkerThreads();
     const uint32_t accept_worker_threads = http::HttpFrameworkConfig::GetAcceptWorkerThreads();
-    const bool use_caller = sylar::FiberFrameworkConfig::GetIOManagerUseCaller();
+    const bool use_caller = g_iomanager_use_caller->getValue();
 
     sylar::IOManager::ptr io_worker;
     sylar::IOManager::ptr accept_worker;
+    const uint32_t effective_accept_threads = accept_worker_threads > 0 ? accept_worker_threads : 1;
     if (use_caller)
     {
-        io_worker.reset(new sylar::IOManager(io_worker_threads, true, "sylar-http-worker"));
-        accept_worker = io_worker;
+        io_worker.reset(new sylar::IOManager(io_worker_threads, true, "sylar-http-io-worker"));
     }
     else
     {
         io_worker.reset(new sylar::IOManager(io_worker_threads, false, "sylar-http-io-worker"));
-        accept_worker.reset(new sylar::IOManager(accept_worker_threads, false, "sylar-http-accept-worker"));
     }
+    accept_worker.reset(new sylar::IOManager(effective_accept_threads, false, "sylar-http-accept-worker"));
 
     /// @brief Step 10: 使用上述 worker 创建 HTTP Server。
     http::HttpServer::ptr server(new http::HttpServer(io_worker.get(), accept_worker.get()));

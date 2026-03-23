@@ -27,10 +27,8 @@ FiberCurlSession::FiberCurlSession(CURL* easy)
     if (m_iom)
     {
         m_wait_fiber = sylar::Fiber::GetThis();
-        if (m_wait_fiber)
-        {
-            m_wait_thread = m_wait_fiber->getBoundThread();
-        }
+        // 新调度器下 Fiber 不再暴露绑定线程，使用 -1 让 IOManager 自行调度恢复。
+        m_wait_thread = -1;
     }
 }
 

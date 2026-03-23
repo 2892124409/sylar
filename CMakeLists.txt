@@ -1,30 +1,44 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.0)
 
-project(sylar LANGUAGES CXX)
-
-include(CTest)
+project(sylar)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 默认未指定构建类型时使用 Debug。
-# 如果要走 Release，建议使用独立构建目录，避免和 Debug 共用缓存：
-#   cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
-#   cmake --build build-release -j
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+# 编译选项（按构建类型控制优化级别）
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -rdynamic -fPIC")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -DNDEBUG")
 
-find_package(Threads REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(yaml-cpp REQUIRED)
+# 协程上下文后端：libco_asm / ucontext
+set(SYLAR_FIBER_CONTEXT_BACKEND "libco_asm" CACHE STRING "Fiber context backend: libco_asm or ucontext")
+set_property(CACHE SYLAR_FIBER_CONTEXT_BACKEND PROPERTY STRINGS libco_asm ucontext)
 
-set(SYLAR_OUTPUT_BIN_DIR "${PROJECT_SOURCE_DIR}/bin")
-set(SYLAR_OUTPUT_LIB_DIR "${PROJECT_SOURCE_DIR}/lib")
+if(SYLAR_FIBER_CONTEXT_BACKEND STREQUAL "libco_asm")
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "libco_asm backend only supports Linux")
+    endif()
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        message(FATAL_ERROR "libco_asm backend only supports x86_64")
+    endif()
+    enable_language(ASM)
+    add_definitions(-DSYLAR_FIBER_CONTEXT_BACKEND_LIBCO_ASM)
+elseif(SYLAR_FIBER_CONTEXT_BACKEND STREQUAL "ucontext")
+    add_definitions(-DSYLAR_FIBER_CONTEXT_BACKEND_UCONTEXT)
+else()
+    message(FATAL_ERROR "Invalid SYLAR_FIBER_CONTEXT_BACKEND: ${SYLAR_FIBER_CONTEXT_BACKEND}")
+endif()
 
+# 包含项目根目录与新源码根目录
+include_directories(.)
+include_directories(src)
+include_directories(src/base)
+
+# 所有的核心模块源文件
 set(SYLAR_SOURCES
     src/base/log/log_level.cc
     src/base/log/log_formatter.cc
@@ -34,10 +48,8 @@ set(SYLAR_SOURCES
     src/base/config/config.cc
     src/sylar/concurrency/mutex/semaphore.cc
     src/sylar/concurrency/thread.cc
-    src/base/memorypool/memory_pool.cpp
     src/sylar/fiber/fiber.cc
-    src/sylar/fiber/fiber_framework_config.cc
-    src/sylar/fiber/fiber_pool.cc
+    src/sylar/fiber/context.cc
     src/sylar/fiber/scheduler.cc
     src/sylar/fiber/iomanager.cc
     src/sylar/fiber/timer.cc
@@ -49,281 +61,122 @@ set(SYLAR_SOURCES
     src/sylar/net/stream.cc
     src/sylar/net/socket_stream.cc
     src/sylar/net/tcp_server.cc
-    src/sylar/net/udp_server.cc
+)
+
+if(SYLAR_FIBER_CONTEXT_BACKEND STREQUAL "libco_asm")
+    list(APPEND SYLAR_SOURCES src/sylar/fiber/coctx_swap_x86_64.S)
+endif()
+
+# 生成共享库 libsylar.so
+add_library(sylar SHARED ${SYLAR_SOURCES})
+
+# 链接库
+target_link_libraries(sylar yaml-cpp pthread dl)
+
+# HTTP 框架源文件
+set(HTTP_SOURCES
     src/http/core/http.cc
+    src/http/core/http_context.cc
+    src/http/core/http_error.cc
+    src/http/core/http_framework_config.cc
+    src/http/core/http_parser.cc
     src/http/core/http_request.cc
     src/http/core/http_response.cc
-    src/http/core/http_memory_pool.cc
-    src/http/core/http_framework_config.cc
-    src/http/core/http_error.cc
-    src/http/ssl/ssl_config.cc
-    src/http/ssl/ssl_context.cc
-    src/http/ssl/ssl_socket.cc
-    src/http/core/http_context.cc
-    src/http/core/http_parser.cc
-    src/http/server/http_session.cc
+    src/http/middleware/cors/cors_config.cc
+    src/http/middleware/cors/cors_middleware.cc
+    src/http/middleware/middleware.cc
     src/http/router/router.cc
     src/http/router/servlet.cc
     src/http/server/http_server.cc
+    src/http/server/http_session.cc
     src/http/session/session.cc
-    src/http/session/session_storage.cc
     src/http/session/session_manager.cc
-    src/http/middleware/middleware.cc
-    src/http/middleware/cors/cors_config.cc
-    src/http/middleware/cors/cors_middleware.cc
+    src/http/session/session_storage.cc
+    src/http/ssl/ssl_config.cc
+    src/http/ssl/ssl_context.cc
+    src/http/ssl/ssl_socket.cc
     src/http/stream/sse.cc
 )
 
-set(SYLAR_PUBLIC_LINK_LIBRARIES Threads::Threads)
-if(TARGET yaml-cpp::yaml-cpp)
-    list(APPEND SYLAR_PUBLIC_LINK_LIBRARIES yaml-cpp::yaml-cpp)
-elseif(TARGET yaml-cpp)
-    list(APPEND SYLAR_PUBLIC_LINK_LIBRARIES yaml-cpp)
-elseif(YAML_CPP_LIBRARIES)
-    list(APPEND SYLAR_PUBLIC_LINK_LIBRARIES ${YAML_CPP_LIBRARIES})
-else()
-    message(FATAL_ERROR "yaml-cpp was found, but no usable target or library variable was exported")
-endif()
+find_package(OpenSSL REQUIRED)
+add_library(http SHARED ${HTTP_SOURCES})
+target_link_libraries(http sylar OpenSSL::SSL OpenSSL::Crypto)
 
-set(SYLAR_PRIVATE_LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
-if(CMAKE_DL_LIBS)
-    list(APPEND SYLAR_PRIVATE_LINK_LIBRARIES ${CMAKE_DL_LIBS})
-endif()
+# 定义输出路径
+set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/bin)
+set(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR}/lib)
 
-add_library(sylar SHARED ${SYLAR_SOURCES})
+# 编译测试程序
+add_executable(test_log tests/test_log.cc)
+target_link_libraries(test_log sylar)
 
-target_include_directories(sylar
-    PUBLIC
-        "${PROJECT_SOURCE_DIR}"
-        "${PROJECT_SOURCE_DIR}/src"
-        "${PROJECT_SOURCE_DIR}/src/base"
-)
+add_executable(test_config tests/test_config.cc)
+target_link_libraries(test_config sylar)
 
-target_link_libraries(sylar
-    PUBLIC
-        ${SYLAR_PUBLIC_LINK_LIBRARIES}
-    PRIVATE
-        ${SYLAR_PRIVATE_LINK_LIBRARIES}
-)
+add_executable(test_thread tests/test_thread.cc)
+target_link_libraries(test_thread sylar)
 
-set_target_properties(sylar PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    LIBRARY_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_LIB_DIR}"
-    ARCHIVE_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_LIB_DIR}"
-    RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_LIB_DIR}"
-)
+add_executable(test_fiber tests/test_fiber.cc)
+target_link_libraries(test_fiber sylar)
 
+add_executable(test_scheduler tests/test_scheduler.cc)
+target_link_libraries(test_scheduler sylar)
+
+add_executable(test_iomanager tests/test_iomanager.cc)
+
+target_link_libraries(test_iomanager sylar)
+
+
+
+add_executable(test_timer tests/test_timer.cc)
+
+target_link_libraries(test_timer sylar)
+
+add_executable(test_hook tests/test_hook.cc)
+
+target_link_libraries(test_hook sylar)
+
+add_executable(test_endian tests/test_endian.cc)
+target_link_libraries(test_endian sylar)
+
+add_executable(test_address tests/test_address.cc)
+target_link_libraries(test_address sylar)
+
+add_executable(test_socket tests/test_socket.cc)
+target_link_libraries(test_socket sylar)
+
+add_executable(test_bytearray tests/test_bytearray.cc)
+target_link_libraries(test_bytearray sylar)
+
+add_executable(test_stream tests/test_stream.cc)
+target_link_libraries(test_stream sylar)
+
+add_executable(test_tcp_server tests/test_tcp_server.cc)
+target_link_libraries(test_tcp_server sylar)
+
+add_executable(test_memorypool tests/test_memorypool.cc)
+target_link_libraries(test_memorypool pthread)
+
+add_executable(test_benchmark_fiber tests/test_benchmark_fiber.cc)
+target_link_libraries(test_benchmark_fiber sylar)
+
+add_executable(test_benchmark_tcp_allocator tests/test_benchmark_tcp_allocator.cc)
+target_link_libraries(test_benchmark_tcp_allocator sylar)
+
+add_executable(test_context_switch_pingpong tests/test_context_switch_pingpong.cc)
+target_link_libraries(test_context_switch_pingpong sylar)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(sylar PRIVATE -Wall)
+    target_compile_options(test_context_switch_pingpong PRIVATE -O3)
 endif()
 
-add_executable(http_bench_server "benchmarks/http/http_bench_server.cc")
-target_link_libraries(http_bench_server PRIVATE sylar)
+add_executable(test_http_server tests/test_http_server.cc)
+target_link_libraries(test_http_server sylar http)
 
-set_target_properties(http_bench_server PROPERTIES
-    BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
-    RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
-)
+add_executable(test_http_parser tests/test_http_parser.cc)
+target_link_libraries(test_http_parser sylar http)
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(http_bench_server PRIVATE -Wall)
-endif()
+add_executable(test_fd_manager tests/test_fd_manager.cc)
+target_link_libraries(test_fd_manager sylar)
 
-option(BUILD_AI_CHAT_SERVER "Build AI chat server application target" OFF)
-
-if(BUILD_AI_CHAT_SERVER)
-    find_package(CURL QUIET)
-    if(NOT CURL_FOUND)
-        message(FATAL_ERROR "BUILD_AI_CHAT_SERVER=ON requires libcurl development files. Install libcurl4-openssl-dev (or equivalent).")
-    endif()
-
-    find_library(MYSQLCLIENT_LIBRARY NAMES mysqlclient)
-    if(NOT MYSQLCLIENT_LIBRARY)
-        message(FATAL_ERROR "BUILD_AI_CHAT_SERVER=ON requires libmysqlclient. Install libmysqlclient-dev (or equivalent).")
-    endif()
-
-    find_library(RABBITMQ_LIBRARY NAMES rabbitmq)
-    if(NOT RABBITMQ_LIBRARY)
-        message(FATAL_ERROR "BUILD_AI_CHAT_SERVER=ON requires librabbitmq. Install librabbitmq-dev (or equivalent).")
-    endif()
-
-    set(AI_CHAT_SERVER_SOURCES
-        src/ai/common/ai_utils.cc
-        src/ai/config/ai_app_config.cc
-        src/ai/http/ai_http_api.cc
-        src/ai/http/ai_http_handlers.cc
-        src/ai/middleware/auth_middleware.cc
-        src/ai/middleware/request_id_middleware.cc
-        src/ai/mq/rabbitmq_amqp_client.cc
-        src/ai/mq/rabbitmq_message_sink.cc
-        src/ai/llm/llm_client_factory.cc
-        src/ai/llm/llm_client_registry.cc
-        src/ai/llm/llm_router.cc
-        src/ai/llm/openai_compatible_client.cc
-        src/ai/llm/provider_key_pool.cc
-        src/ai/llm/anthropic_client.cc
-        src/ai/llm/fiber_curl_session.cc
-        src/ai/rag/rag_http_client.cc
-        src/ai/rag/embedding_client.cc
-        src/ai/rag/vector_store.cc
-        src/ai/rag/rag_retriever.cc
-        src/ai/rag/rag_indexer.cc
-        src/ai/service/auth_service.cc
-        src/ai/service/chat_service.cc
-        src/ai/storage/api_key_pool_repository.cc
-        src/ai/storage/auth_repository.cc
-        src/ai/storage/mysql_connection_pool.cc
-        src/ai/storage/chat_repository.cc
-        src/ai/storage/chat_message_persister.cc
-        src/ai/storage/async_mysql_writer.cc
-        src/ai/main.cc
-    )
-
-    add_executable(ai_chat_server ${AI_CHAT_SERVER_SOURCES})
-    target_link_libraries(ai_chat_server PRIVATE sylar ${MYSQLCLIENT_LIBRARY} ${RABBITMQ_LIBRARY} OpenSSL::Crypto)
-
-    if(TARGET CURL::libcurl)
-        target_link_libraries(ai_chat_server PRIVATE CURL::libcurl)
-    else()
-        target_include_directories(ai_chat_server PRIVATE ${CURL_INCLUDE_DIRS})
-        target_link_libraries(ai_chat_server PRIVATE ${CURL_LIBRARIES})
-    endif()
-
-    set_target_properties(ai_chat_server PROPERTIES
-        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
-    )
-
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(ai_chat_server PRIVATE -Wall)
-    endif()
-
-    add_executable(ai_auth_chat_client
-        src/ai/client/auth_chat_client.cc
-    )
-    if(TARGET CURL::libcurl)
-        target_link_libraries(ai_auth_chat_client PRIVATE CURL::libcurl)
-    else()
-        target_include_directories(ai_auth_chat_client PRIVATE ${CURL_INCLUDE_DIRS})
-        target_link_libraries(ai_auth_chat_client PRIVATE ${CURL_LIBRARIES})
-    endif()
-    set_target_properties(ai_auth_chat_client PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
-    )
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(ai_auth_chat_client PRIVATE -Wall)
-    endif()
-
-    add_executable(ai_mq_consumer
-        src/ai/common/ai_utils.cc
-        src/ai/config/ai_app_config.cc
-        src/ai/mq/rabbitmq_amqp_client.cc
-        src/ai/mq/main_mq_consumer.cc
-        src/ai/storage/chat_message_persister.cc
-        src/ai/storage/mysql_connection_pool.cc
-    )
-    target_link_libraries(ai_mq_consumer PRIVATE sylar ${MYSQLCLIENT_LIBRARY} ${RABBITMQ_LIBRARY} OpenSSL::Crypto)
-    set_target_properties(ai_mq_consumer PROPERTIES
-        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
-    )
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(ai_mq_consumer PRIVATE -Wall)
-    endif()
-endif()
-
-function(add_sylar_test target_name)
-    add_executable(${target_name} "tests/${target_name}.cc")
-    target_link_libraries(${target_name} PRIVATE sylar)
-
-    set_target_properties(${target_name} PROPERTIES
-        ENABLE_EXPORTS ON
-        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
-    )
-
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(${target_name} PRIVATE -Wall)
-    endif()
-
-    add_test(NAME ${target_name} COMMAND ${target_name})
-endfunction()
-
-if(BUILD_TESTING)
-    set(SYLAR_TESTS
-        test_log
-        test_config
-        test_thread
-        test_fiber
-        test_scheduler
-        test_fiber_pool
-        test_iomanager
-        test_timer
-        test_hook
-        test_hook_timeout_mt
-        test_endian
-        test_address
-        test_socket
-        test_bytearray
-        test_stream
-        test_tcp_server
-        test_udp_server
-        test_server_mode_bench
-        test_http_parser
-        test_http_context
-        test_http_router
-        test_http_server
-        test_http_ssl_server
-        test_cors_middleware
-        test_http_dispatch
-        test_http_framework_config
-        test_memory_pool
-        test_session_manager
-        test_sse_writer
-        test_sse_server
-        test_shared_stack_helpers
-        test_shared_stack_scheduler
-        test_shared_stack_scheduler_mt
-        test_shared_stack_stress
-        test_shared_stack_guard
-        test_shared_stack_lifecycle
-        test_shared_stack_longrun
-        test_shared_stack_workeronly
-        test_bytearray_pool_perf
-    )
-
-    foreach(test_name IN LISTS SYLAR_TESTS)
-        add_sylar_test(${test_name})
-    endforeach()
-
-    add_executable(test_ai_chat_service
-        tests/test_ai_chat_service.cc
-        src/ai/common/ai_utils.cc
-        src/ai/service/chat_service.cc
-    )
-    target_link_libraries(test_ai_chat_service PRIVATE sylar)
-    set_target_properties(test_ai_chat_service PROPERTIES
-        ENABLE_EXPORTS ON
-        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
-    )
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(test_ai_chat_service PRIVATE -Wall)
-    endif()
-    add_test(NAME test_ai_chat_service COMMAND test_ai_chat_service)
-
-    add_executable(test_rag_indexer
-        tests/test_rag_indexer.cc
-        src/ai/rag/rag_indexer.cc
-    )
-    target_link_libraries(test_rag_indexer PRIVATE sylar)
-    set_target_properties(test_rag_indexer PROPERTIES
-        ENABLE_EXPORTS ON
-        BUILD_RPATH "${SYLAR_OUTPUT_LIB_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${SYLAR_OUTPUT_BIN_DIR}"
-    )
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(test_rag_indexer PRIVATE -Wall)
-    endif()
-    add_test(NAME test_rag_indexer COMMAND test_rag_indexer)
-endif()
+add_executable(http_bench_server tests/http_bench_server.cc)
+target_link_libraries(http_bench_server sylar http)

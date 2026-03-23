@@ -40,8 +40,9 @@ int main()
     sylar::set_hook_enable(true);
     std::string fixture_dir = PrepareSslFixtures();
 
-    sylar::IOManager iom(2, true, "http_ssl_test");
-    http::HttpServer::ptr server(new http::HttpServer(&iom, &iom));
+    sylar::IOManager io_iom(2, true, "http_ssl_test_io");
+    sylar::IOManager accept_iom(1, false, "http_ssl_test_accept");
+    http::HttpServer::ptr server(new http::HttpServer(&io_iom, &accept_iom));
     http::ssl::SslConfig config;
     config.setCertificateFile(fixture_dir + "/server.crt");
     config.setPrivateKeyFile(fixture_dir + "/server.key");
@@ -61,7 +62,7 @@ int main()
     assert(server->bind(addrs, fails));
     assert(server->start());
 
-    iom.schedule([]()
+    io_iom.schedule([]()
                  {
         sleep(1);
         http::ssl::SslConfig client_config;
@@ -80,7 +81,7 @@ int main()
         assert(rsp.find("secure-pong") != std::string::npos);
         stream.close(); });
 
-    iom.schedule([server]()
+    io_iom.schedule([server]()
                  {
         sleep(2);
         server->stop(); });

@@ -5,6 +5,9 @@
 #include <atomic>
 #include <thread>
 
+using sylar::Config;
+using sylar::ConfigVar;
+
 namespace http
 {
 

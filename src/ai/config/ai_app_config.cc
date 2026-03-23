@@ -16,287 +16,287 @@ namespace config
 namespace
 {
 
-http::ConfigVar<std::string>::ptr g_ai_server_host =
-    http::Config::Lookup<std::string>("ai.server.host", "0.0.0.0", "ai server bind host");
+sylar::ConfigVar<std::string>::ptr g_ai_server_host =
+    sylar::Config::Lookup<std::string>("ai.server.host", "0.0.0.0", "ai server bind host");
 
-http::ConfigVar<uint32_t>::ptr g_ai_server_port =
-    http::Config::Lookup<uint32_t>("ai.server.port", 8080, "ai server bind port");
+sylar::ConfigVar<uint32_t>::ptr g_ai_server_port =
+    sylar::Config::Lookup<uint32_t>("ai.server.port", 8080, "ai server bind port");
 
-http::ConfigVar<bool>::ptr g_ai_server_enable_ssl =
-    http::Config::Lookup<bool>("ai.server.enable_ssl", false, "ai server ssl enabled");
+sylar::ConfigVar<bool>::ptr g_ai_server_enable_ssl =
+    sylar::Config::Lookup<bool>("ai.server.enable_ssl", false, "ai server ssl enabled");
 
-http::ConfigVar<std::string>::ptr g_ai_server_ssl_cert_file =
-    http::Config::Lookup<std::string>("ai.server.ssl_cert_file", "", "ai server ssl cert file path");
+sylar::ConfigVar<std::string>::ptr g_ai_server_ssl_cert_file =
+    sylar::Config::Lookup<std::string>("ai.server.ssl_cert_file", "", "ai server ssl cert file path");
 
-http::ConfigVar<std::string>::ptr g_ai_server_ssl_key_file =
-    http::Config::Lookup<std::string>("ai.server.ssl_key_file", "", "ai server ssl key file path");
+sylar::ConfigVar<std::string>::ptr g_ai_server_ssl_key_file =
+    sylar::Config::Lookup<std::string>("ai.server.ssl_key_file", "", "ai server ssl key file path");
 
-http::ConfigVar<std::string>::ptr g_ai_provider_type =
-    http::Config::Lookup<std::string>("ai.provider.type", "openai_compatible", "ai provider type");
+sylar::ConfigVar<std::string>::ptr g_ai_provider_type =
+    sylar::Config::Lookup<std::string>("ai.provider.type", "openai_compatible", "ai provider type");
 
-http::ConfigVar<std::string>::ptr g_ai_llm_providers_yaml =
-    http::Config::Lookup<std::string>("ai.llm.providers", "[]", "llm provider list");
+sylar::ConfigVar<std::string>::ptr g_ai_llm_providers_yaml =
+    sylar::Config::Lookup<std::string>("ai.llm.providers", "[]", "llm provider list");
 
-http::ConfigVar<std::string>::ptr g_ai_llm_routing_default_provider_id =
-    http::Config::Lookup<std::string>("ai.llm.routing.default_provider_id", "", "llm default provider id");
+sylar::ConfigVar<std::string>::ptr g_ai_llm_routing_default_provider_id =
+    sylar::Config::Lookup<std::string>("ai.llm.routing.default_provider_id", "", "llm default provider id");
 
-http::ConfigVar<std::unordered_map<std::string, std::string>>::ptr g_ai_llm_routing_model_map =
-    http::Config::Lookup<std::unordered_map<std::string, std::string>>("ai.llm.routing.model_map",
+sylar::ConfigVar<std::unordered_map<std::string, std::string>>::ptr g_ai_llm_routing_model_map =
+    sylar::Config::Lookup<std::unordered_map<std::string, std::string>>("ai.llm.routing.model_map",
                                                                         std::unordered_map<std::string, std::string>(),
                                                                         "llm model to provider map");
 
 // OpenAI-Compatible 配置键：ai.openai_compatible.*
-http::ConfigVar<std::string>::ptr g_ai_openai_base_url =
-    http::Config::Lookup<std::string>("ai.openai_compatible.base_url", "", "openai-compatible base url");
+sylar::ConfigVar<std::string>::ptr g_ai_openai_base_url =
+    sylar::Config::Lookup<std::string>("ai.openai_compatible.base_url", "", "openai-compatible base url");
 
-http::ConfigVar<std::string>::ptr g_ai_openai_api_key =
-    http::Config::Lookup<std::string>("ai.openai_compatible.api_key", "", "openai-compatible api key");
+sylar::ConfigVar<std::string>::ptr g_ai_openai_api_key =
+    sylar::Config::Lookup<std::string>("ai.openai_compatible.api_key", "", "openai-compatible api key");
 
-http::ConfigVar<std::string>::ptr g_ai_openai_default_model =
-    http::Config::Lookup<std::string>("ai.openai_compatible.default_model", "", "openai-compatible default model");
+sylar::ConfigVar<std::string>::ptr g_ai_openai_default_model =
+    sylar::Config::Lookup<std::string>("ai.openai_compatible.default_model", "", "openai-compatible default model");
 
-http::ConfigVar<uint64_t>::ptr g_ai_openai_connect_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.openai_compatible.connect_timeout_ms", 3000, "openai-compatible connect timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_openai_connect_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.openai_compatible.connect_timeout_ms", 3000, "openai-compatible connect timeout ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_openai_request_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.openai_compatible.request_timeout_ms", 120000, "openai-compatible request timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_openai_request_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.openai_compatible.request_timeout_ms", 120000, "openai-compatible request timeout ms");
 
-http::ConfigVar<bool>::ptr g_ai_openai_key_pool_enabled =
-    http::Config::Lookup<bool>("ai.openai_compatible.key_pool.enabled", false, "openai-compatible key pool enabled");
+sylar::ConfigVar<bool>::ptr g_ai_openai_key_pool_enabled =
+    sylar::Config::Lookup<bool>("ai.openai_compatible.key_pool.enabled", false, "openai-compatible key pool enabled");
 
-http::ConfigVar<bool>::ptr g_ai_openai_key_pool_hot_reload_enabled =
-    http::Config::Lookup<bool>("ai.openai_compatible.key_pool.hot_reload_enabled", true, "openai-compatible key pool hot reload enabled");
+sylar::ConfigVar<bool>::ptr g_ai_openai_key_pool_hot_reload_enabled =
+    sylar::Config::Lookup<bool>("ai.openai_compatible.key_pool.hot_reload_enabled", true, "openai-compatible key pool hot reload enabled");
 
-http::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_reload_interval_ms =
-    http::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.reload_interval_ms", 5000, "openai-compatible key pool reload interval ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_reload_interval_ms =
+    sylar::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.reload_interval_ms", 5000, "openai-compatible key pool reload interval ms");
 
-http::ConfigVar<uint32_t>::ptr g_ai_openai_key_pool_max_retry_per_request =
-    http::Config::Lookup<uint32_t>("ai.openai_compatible.key_pool.max_retry_per_request", 2, "openai-compatible key pool max retry per request");
+sylar::ConfigVar<uint32_t>::ptr g_ai_openai_key_pool_max_retry_per_request =
+    sylar::Config::Lookup<uint32_t>("ai.openai_compatible.key_pool.max_retry_per_request", 2, "openai-compatible key pool max retry per request");
 
-http::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_cooldown_short_ms =
-    http::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.cooldown_short_ms", 60000, "openai-compatible key pool short cooldown ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_cooldown_short_ms =
+    sylar::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.cooldown_short_ms", 60000, "openai-compatible key pool short cooldown ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_cooldown_long_ms =
-    http::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.cooldown_long_ms", 600000, "openai-compatible key pool long cooldown ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_openai_key_pool_cooldown_long_ms =
+    sylar::Config::Lookup<uint64_t>("ai.openai_compatible.key_pool.cooldown_long_ms", 600000, "openai-compatible key pool long cooldown ms");
 
-http::ConfigVar<std::string>::ptr g_ai_anthropic_base_url =
-    http::Config::Lookup<std::string>("ai.anthropic.base_url", "https://api.anthropic.com", "anthropic base url");
+sylar::ConfigVar<std::string>::ptr g_ai_anthropic_base_url =
+    sylar::Config::Lookup<std::string>("ai.anthropic.base_url", "https://api.anthropic.com", "anthropic base url");
 
-http::ConfigVar<std::string>::ptr g_ai_anthropic_api_key =
-    http::Config::Lookup<std::string>("ai.anthropic.api_key", "", "anthropic api key");
+sylar::ConfigVar<std::string>::ptr g_ai_anthropic_api_key =
+    sylar::Config::Lookup<std::string>("ai.anthropic.api_key", "", "anthropic api key");
 
-http::ConfigVar<std::string>::ptr g_ai_anthropic_default_model =
-    http::Config::Lookup<std::string>("ai.anthropic.default_model", "", "anthropic default model");
+sylar::ConfigVar<std::string>::ptr g_ai_anthropic_default_model =
+    sylar::Config::Lookup<std::string>("ai.anthropic.default_model", "", "anthropic default model");
 
-http::ConfigVar<std::string>::ptr g_ai_anthropic_api_version =
-    http::Config::Lookup<std::string>("ai.anthropic.api_version", "2023-06-01", "anthropic api version");
+sylar::ConfigVar<std::string>::ptr g_ai_anthropic_api_version =
+    sylar::Config::Lookup<std::string>("ai.anthropic.api_version", "2023-06-01", "anthropic api version");
 
-http::ConfigVar<uint64_t>::ptr g_ai_anthropic_connect_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.anthropic.connect_timeout_ms", 3000, "anthropic connect timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_anthropic_connect_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.anthropic.connect_timeout_ms", 3000, "anthropic connect timeout ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_anthropic_request_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.anthropic.request_timeout_ms", 120000, "anthropic request timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_anthropic_request_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.anthropic.request_timeout_ms", 120000, "anthropic request timeout ms");
 
-http::ConfigVar<bool>::ptr g_ai_chat_require_sid =
-    http::Config::Lookup<bool>("ai.chat.require_sid", true, "whether sid is required");
+sylar::ConfigVar<bool>::ptr g_ai_chat_require_sid =
+    sylar::Config::Lookup<bool>("ai.chat.require_sid", true, "whether sid is required");
 
-http::ConfigVar<uint64_t>::ptr g_ai_chat_max_context_messages =
-    http::Config::Lookup<uint64_t>("ai.chat.max_context_messages", 20, "max messages kept in memory context");
+sylar::ConfigVar<uint64_t>::ptr g_ai_chat_max_context_messages =
+    sylar::Config::Lookup<uint64_t>("ai.chat.max_context_messages", 20, "max messages kept in memory context");
 
-http::ConfigVar<uint64_t>::ptr g_ai_chat_history_load_limit =
-    http::Config::Lookup<uint64_t>("ai.chat.history_load_limit", 20, "history count loaded for context hydration");
+sylar::ConfigVar<uint64_t>::ptr g_ai_chat_history_load_limit =
+    sylar::Config::Lookup<uint64_t>("ai.chat.history_load_limit", 20, "history count loaded for context hydration");
 
-http::ConfigVar<uint64_t>::ptr g_ai_chat_history_query_limit_max =
-    http::Config::Lookup<uint64_t>("ai.chat.history_query_limit_max", 200, "max history query limit");
+sylar::ConfigVar<uint64_t>::ptr g_ai_chat_history_query_limit_max =
+    sylar::Config::Lookup<uint64_t>("ai.chat.history_query_limit_max", 200, "max history query limit");
 
-http::ConfigVar<uint64_t>::ptr g_ai_chat_max_context_tokens =
-    http::Config::Lookup<uint64_t>("ai.chat.max_context_tokens", 4096, "max prompt context tokens by heuristic");
+sylar::ConfigVar<uint64_t>::ptr g_ai_chat_max_context_tokens =
+    sylar::Config::Lookup<uint64_t>("ai.chat.max_context_tokens", 4096, "max prompt context tokens by heuristic");
 
-http::ConfigVar<uint64_t>::ptr g_ai_chat_recent_window_messages =
-    http::Config::Lookup<uint64_t>("ai.chat.recent_window_messages", 20, "recent window message count after summarization");
+sylar::ConfigVar<uint64_t>::ptr g_ai_chat_recent_window_messages =
+    sylar::Config::Lookup<uint64_t>("ai.chat.recent_window_messages", 20, "recent window message count after summarization");
 
-http::ConfigVar<uint64_t>::ptr g_ai_chat_summary_trigger_tokens =
-    http::Config::Lookup<uint64_t>("ai.chat.summary_trigger_tokens", 3072, "token threshold to trigger summarization");
+sylar::ConfigVar<uint64_t>::ptr g_ai_chat_summary_trigger_tokens =
+    sylar::Config::Lookup<uint64_t>("ai.chat.summary_trigger_tokens", 3072, "token threshold to trigger summarization");
 
-http::ConfigVar<uint32_t>::ptr g_ai_chat_summary_max_tokens =
-    http::Config::Lookup<uint32_t>("ai.chat.summary_max_tokens", 512, "max tokens for summary generation");
+sylar::ConfigVar<uint32_t>::ptr g_ai_chat_summary_max_tokens =
+    sylar::Config::Lookup<uint32_t>("ai.chat.summary_max_tokens", 512, "max tokens for summary generation");
 
-http::ConfigVar<double>::ptr g_ai_chat_default_temperature =
-    http::Config::Lookup<double>("ai.chat.default_temperature", 0.7, "default model temperature");
+sylar::ConfigVar<double>::ptr g_ai_chat_default_temperature =
+    sylar::Config::Lookup<double>("ai.chat.default_temperature", 0.7, "default model temperature");
 
-http::ConfigVar<uint32_t>::ptr g_ai_chat_default_max_tokens =
-    http::Config::Lookup<uint32_t>("ai.chat.default_max_tokens", 1024, "default max tokens");
+sylar::ConfigVar<uint32_t>::ptr g_ai_chat_default_max_tokens =
+    sylar::Config::Lookup<uint32_t>("ai.chat.default_max_tokens", 1024, "default max tokens");
 
-http::ConfigVar<std::string>::ptr g_ai_chat_system_prompt =
-    http::Config::Lookup<std::string>("ai.chat.system_prompt", "", "default system prompt");
+sylar::ConfigVar<std::string>::ptr g_ai_chat_system_prompt =
+    sylar::Config::Lookup<std::string>("ai.chat.system_prompt", "", "default system prompt");
 
-http::ConfigVar<std::string>::ptr g_ai_chat_summary_prompt =
-    http::Config::Lookup<std::string>(
+sylar::ConfigVar<std::string>::ptr g_ai_chat_summary_prompt =
+    sylar::Config::Lookup<std::string>(
         "ai.chat.summary_prompt",
         "你是对话摘要助手。请把旧对话压缩成简洁、可延续上下文的中文摘要，保留人物偏好、事实、约束、未完成任务。",
         "summary prompt");
 
-http::ConfigVar<uint64_t>::ptr g_ai_auth_token_ttl_seconds =
-    http::Config::Lookup<uint64_t>("ai.auth.token_ttl_seconds", 2592000, "auth token ttl seconds");
+sylar::ConfigVar<uint64_t>::ptr g_ai_auth_token_ttl_seconds =
+    sylar::Config::Lookup<uint64_t>("ai.auth.token_ttl_seconds", 2592000, "auth token ttl seconds");
 
-http::ConfigVar<uint32_t>::ptr g_ai_auth_password_pbkdf2_iterations =
-    http::Config::Lookup<uint32_t>("ai.auth.password_pbkdf2_iterations", 150000, "password pbkdf2 iterations");
+sylar::ConfigVar<uint32_t>::ptr g_ai_auth_password_pbkdf2_iterations =
+    sylar::Config::Lookup<uint32_t>("ai.auth.password_pbkdf2_iterations", 150000, "password pbkdf2 iterations");
 
-http::ConfigVar<std::string>::ptr g_ai_mysql_host =
-    http::Config::Lookup<std::string>("ai.mysql.host", "127.0.0.1", "mysql host");
+sylar::ConfigVar<std::string>::ptr g_ai_mysql_host =
+    sylar::Config::Lookup<std::string>("ai.mysql.host", "127.0.0.1", "mysql host");
 
-http::ConfigVar<uint32_t>::ptr g_ai_mysql_port =
-    http::Config::Lookup<uint32_t>("ai.mysql.port", 3306, "mysql port");
+sylar::ConfigVar<uint32_t>::ptr g_ai_mysql_port =
+    sylar::Config::Lookup<uint32_t>("ai.mysql.port", 3306, "mysql port");
 
-http::ConfigVar<std::string>::ptr g_ai_mysql_user =
-    http::Config::Lookup<std::string>("ai.mysql.user", "root", "mysql user");
+sylar::ConfigVar<std::string>::ptr g_ai_mysql_user =
+    sylar::Config::Lookup<std::string>("ai.mysql.user", "root", "mysql user");
 
-http::ConfigVar<std::string>::ptr g_ai_mysql_password =
-    http::Config::Lookup<std::string>("ai.mysql.password", "", "mysql password");
+sylar::ConfigVar<std::string>::ptr g_ai_mysql_password =
+    sylar::Config::Lookup<std::string>("ai.mysql.password", "", "mysql password");
 
-http::ConfigVar<std::string>::ptr g_ai_mysql_database =
-    http::Config::Lookup<std::string>("ai.mysql.database", "ai_chat", "mysql database");
+sylar::ConfigVar<std::string>::ptr g_ai_mysql_database =
+    sylar::Config::Lookup<std::string>("ai.mysql.database", "ai_chat", "mysql database");
 
-http::ConfigVar<std::string>::ptr g_ai_mysql_charset =
-    http::Config::Lookup<std::string>("ai.mysql.charset", "utf8mb4", "mysql charset");
+sylar::ConfigVar<std::string>::ptr g_ai_mysql_charset =
+    sylar::Config::Lookup<std::string>("ai.mysql.charset", "utf8mb4", "mysql charset");
 
-http::ConfigVar<uint32_t>::ptr g_ai_mysql_connect_timeout_seconds =
-    http::Config::Lookup<uint32_t>("ai.mysql.connect_timeout_seconds", 5, "mysql connect timeout seconds");
+sylar::ConfigVar<uint32_t>::ptr g_ai_mysql_connect_timeout_seconds =
+    sylar::Config::Lookup<uint32_t>("ai.mysql.connect_timeout_seconds", 5, "mysql connect timeout seconds");
 
-http::ConfigVar<uint64_t>::ptr g_ai_mysql_pool_min_size =
-    http::Config::Lookup<uint64_t>("ai.mysql.pool_min_size", 2, "mysql connection pool minimum size");
+sylar::ConfigVar<uint64_t>::ptr g_ai_mysql_pool_min_size =
+    sylar::Config::Lookup<uint64_t>("ai.mysql.pool_min_size", 2, "mysql connection pool minimum size");
 
-http::ConfigVar<uint64_t>::ptr g_ai_mysql_pool_max_size =
-    http::Config::Lookup<uint64_t>("ai.mysql.pool_max_size", 8, "mysql connection pool maximum size");
+sylar::ConfigVar<uint64_t>::ptr g_ai_mysql_pool_max_size =
+    sylar::Config::Lookup<uint64_t>("ai.mysql.pool_max_size", 8, "mysql connection pool maximum size");
 
-http::ConfigVar<uint64_t>::ptr g_ai_mysql_pool_acquire_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.mysql.pool_acquire_timeout_ms", 3000, "mysql connection pool acquire timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_mysql_pool_acquire_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.mysql.pool_acquire_timeout_ms", 3000, "mysql connection pool acquire timeout ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_persist_queue_capacity =
-    http::Config::Lookup<uint64_t>("ai.persist.queue_capacity", 10000, "persist queue capacity");
+sylar::ConfigVar<uint64_t>::ptr g_ai_persist_queue_capacity =
+    sylar::Config::Lookup<uint64_t>("ai.persist.queue_capacity", 10000, "persist queue capacity");
 
-http::ConfigVar<uint64_t>::ptr g_ai_persist_flush_interval_ms =
-    http::Config::Lookup<uint64_t>("ai.persist.flush_interval_ms", 200, "persist flush interval ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_persist_flush_interval_ms =
+    sylar::Config::Lookup<uint64_t>("ai.persist.flush_interval_ms", 200, "persist flush interval ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_persist_batch_size =
-    http::Config::Lookup<uint64_t>("ai.persist.batch_size", 128, "persist batch size");
+sylar::ConfigVar<uint64_t>::ptr g_ai_persist_batch_size =
+    sylar::Config::Lookup<uint64_t>("ai.persist.batch_size", 128, "persist batch size");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_enabled =
-    http::Config::Lookup<std::string>("ai.mq.enabled", "false", "mq write path enabled");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_enabled =
+    sylar::Config::Lookup<std::string>("ai.mq.enabled", "false", "mq write path enabled");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_provider =
-    http::Config::Lookup<std::string>("ai.mq.provider", "rabbitmq_amqp", "mq provider type");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_provider =
+    sylar::Config::Lookup<std::string>("ai.mq.provider", "rabbitmq_amqp", "mq provider type");
 
-http::ConfigVar<uint64_t>::ptr g_ai_mq_producer_queue_capacity =
-    http::Config::Lookup<uint64_t>("ai.mq.producer_queue_capacity", 10000, "mq producer local queue capacity");
+sylar::ConfigVar<uint64_t>::ptr g_ai_mq_producer_queue_capacity =
+    sylar::Config::Lookup<uint64_t>("ai.mq.producer_queue_capacity", 10000, "mq producer local queue capacity");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_fallback_to_local_writer =
-    http::Config::Lookup<std::string>("ai.mq.fallback_to_local_writer", "true", "fallback to local async writer when mq unavailable");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_fallback_to_local_writer =
+    sylar::Config::Lookup<std::string>("ai.mq.fallback_to_local_writer", "true", "fallback to local async writer when mq unavailable");
 
-http::ConfigVar<uint64_t>::ptr g_ai_mq_consumer_batch_size =
-    http::Config::Lookup<uint64_t>("ai.mq.consumer_batch_size", 64, "mq consumer pull batch size");
+sylar::ConfigVar<uint64_t>::ptr g_ai_mq_consumer_batch_size =
+    sylar::Config::Lookup<uint64_t>("ai.mq.consumer_batch_size", 64, "mq consumer pull batch size");
 
-http::ConfigVar<uint64_t>::ptr g_ai_mq_consumer_poll_interval_ms =
-    http::Config::Lookup<uint64_t>("ai.mq.consumer_poll_interval_ms", 200, "mq consumer poll interval ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_mq_consumer_poll_interval_ms =
+    sylar::Config::Lookup<uint64_t>("ai.mq.consumer_poll_interval_ms", 200, "mq consumer poll interval ms");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_host =
-    http::Config::Lookup<std::string>("ai.mq.rabbitmq.host", "127.0.0.1", "rabbitmq host");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_rabbit_host =
+    sylar::Config::Lookup<std::string>("ai.mq.rabbitmq.host", "127.0.0.1", "rabbitmq host");
 
-http::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_port =
-    http::Config::Lookup<uint32_t>("ai.mq.rabbitmq.port", 5672, "rabbitmq amqp port");
+sylar::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_port =
+    sylar::Config::Lookup<uint32_t>("ai.mq.rabbitmq.port", 5672, "rabbitmq amqp port");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_username =
-    http::Config::Lookup<std::string>("ai.mq.rabbitmq.username", "guest", "rabbitmq username");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_rabbit_username =
+    sylar::Config::Lookup<std::string>("ai.mq.rabbitmq.username", "guest", "rabbitmq username");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_password =
-    http::Config::Lookup<std::string>("ai.mq.rabbitmq.password", "guest", "rabbitmq password");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_rabbit_password =
+    sylar::Config::Lookup<std::string>("ai.mq.rabbitmq.password", "guest", "rabbitmq password");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_vhost =
-    http::Config::Lookup<std::string>("ai.mq.rabbitmq.vhost", "/", "rabbitmq vhost");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_rabbit_vhost =
+    sylar::Config::Lookup<std::string>("ai.mq.rabbitmq.vhost", "/", "rabbitmq vhost");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_exchange =
-    http::Config::Lookup<std::string>("ai.mq.rabbitmq.exchange", "amq.default", "rabbitmq exchange");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_rabbit_exchange =
+    sylar::Config::Lookup<std::string>("ai.mq.rabbitmq.exchange", "amq.default", "rabbitmq exchange");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_queue =
-    http::Config::Lookup<std::string>("ai.mq.rabbitmq.queue", "ai_chat_persist", "rabbitmq queue");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_rabbit_queue =
+    sylar::Config::Lookup<std::string>("ai.mq.rabbitmq.queue", "ai_chat_persist", "rabbitmq queue");
 
-http::ConfigVar<std::string>::ptr g_ai_mq_rabbit_routing_key =
-    http::Config::Lookup<std::string>("ai.mq.rabbitmq.routing_key", "", "rabbitmq routing key");
+sylar::ConfigVar<std::string>::ptr g_ai_mq_rabbit_routing_key =
+    sylar::Config::Lookup<std::string>("ai.mq.rabbitmq.routing_key", "", "rabbitmq routing key");
 
-http::ConfigVar<uint64_t>::ptr g_ai_mq_rabbit_request_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.mq.rabbitmq.request_timeout_ms", 3000, "rabbitmq request timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_mq_rabbit_request_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.mq.rabbitmq.request_timeout_ms", 3000, "rabbitmq request timeout ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_mq_rabbit_connect_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.mq.rabbitmq.connect_timeout_ms", 3000, "rabbitmq connect timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_mq_rabbit_connect_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.mq.rabbitmq.connect_timeout_ms", 3000, "rabbitmq connect timeout ms");
 
-http::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_channel =
-    http::Config::Lookup<uint32_t>("ai.mq.rabbitmq.channel", 1, "rabbitmq channel id");
+sylar::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_channel =
+    sylar::Config::Lookup<uint32_t>("ai.mq.rabbitmq.channel", 1, "rabbitmq channel id");
 
-http::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_heartbeat_seconds =
-    http::Config::Lookup<uint32_t>("ai.mq.rabbitmq.heartbeat_seconds", 30, "rabbitmq heartbeat seconds");
+sylar::ConfigVar<uint32_t>::ptr g_ai_mq_rabbit_heartbeat_seconds =
+    sylar::Config::Lookup<uint32_t>("ai.mq.rabbitmq.heartbeat_seconds", 30, "rabbitmq heartbeat seconds");
 
-http::ConfigVar<bool>::ptr g_ai_rag_enabled =
-    http::Config::Lookup<bool>("ai.rag.enabled", true, "whether rag retrieval is enabled");
+sylar::ConfigVar<bool>::ptr g_ai_rag_enabled =
+    sylar::Config::Lookup<bool>("ai.rag.enabled", true, "whether rag retrieval is enabled");
 
-http::ConfigVar<std::string>::ptr g_ai_rag_recall_trigger_mode =
-    http::Config::Lookup<std::string>("ai.rag.recall_trigger_mode", "intent", "rag recall trigger mode: always/intent");
+sylar::ConfigVar<std::string>::ptr g_ai_rag_recall_trigger_mode =
+    sylar::Config::Lookup<std::string>("ai.rag.recall_trigger_mode", "intent", "rag recall trigger mode: always/intent");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_recall_intent_min_chars =
-    http::Config::Lookup<uint64_t>("ai.rag.recall_intent_min_chars", 6, "rag intent trigger min query chars");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_recall_intent_min_chars =
+    sylar::Config::Lookup<uint64_t>("ai.rag.recall_intent_min_chars", 6, "rag intent trigger min query chars");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_top_k =
-    http::Config::Lookup<uint64_t>("ai.rag.top_k", 6, "rag retrieval top-k");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_top_k =
+    sylar::Config::Lookup<uint64_t>("ai.rag.top_k", 6, "rag retrieval top-k");
 
-http::ConfigVar<double>::ptr g_ai_rag_score_threshold =
-    http::Config::Lookup<double>("ai.rag.score_threshold", 0.45, "rag retrieval score threshold");
+sylar::ConfigVar<double>::ptr g_ai_rag_score_threshold =
+    sylar::Config::Lookup<double>("ai.rag.score_threshold", 0.45, "rag retrieval score threshold");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_max_snippet_chars =
-    http::Config::Lookup<uint64_t>("ai.rag.max_snippet_chars", 400, "rag snippet max chars");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_max_snippet_chars =
+    sylar::Config::Lookup<uint64_t>("ai.rag.max_snippet_chars", 400, "rag snippet max chars");
 
-http::ConfigVar<std::string>::ptr g_ai_embedding_provider =
-    http::Config::Lookup<std::string>("ai.embedding.provider", "ollama", "embedding provider");
+sylar::ConfigVar<std::string>::ptr g_ai_embedding_provider =
+    sylar::Config::Lookup<std::string>("ai.embedding.provider", "ollama", "embedding provider");
 
-http::ConfigVar<std::string>::ptr g_ai_embedding_base_url =
-    http::Config::Lookup<std::string>("ai.embedding.base_url", "http://127.0.0.1:11434", "embedding base url");
+sylar::ConfigVar<std::string>::ptr g_ai_embedding_base_url =
+    sylar::Config::Lookup<std::string>("ai.embedding.base_url", "http://127.0.0.1:11434", "embedding base url");
 
-http::ConfigVar<std::string>::ptr g_ai_embedding_model =
-    http::Config::Lookup<std::string>("ai.embedding.model", "mxbai-embed-large", "embedding model");
+sylar::ConfigVar<std::string>::ptr g_ai_embedding_model =
+    sylar::Config::Lookup<std::string>("ai.embedding.model", "mxbai-embed-large", "embedding model");
 
-http::ConfigVar<uint64_t>::ptr g_ai_embedding_connect_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.embedding.connect_timeout_ms", 3000, "embedding connect timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_embedding_connect_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.embedding.connect_timeout_ms", 3000, "embedding connect timeout ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_embedding_request_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.embedding.request_timeout_ms", 30000, "embedding request timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_embedding_request_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.embedding.request_timeout_ms", 30000, "embedding request timeout ms");
 
-http::ConfigVar<std::string>::ptr g_ai_qdrant_base_url =
-    http::Config::Lookup<std::string>("ai.vector_store.qdrant.base_url", "http://127.0.0.1:6333", "qdrant base url");
+sylar::ConfigVar<std::string>::ptr g_ai_qdrant_base_url =
+    sylar::Config::Lookup<std::string>("ai.vector_store.qdrant.base_url", "http://127.0.0.1:6333", "qdrant base url");
 
-http::ConfigVar<std::string>::ptr g_ai_qdrant_collection =
-    http::Config::Lookup<std::string>("ai.vector_store.qdrant.collection", "chat_memory", "qdrant collection name");
+sylar::ConfigVar<std::string>::ptr g_ai_qdrant_collection =
+    sylar::Config::Lookup<std::string>("ai.vector_store.qdrant.collection", "chat_memory", "qdrant collection name");
 
-http::ConfigVar<uint64_t>::ptr g_ai_qdrant_request_timeout_ms =
-    http::Config::Lookup<uint64_t>("ai.vector_store.qdrant.request_timeout_ms", 5000, "qdrant request timeout ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_qdrant_request_timeout_ms =
+    sylar::Config::Lookup<uint64_t>("ai.vector_store.qdrant.request_timeout_ms", 5000, "qdrant request timeout ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_queue_capacity =
-    http::Config::Lookup<uint64_t>("ai.rag_indexer.queue_capacity", 10000, "rag indexer queue capacity");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_queue_capacity =
+    sylar::Config::Lookup<uint64_t>("ai.rag_indexer.queue_capacity", 10000, "rag indexer queue capacity");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_batch_size =
-    http::Config::Lookup<uint64_t>("ai.rag_indexer.batch_size", 32, "rag indexer batch size");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_batch_size =
+    sylar::Config::Lookup<uint64_t>("ai.rag_indexer.batch_size", 32, "rag indexer batch size");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_flush_interval_ms =
-    http::Config::Lookup<uint64_t>("ai.rag_indexer.flush_interval_ms", 200, "rag indexer flush interval ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_flush_interval_ms =
+    sylar::Config::Lookup<uint64_t>("ai.rag_indexer.flush_interval_ms", 200, "rag indexer flush interval ms");
 
-http::ConfigVar<std::string>::ptr g_ai_rag_indexer_assistant_index_mode =
-    http::Config::Lookup<std::string>("ai.rag_indexer.assistant_index_mode", "fact_like", "rag indexer assistant index mode");
+sylar::ConfigVar<std::string>::ptr g_ai_rag_indexer_assistant_index_mode =
+    sylar::Config::Lookup<std::string>("ai.rag_indexer.assistant_index_mode", "fact_like", "rag indexer assistant index mode");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_assistant_min_chars =
-    http::Config::Lookup<uint64_t>("ai.rag_indexer.assistant_min_chars", 24, "rag indexer assistant min chars");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_assistant_min_chars =
+    sylar::Config::Lookup<uint64_t>("ai.rag_indexer.assistant_min_chars", 24, "rag indexer assistant min chars");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_dedup_ttl_ms =
-    http::Config::Lookup<uint64_t>("ai.rag_indexer.dedup_ttl_ms", 600000, "rag indexer dedup ttl ms");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_dedup_ttl_ms =
+    sylar::Config::Lookup<uint64_t>("ai.rag_indexer.dedup_ttl_ms", 600000, "rag indexer dedup ttl ms");
 
-http::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_dedup_max_entries =
-    http::Config::Lookup<uint64_t>("ai.rag_indexer.dedup_max_entries", 50000, "rag indexer dedup max entries");
+sylar::ConfigVar<uint64_t>::ptr g_ai_rag_indexer_dedup_max_entries =
+    sylar::Config::Lookup<uint64_t>("ai.rag_indexer.dedup_max_entries", 50000, "rag indexer dedup max entries");
 
 std::string ResolveOpenAICompatibleApiKeyFrom(const std::string& key_from_config)
 {

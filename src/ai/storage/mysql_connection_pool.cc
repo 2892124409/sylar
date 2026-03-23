@@ -293,7 +293,8 @@ MYSQL* MysqlConnectionPool::Acquire(uint64_t timeout_ms, std::string& error)
 
                 waiter.reset(new Waiter);
                 waiter->fiber = current;
-                waiter->thread = current->getBoundThread();
+                // 新调度器下 Fiber 不再暴露绑定线程，使用 -1 让 IOManager 自行调度恢复。
+                waiter->thread = -1;
                 m_waiters.push_back(waiter);
             }
         }

@@ -2,7 +2,6 @@
 
 #include "http/core/http_error.h"
 #include "http/core/http_framework_config.h"
-#include "http/core/http_memory_pool.h"
 #include "http/core/http_parser.h"
 #include "http/ssl/ssl_socket.h"
 #include "log/logger.h"
@@ -169,7 +168,7 @@ void HttpServer::handleClient(sylar::Socket::ptr client)
     uint32_t max_connections = HttpFrameworkConfig::GetMaxConnections();
     if (max_connections > 0 && active_guard.current() > static_cast<size_t>(max_connections))
     {
-        HttpSession::ptr rejected_session = MakeHttpPooledShared<HttpSession>(client);
+        HttpSession::ptr rejected_session = std::make_shared<HttpSession>(client);
         HttpRequest::ptr rejected_request;
         sylar::Socket::ptr rejected_socket = rejected_session->getSocket();
         if (rejected_socket)
@@ -177,7 +176,7 @@ void HttpServer::handleClient(sylar::Socket::ptr client)
             rejected_socket->setRecvTimeout(100);
             rejected_request = rejected_session->recvRequest();
         }
-        HttpResponse::ptr response = MakeHttpPooledShared<HttpResponse>();
+        HttpResponse::ptr response = std::make_shared<HttpResponse>();
         if (rejected_request)
         {
             response->setVersion(rejected_request->getVersionMajor(), rejected_request->getVersionMinor());
@@ -191,7 +190,7 @@ void HttpServer::handleClient(sylar::Socket::ptr client)
         return;
     }
 
-    HttpSession::ptr session = MakeHttpPooledShared<HttpSession>(client);
+    HttpSession::ptr session = std::make_shared<HttpSession>(client);
     size_t request_count = 0;
 
     // keep-alive 场景下，一个连接可承载多次请求，因此循环处理直到需要断开。
@@ -212,12 +211,17 @@ void HttpServer::handleClient(sylar::Socket::ptr client)
             // 若为空且存在解析错误，返回 400 并附带错误信息。
             if (session->hasParserError())
             {
-                HttpResponse::ptr response = MakeHttpPooledShared<HttpResponse>();
-                if (session->isRequestTooLarge())
+                HttpResponse::ptr response = std::make_shared<HttpResponse>();
+                HttpRequestParser::ErrorCode error_code = session->getParserErrorCode();
+                if (error_code == HttpRequestParser::ERROR_REQUEST_TOO_LARGE)
                 {
                     response->setStatus(static_cast<HttpStatus>(413));
                     response->setReason("Payload Too Large");
                     ApplyErrorResponse(response, static_cast<HttpStatus>(413), "Payload Too Large", session->getParserError());
+                }
+                else if (error_code == HttpRequestParser::ERROR_NOT_IMPLEMENTED)
+                {
+                    ApplyErrorResponse(response, HttpStatus::NOT_IMPLEMENTED, "Not Implemented", session->getParserError());
                 }
                 else
                 {
@@ -230,7 +234,7 @@ void HttpServer::handleClient(sylar::Socket::ptr client)
         }
 
         // 构造本次请求对应的响应对象。
-        HttpResponse::ptr response = MakeHttpPooledShared<HttpResponse>();
+        HttpResponse::ptr response = std::make_shared<HttpResponse>();
         // 响应版本跟随请求版本。
         response->setVersion(request->getVersionMajor(), request->getVersionMinor());
         // 默认 keep-alive 语义跟随请求。

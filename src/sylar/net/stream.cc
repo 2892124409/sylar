@@ -8,69 +8,70 @@
 namespace sylar
 {
 
-int Stream::readFixSize(void* buffer, size_t length)
-{
-    size_t offset = 0;
-    int64_t left = length;
-    while (left > 0)
+    int Stream::readFixSize(void *buffer, size_t length)
     {
-        // 这里使用的是还未实现的纯虚函数，会在子类中实现
-        int64_t len = read((char*)buffer + offset, left);
-        if (len <= 0)
+        size_t offset = 0;
+        int64_t left = length;
+        while (left > 0)
         {
-            return len; // 出错或关闭
+            // 这里使用的是还未实现的纯虚函数，会在子类中实现
+            int64_t len = read((char *)buffer + offset, left);
+            if (len <= 0)
+            {
+                return len; // 出错或关闭
+            }
+            offset += len;
+            left -= len;
         }
-        offset += len;
-        left -= len;
+        return length; // 保证读取完整
     }
-    return length; // 保证读取完整
-}
 
-int Stream::readFixSize(ByteArray::ptr ba, size_t length)
-{
-    int64_t left = length;
-    while (left > 0)
+    int Stream::readFixSize(ByteArray::ptr ba, size_t length)
     {
-        int64_t len = read(ba, left);
-        if (len <= 0)
+        int64_t left = length;
+        while (left > 0)
         {
-            return len;
+            int64_t len = read(ba, left);
+            if (len <= 0)
+            {
+                return len;
+            }
+            left -= len;
         }
-        left -= len;
+        return length;
     }
-    return length;
-}
 
-int Stream::writeFixSize(const void* buffer, size_t length)
-{
-    size_t offset = 0;
-    int64_t left = length;
-    while (left > 0)
+    int Stream::writeFixSize(const void *buffer, size_t length)
     {
-        int64_t len = write((const char*)buffer + offset, left);
-        if (len <= 0)
+        size_t offset = 0;
+        int64_t left = length;
+        while (left > 0)
         {
-            return len;
+            // 这里使用的是还未实现的纯虚函数，会在子类中实现
+            int64_t len = write((const char *)buffer + offset, left);
+            if (len <= 0)
+            {
+                return len;
+            }
+            offset += len;
+            left -= len;
         }
-        offset += len;
-        left -= len;
+        return length;
     }
-    return length;
-}
 
-int Stream::writeFixSize(ByteArray::ptr ba, size_t length)
-{
-    int64_t left = length;
-    while (left > 0)
+    int Stream::writeFixSize(ByteArray::ptr ba, size_t length)
     {
-        int64_t len = write(ba, left);
-        if (len <= 0)
+        int64_t left = length;
+        while (left > 0)
         {
-            return len;
+            int64_t len = write(ba, left);
+            if (len <= 0)
+            {
+                return len;
+            }
+            left -= len;
         }
-        left -= len;
+        return length;
     }
-    return length;
-}
 
-} // namespace sylar
+}

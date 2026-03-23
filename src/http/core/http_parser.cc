@@ -1,12 +1,13 @@
 #include "http/core/http_parser.h"
 
 #include "http/core/http_framework_config.h"
-#include "http/core/http_memory_pool.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <sstream>
+#include <vector>
 
 namespace http
 {
@@ -43,6 +44,221 @@ static std::string ToLower(std::string value)
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
                    { return static_cast<char>(std::tolower(c)); });
     return value;
+}
+
+static bool IsDigit(char c)
+{
+    return std::isdigit(static_cast<unsigned char>(c)) != 0;
+}
+
+enum class RequestBodyMode
+{
+    NONE,
+    CONTENT_LENGTH,
+    CHUNKED,
+};
+
+enum class ChunkParseResult
+{
+    INCOMPLETE,
+    SUCCESS,
+    ERROR,
+};
+
+static bool ParseTransferEncodings(const std::string& header, std::vector<std::string>& encodings)
+{
+    size_t start = 0;
+    while (start <= header.size())
+    {
+        size_t end = header.find(',', start);
+        std::string token = ToLower(Trim(header.substr(start, end == std::string::npos ? std::string::npos : end - start)));
+        if (token.empty())
+        {
+            return false;
+        }
+        encodings.push_back(token);
+        if (end == std::string::npos)
+        {
+            break;
+        }
+        start = end + 1;
+    }
+    return !encodings.empty();
+}
+
+static bool ResolveRequestBodyMode(const HttpRequest::ptr& request,
+                                   RequestBodyMode& mode,
+                                   HttpRequestParser::ErrorCode& error_code,
+                                   std::string& error_message)
+{
+    mode = RequestBodyMode::NONE;
+    if (!request->hasHeader("transfer-encoding"))
+    {
+        if (request->hasHeader("content-length"))
+        {
+            mode = RequestBodyMode::CONTENT_LENGTH;
+        }
+        return true;
+    }
+
+    std::vector<std::string> encodings;
+    if (!ParseTransferEncodings(request->getHeader("transfer-encoding"), encodings))
+    {
+        error_code = HttpRequestParser::ERROR_INVALID_REQUEST;
+        error_message = "invalid transfer-encoding";
+        return false;
+    }
+
+    if (request->hasHeader("content-length"))
+    {
+        error_code = HttpRequestParser::ERROR_INVALID_REQUEST;
+        error_message = "content-length with transfer-encoding is not allowed";
+        return false;
+    }
+
+    if (encodings.size() == 1 && encodings[0] == "identity")
+    {
+        return true;
+    }
+
+    if (encodings.size() == 1 && encodings[0] == "chunked")
+    {
+        mode = RequestBodyMode::CHUNKED;
+        return true;
+    }
+
+    error_code = HttpRequestParser::ERROR_NOT_IMPLEMENTED;
+    error_message = "unsupported transfer-encoding";
+    return false;
+}
+
+static bool ParseChunkSizeLine(const std::string& line, size_t& chunk_size)
+{
+    std::string token = line;
+    size_t semicolon = token.find(';');
+    if (semicolon != std::string::npos)
+    {
+        token = token.substr(0, semicolon);
+    }
+    token = Trim(token);
+    if (token.empty())
+    {
+        return false;
+    }
+
+    size_t value = 0;
+    for (size_t i = 0; i < token.size(); ++i)
+    {
+        unsigned char c = static_cast<unsigned char>(token[i]);
+        if (!std::isxdigit(c))
+        {
+            return false;
+        }
+
+        size_t digit = 0;
+        if (c >= '0' && c <= '9')
+        {
+            digit = static_cast<size_t>(c - '0');
+        }
+        else if (c >= 'a' && c <= 'f')
+        {
+            digit = static_cast<size_t>(c - 'a' + 10);
+        }
+        else
+        {
+            digit = static_cast<size_t>(c - 'A' + 10);
+        }
+
+        if (value > (std::numeric_limits<size_t>::max() - digit) / 16)
+        {
+            return false;
+        }
+        value = value * 16 + digit;
+    }
+
+    chunk_size = value;
+    return true;
+}
+
+static ChunkParseResult ParseChunkedBody(const std::string& buffer,
+                                         size_t body_offset,
+                                         std::string& body,
+                                         size_t& consumed,
+                                         HttpRequestParser::ErrorCode& error_code,
+                                         std::string& error_message)
+{
+    body.clear();
+    consumed = 0;
+
+    size_t position = body_offset;
+    const size_t max_body_size = HttpFrameworkConfig::GetMaxBodySize();
+
+    while (true)
+    {
+        size_t line_end = buffer.find("\r\n", position);
+        if (line_end == std::string::npos)
+        {
+            return ChunkParseResult::INCOMPLETE;
+        }
+
+        size_t chunk_size = 0;
+        if (!ParseChunkSizeLine(buffer.substr(position, line_end - position), chunk_size))
+        {
+            error_code = HttpRequestParser::ERROR_INVALID_REQUEST;
+            error_message = "invalid chunk size";
+            return ChunkParseResult::ERROR;
+        }
+
+        position = line_end + 2;
+        if (chunk_size == 0)
+        {
+            while (true)
+            {
+                size_t trailer_end = buffer.find("\r\n", position);
+                if (trailer_end == std::string::npos)
+                {
+                    return ChunkParseResult::INCOMPLETE;
+                }
+                if (trailer_end == position)
+                {
+                    consumed = trailer_end + 2;
+                    return ChunkParseResult::SUCCESS;
+                }
+
+                std::string trailer_line = buffer.substr(position, trailer_end - position);
+                if (trailer_line.find(':') == std::string::npos)
+                {
+                    error_code = HttpRequestParser::ERROR_INVALID_REQUEST;
+                    error_message = "invalid trailer line";
+                    return ChunkParseResult::ERROR;
+                }
+                position = trailer_end + 2;
+            }
+        }
+
+        if (chunk_size > max_body_size || body.size() > max_body_size - chunk_size)
+        {
+            error_code = HttpRequestParser::ERROR_REQUEST_TOO_LARGE;
+            error_message = "request body too large";
+            return ChunkParseResult::ERROR;
+        }
+
+        if (buffer.size() < position + chunk_size + 2)
+        {
+            return ChunkParseResult::INCOMPLETE;
+        }
+
+        body.append(buffer, position, chunk_size);
+        position += chunk_size;
+
+        if (buffer[position] != '\r' || buffer[position + 1] != '\n')
+        {
+            error_code = HttpRequestParser::ERROR_INVALID_REQUEST;
+            error_message = "invalid chunk terminator";
+            return ChunkParseResult::ERROR;
+        }
+        position += 2;
+    }
 }
 
 /**
@@ -239,7 +455,8 @@ HttpRequest::ptr HttpRequestParser::parse(const std::string& buffer, size_t& con
 
     // 做最基础的版本格式校验：必须形如 HTTP/x.y。
     // 当前版本仅做最小可用检查，不做复杂兼容处理。
-    if (version.size() != 8 || version.substr(0, 5) != "HTTP/")
+    if (version.size() != 8 || version.substr(0, 5) != "HTTP/" ||
+        version[6] != '.' || !IsDigit(version[5]) || !IsDigit(version[7]))
     {
         m_error = true;
         m_errorCode = ERROR_INVALID_REQUEST;
@@ -248,7 +465,7 @@ HttpRequest::ptr HttpRequestParser::parse(const std::string& buffer, size_t& con
     }
 
     // 到这里，请求行合法，开始创建请求对象并填充基础字段。
-    HttpRequest::ptr request = MakeHttpPooledShared<HttpRequest>();
+    HttpRequest::ptr request = std::make_shared<HttpRequest>();
     request->setMethod(method);
 
     // 版本字符串位置固定：HTTP/1.1 的 '1' 在下标 5 和 7。
@@ -313,10 +530,20 @@ HttpRequest::ptr HttpRequestParser::parse(const std::string& buffer, size_t& con
         request->setHeader(Trim(line.substr(0, colon)), Trim(line.substr(colon + 1)));
     }
 
-    // 第三步：确定 body 长度。
-    // 当前只支持 Content-Length，不支持 chunked request body。
+    RequestBodyMode body_mode = RequestBodyMode::NONE;
+    ErrorCode body_mode_error = ERROR_NONE;
+    std::string body_mode_error_message;
+    if (!ResolveRequestBodyMode(request, body_mode, body_mode_error, body_mode_error_message))
+    {
+        m_error = true;
+        m_errorCode = body_mode_error;
+        m_errorMessage = body_mode_error_message;
+        return HttpRequest::ptr();
+    }
+
+    // 第三步：确定 body 传输方式，并在完整时取出请求体。
     size_t content_length = 0;
-    if (request->hasHeader("content-length"))
+    if (body_mode == RequestBodyMode::CONTENT_LENGTH)
     {
         // 读取并解析 Content-Length 文本值。
         const std::string content_length_str = request->getHeader("content-length");
@@ -342,17 +569,45 @@ HttpRequest::ptr HttpRequestParser::parse(const std::string& buffer, size_t& con
 
     // header_end 指向 "\r\n\r\n" 起始位置，所以 +4 才是 body 起始。
     // total_size = header_size + 分隔符4字节 + body长度。
-    size_t total_size = header_end + 4 + content_length;
-    if (buffer.size() < total_size)
+    size_t total_size = header_end + 4;
+    if (body_mode == RequestBodyMode::CONTENT_LENGTH)
     {
-        // body 还没收全，属于半包场景，继续等数据。
-        return HttpRequest::ptr();
-    }
+        total_size += content_length;
+        if (buffer.size() < total_size)
+        {
+            // body 还没收全，属于半包场景，继续等数据。
+            return HttpRequest::ptr();
+        }
 
-    // body 完整时，按 Content-Length 截取请求体。
-    if (content_length > 0)
+        if (content_length > 0)
+        {
+            request->setBody(buffer.substr(header_end + 4, content_length));
+        }
+    }
+    else if (body_mode == RequestBodyMode::CHUNKED)
     {
-        request->setBody(buffer.substr(header_end + 4, content_length));
+        std::string body;
+        ErrorCode chunk_error_code = ERROR_NONE;
+        std::string chunk_error_message;
+        ChunkParseResult chunk_result = ParseChunkedBody(
+            buffer,
+            header_end + 4,
+            body,
+            total_size,
+            chunk_error_code,
+            chunk_error_message);
+        if (chunk_result == ChunkParseResult::INCOMPLETE)
+        {
+            return HttpRequest::ptr();
+        }
+        if (chunk_result == ChunkParseResult::ERROR)
+        {
+            m_error = true;
+            m_errorCode = chunk_error_code;
+            m_errorMessage = chunk_error_message;
+            return HttpRequest::ptr();
+        }
+        request->setBody(body);
     }
 
     // 第四步：计算 keep-alive 语义。

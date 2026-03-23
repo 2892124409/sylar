@@ -196,8 +196,9 @@ int main()
 
     {
         http::HttpFrameworkConfig::SetConnectionTimeoutMs(4321);
-        sylar::IOManager iom(2, true, "http_test");
-        http::HttpServer::ptr server(new http::HttpServer(&iom, &iom));
+        sylar::IOManager io_iom(2, true, "http_test_io");
+        sylar::IOManager accept_iom(1, false, "http_test_accept");
+        http::HttpServer::ptr server(new http::HttpServer(&io_iom, &accept_iom));
         assert(server->getRecvTimeout() == 4321);
         http::HttpFrameworkConfig::SetConnectionTimeoutMs(old_connection_timeout);
 
@@ -243,7 +244,7 @@ int main()
         assert(server->bind(addrs, fails));
         assert(server->start());
 
-        iom.schedule([http_port]()
+        io_iom.schedule([http_port]()
                      {
             sleep(1);
             sylar::Socket::ptr sock = ConnectTo(http_port);
@@ -256,7 +257,7 @@ int main()
             assert(rsp.find("x-post: 1") != std::string::npos);
             stream.close(); });
 
-        iom.schedule([http_port]()
+        io_iom.schedule([http_port]()
                      {
             sleep(2);
             sylar::Socket::ptr sock = ConnectTo(http_port);
@@ -266,7 +267,7 @@ int main()
             assert(rsp.find("user:42") != std::string::npos);
             stream.close(); });
 
-        iom.schedule([http_port]()
+        io_iom.schedule([http_port]()
                      {
             sleep(3);
             sylar::Socket::ptr sock = ConnectTo(http_port);
@@ -276,7 +277,7 @@ int main()
             assert(rsp.find("exact-user") != std::string::npos);
             stream.close(); });
 
-        iom.schedule([http_port]()
+        io_iom.schedule([http_port]()
                      {
             sleep(4);
             sylar::Socket::ptr sock = ConnectTo(http_port);
@@ -288,7 +289,7 @@ int main()
             assert(rsp.find("x-post: 1") != std::string::npos);
             stream.close(); });
 
-        iom.schedule([http_port]()
+        io_iom.schedule([http_port]()
                      {
             sleep(5);
             sylar::Socket::ptr sock = ConnectTo(http_port);
@@ -298,7 +299,7 @@ int main()
             assert(rsp.find("\"code\":404") != std::string::npos);
             stream.close(); });
 
-        iom.schedule([http_port]()
+        io_iom.schedule([http_port]()
                      {
             sleep(6);
             size_t old_header = http::HttpRequestParser::GetMaxHeaderSize();
@@ -313,7 +314,7 @@ int main()
 
             http::HttpRequestParser::SetMaxHeaderSize(old_header); });
 
-        iom.schedule([server, http_port, old_keepalive_timeout, old_keepalive_max_requests, old_max_connections]()
+        io_iom.schedule([server, http_port, old_keepalive_timeout, old_keepalive_max_requests, old_max_connections]()
                      {
             sleep(7);
 

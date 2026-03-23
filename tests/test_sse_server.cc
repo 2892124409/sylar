@@ -15,8 +15,9 @@ static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
 int main()
 {
     sylar::set_hook_enable(true);
-    sylar::IOManager iom(2, true, "sse_test");
-    http::HttpServer::ptr server(new http::HttpServer(&iom, &iom));
+    sylar::IOManager io_iom(2, true, "sse_test_io");
+    sylar::IOManager accept_iom(1, false, "sse_test_accept");
+    http::HttpServer::ptr server(new http::HttpServer(&io_iom, &accept_iom));
     server->getServletDispatch()->addServlet("/events", [](http::HttpRequest::ptr,
                                                            http::HttpResponse::ptr rsp,
                                                            http::HttpSession::ptr session)
@@ -47,7 +48,7 @@ int main()
     assert(server->bind(addrs, fails));
     assert(server->start());
 
-    iom.schedule([]()
+    io_iom.schedule([]()
                  {
         sleep(1);
         sylar::Socket::ptr sock = sylar::Socket::CreateTCPSocket();
@@ -75,7 +76,7 @@ int main()
         assert(rsp.find("data: world\n\n") != std::string::npos);
         stream.close(); });
 
-    iom.schedule([server]()
+    io_iom.schedule([server]()
                  {
         sleep(2);
         server->stop(); });

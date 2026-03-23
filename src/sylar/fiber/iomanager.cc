@@ -1,568 +1,742 @@
 #include "sylar/fiber/iomanager.h"
-#include "log/logger.h"
-#include "sylar/base/macro.h"
-#include "sylar/fiber/fiber_framework_config.h"
-
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
+#include "sylar/base/macro.h"
+#include "sylar/log/logger.h"
 
 namespace sylar
 {
 
-static base::Logger::ptr g_logger = BASE_LOG_NAME("system");
+    static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
-bool GetDefaultIOManagerUseCaller()
-{
-    return FiberFrameworkConfig::GetIOManagerUseCaller();
-}
-
-/**
- * @brief 获取指定事件的上下文
- * @details READ 对应 read 成员，WRITE 对应 write 成员
- */
-IOManager::FdContext::EventContext& IOManager::FdContext::getEventContext(IOManager::Event event)
-{
-    switch (event)
+    namespace
     {
-    case IOManager::READ:
-        return read;
-    case IOManager::WRITE:
-        return write;
-    default:
-        BASE_ASSERT2(false, "getEventContext invalid event");
-    }
-    throw std::invalid_argument("getEventContext invalid event");
-}
-
-/**
- * @brief 重置事件上下文，释放协程引用
- */
-void IOManager::FdContext::resetEventContext(EventContext& ctx)
-{
-    ctx.scheduler = nullptr;
-    ctx.fiber.reset();
-    ctx.cb = nullptr;
-}
-
-/**
- * @brief 触发事件处理
- * @details 将对应的回调函数或协程投入调度器执行，并清除该事件标志
- */
-void IOManager::FdContext::triggerEvent(IOManager::Event event)
-{
-    // 确认该事件确实在当前监听列表中
-    BASE_ASSERT(events & event);
-
-    // 清除掉该事件（一次性触发）
-    events = (Event)(events & ~event);
-
-    EventContext& ctx = getEventContext(event);
-    if (ctx.cb)
-    {
-        // 如果注册的是回调函数，则将函数推入调度任务队列
-        ctx.scheduler->schedule(&ctx.cb);
-    }
-    else
-    {
-        // 如果注册的是协程，则将协程推入调度任务队列
-        // 为避免 ucontext fiber 跨线程恢复，优先回到原绑定线程。
-        int target_thread = -1;
-        if (ctx.fiber && ctx.fiber->getBoundThread() != -1)
+        uint32_t ToEpollEvents(IOManager::Event events)
         {
-            target_thread = ctx.fiber->getBoundThread();
+            uint32_t out = EPOLLET;
+            if (events & IOManager::READ)
+            {
+                out |= EPOLLIN;
+            }
+            if (events & IOManager::WRITE)
+            {
+                out |= EPOLLOUT;
+            }
+            return out;
         }
-        ctx.scheduler->schedule(&ctx.fiber, target_thread);
     }
 
-    ctx.scheduler = nullptr;
-    return;
-}
-
-IOManager::IOManager(size_t threads, bool use_caller, const std::string& name)
-    : Scheduler(threads, use_caller, name)
-{
-
-    // 1. 创建 epoll 句柄
-    m_epfd = epoll_create(5000);
-    BASE_ASSERT(m_epfd > 0);
-
-    // 2. 创建用于 tickle (唤醒) 的管道
-    int rt = pipe(m_tickleFds);
-    BASE_ASSERT(rt == 0);
-
-    // 3. 将管道的读端注册到 epoll 中
-    // 使用边缘触发 (ET) 模式，配合非阻塞读取，这是高性能 IO 的标准做法
-    struct epoll_event event;
-    memset(&event, 0, sizeof(epoll_event));
-    event.events = EPOLLIN | EPOLLET;
-    event.data.fd = m_tickleFds[0];
-
-    // 将管道读端设为非阻塞，防止 epoll 误唤醒导致 read 阻塞整个线程
-    rt = fcntl(m_tickleFds[0], F_SETFL, O_NONBLOCK);
-    BASE_ASSERT(rt == 0);
-
-    // 将 tickle fd 添加进 epoll 监控
-    rt = epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_tickleFds[0], &event);
-    BASE_ASSERT(rt == 0);
-
-    // 4. 初始化上下文容器大小
-    contextResize(32);
-
-    // 5. 启动调度器线程池
-    start();
-}
-
-IOManager::~IOManager()
-{
-    // 停止调度循环
-    stop();
-    // 释放系统资源
-    close(m_epfd);
-    close(m_tickleFds[0]);
-    close(m_tickleFds[1]);
-
-    // 释放 Fd 上下文对象的堆内存
-    for (size_t i = 0; i < m_fdContexts.size(); ++i)
+    IOManager::FdContext::EventContext &IOManager::FdContext::getEventContext(IOManager::Event event)
     {
-        if (m_fdContexts[i])
+        switch (event)
+        {
+        case IOManager::READ:
+            return read;
+        case IOManager::WRITE:
+            return write;
+        default:
+            SYLAR_ASSERT2(false, "getEventContext invalid event");
+        }
+        throw std::invalid_argument("getEventContext invalid event");
+    }
+
+    void IOManager::FdContext::resetEventContext(EventContext &ctx)
+    {
+        ctx.scheduler = nullptr;
+        ctx.fiber.reset();
+        ctx.cb = nullptr;
+        ctx.timeoutTimer.reset();
+        ctx.thread = -1;
+        ctx.waitToken = 0;
+    }
+
+    void IOManager::FdContext::triggerEvent(IOManager::Event event, Fiber::WaitResult result)
+    {
+        SYLAR_ASSERT(events & event);
+        events = static_cast<Event>(events & ~event);
+        if (events == NONE)
+        {
+            // fd 上最后一个事件被消费后，释放 worker 归属。
+            // 否则 fd 复用时可能沿用旧 owner，导致跨 worker 错投递。
+            ownerWorker = Scheduler::kInvalidWorker;
+        }
+
+        EventContext &ctx = getEventContext(event);
+        Timer::ptr timeout = ctx.timeoutTimer;
+        ctx.timeoutTimer.reset();
+        if (timeout)
+        {
+            timeout->cancel();
+        }
+
+        if (ctx.fiber)
+        {
+            if (ctx.waitToken)
+            {
+                ctx.fiber->setWaitResult(ctx.waitToken, result);
+            }
+            ctx.scheduler->scheduleCommand(ctx.fiber, ctx.thread);
+        }
+        else if (ctx.cb)
+        {
+            ctx.scheduler->scheduleCommand(ctx.cb, ctx.thread);
+        }
+
+        resetEventContext(ctx);
+    }
+
+    IOManager::IOManager(size_t threads, bool use_caller, const std::string &name)
+        : Scheduler(threads, use_caller, name),
+          m_pendingEventCount(0),
+          m_eventWorkerCursor(0),
+          m_timerWorkerCursor(0)
+    {
+        initTimerBuckets(getWorkerCount());
+
+        m_workerContexts.resize(getWorkerCount());
+        for (size_t i = 0; i < m_workerContexts.size(); ++i)
+        {
+            WorkerContext &worker = m_workerContexts[i];
+            worker.epfd = epoll_create1(EPOLL_CLOEXEC);
+            SYLAR_ASSERT(worker.epfd > 0);
+
+            worker.wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+            SYLAR_ASSERT(worker.wakeFd > 0);
+
+            epoll_event event;
+            memset(&event, 0, sizeof(event));
+            event.events = EPOLLIN | EPOLLET;
+            event.data.fd = worker.wakeFd;
+
+            int rt = epoll_ctl(worker.epfd, EPOLL_CTL_ADD, worker.wakeFd, &event);
+            SYLAR_ASSERT(rt == 0);
+        }
+
+        contextResize(64);
+        start();
+    }
+
+    IOManager::~IOManager()
+    {
+        stop();
+
+        for (size_t i = 0; i < m_workerContexts.size(); ++i)
+        {
+            WorkerContext &worker = m_workerContexts[i];
+            if (worker.epfd >= 0)
+            {
+                close(worker.epfd);
+                worker.epfd = -1;
+            }
+            if (worker.wakeFd >= 0)
+            {
+                close(worker.wakeFd);
+                worker.wakeFd = -1;
+            }
+        }
+
+        for (size_t i = 0; i < m_fdContexts.size(); ++i)
         {
             delete m_fdContexts[i];
         }
     }
-}
 
-/**
- * @brief 动态扩容 fd 上下文容器
- * @details 采用预分配策略，以 fd 为索引直接定位上下文，避免 Map 查找开销
- */
-void IOManager::contextResize(size_t size)
-{
-    m_fdContexts.resize(size);
-
-    for (size_t i = 0; i < m_fdContexts.size(); ++i)
+    void IOManager::contextResize(size_t size)
     {
-        if (!m_fdContexts[i])
+        size = std::max(size, m_fdContexts.size());
+        m_fdContexts.resize(size);
+        for (size_t i = 0; i < m_fdContexts.size(); ++i)
         {
-            m_fdContexts[i] = new FdContext;
-            m_fdContexts[i]->fd = i;
+            if (!m_fdContexts[i])
+            {
+                m_fdContexts[i] = new FdContext;
+                m_fdContexts[i]->fd = static_cast<int>(i);
+            }
         }
     }
-}
 
-/**
- * @brief 添加事件
- * @details 核心逻辑：
- * 1. 找到 fd 对应的 FdContext，必要时扩容。
- * 2. 检查该事件是否已经存在，避免重复添加。
- * 3. 确定 epoll_ctl 的操作类型 (ADD 或 MOD)。
- * 4. 修改 epoll 事件掩码并执行系统调用。
- * 5. 更新上下文信息（调度器、回调协程/函数）。
- */
-int IOManager::addEvent(int fd, Event event, std::function<void()> cb)
-{
-    FdContext* fd_ctx = nullptr;
-    RWMutexType::ReadLock lock(m_mutex);
-    if ((int)m_fdContexts.size() > fd)
+    IOManager::FdContext *IOManager::getFdContext(int fd, bool auto_create)
     {
-        fd_ctx = m_fdContexts[fd];
-        lock.unlock();
-    }
-    else
-    {
-        lock.unlock();
-        RWMutexType::WriteLock lock2(m_mutex);
-        contextResize(fd * 1.5);
-        fd_ctx = m_fdContexts[fd];
-    }
-
-    FdContext::MutexType::Lock lock2(fd_ctx->mutex);
-    // 检查事件是否重复添加
-    if (SYLAR_UNLIKELY(fd_ctx->events & event))
-    {
-        BASE_LOG_ERROR(g_logger) << "addEvent assert fd=" << fd
-                                 << " event=" << event
-                                 << " fd_ctx.event=" << fd_ctx->events;
-        BASE_ASSERT(!(fd_ctx->events & event));
-    }
-
-    // 确定是第一次添加监听(ADD)还是在原有基础上修改(MOD)
-    int op = fd_ctx->events ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-    struct epoll_event epevent;
-    // 采用边缘触发 (ET)，同时合并原有监听的事件
-    epevent.events = EPOLLET | fd_ctx->events | event;
-    // 关键点：将上下文对象指针存入 epoll，实现 O(1) 查找
-    epevent.data.ptr = fd_ctx;
-
-    int rt = epoll_ctl(m_epfd, op, fd, &epevent);
-    if (rt)
-    {
-        BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
-                                 << op << "," << fd << "," << epevent.events << "):"
-                                 << rt << " (" << errno << ") (" << strerror(errno) << ")";
-        return -1;
-    }
-
-    // 待处理事件计数增加
-    ++m_pendingEventCount;
-    // 更新该 fd 上下文中的事件掩码
-    fd_ctx->events = (Event)(fd_ctx->events | event);
-
-    // 获取并配置对应事件的上下文
-    FdContext::EventContext& event_ctx = fd_ctx->getEventContext(event);
-    BASE_ASSERT(!event_ctx.scheduler && !event_ctx.fiber && !event_ctx.cb);
-
-    event_ctx.scheduler = Scheduler::GetThis();
-    if (cb)
-    {
-        event_ctx.cb.swap(cb);
-    }
-    else
-    {
-        // 如果没传回调，默认绑定当前协程，实现“在当前位置等待 IO 唤醒”的同步编程感
-        event_ctx.fiber = Fiber::GetThis();
-        if (!event_ctx.fiber || event_ctx.fiber->getState() != Fiber::EXEC)
+        if (fd < 0)
         {
-            BASE_LOG_ERROR(g_logger) << "addEvent bind current fiber invalid"
-                                     << " fd=" << fd
-                                     << " event=" << event
-                                     << " fiber_id=" << (event_ctx.fiber ? event_ctx.fiber->getId() : 0)
-                                     << " state=" << (event_ctx.fiber ? event_ctx.fiber->getState() : -1)
-                                     << " scheduler=" << Scheduler::GetThis()
-                                     << " main_fiber=" << Scheduler::GetMainFiber();
-            fd_ctx->resetEventContext(event_ctx);
-            fd_ctx->events = (Event)(fd_ctx->events & ~event);
-            --m_pendingEventCount;
+            return nullptr;
+        }
 
-            int rollback_op = fd_ctx->events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-            struct epoll_event rollback_event;
-            rollback_event.events = EPOLLET | fd_ctx->events;
-            rollback_event.data.ptr = fd_ctx;
-            int rollback_rt = epoll_ctl(m_epfd, rollback_op, fd, &rollback_event);
-            if (rollback_rt)
+        RWMutexType::ReadLock lock(m_mutex);
+        if (static_cast<int>(m_fdContexts.size()) > fd)
+        {
+            FdContext *ctx = m_fdContexts[fd];
+            if (ctx || !auto_create)
             {
-                BASE_LOG_ERROR(g_logger) << "addEvent rollback epoll_ctl(" << m_epfd << ", "
-                                         << rollback_op << "," << fd << "," << rollback_event.events << ")"
-                                         << ":" << rollback_rt << " (" << errno << ") (" << strerror(errno) << ")";
+                return ctx;
             }
+        }
+        else if (!auto_create)
+        {
+            return nullptr;
+        }
+        lock.unlock();
+
+        RWMutexType::WriteLock lock2(m_mutex);
+        if (static_cast<int>(m_fdContexts.size()) <= fd)
+        {
+            size_t target = std::max<size_t>(fd + 1, m_fdContexts.size() * 2);
+            contextResize(target);
+        }
+        return m_fdContexts[fd];
+    }
+
+    size_t IOManager::selectEventWorker() const
+    {
+        size_t current = getCurrentWorkerIndex();
+        if (current != Scheduler::kInvalidWorker)
+        {
+            return current;
+        }
+        return m_eventWorkerCursor.load(std::memory_order_relaxed) % getWorkerCount();
+    }
+
+    int IOManager::runOnOwnerSyncInt(size_t owner, const std::function<int()> &fn)
+    {
+        if (owner == Scheduler::kInvalidWorker || owner >= getWorkerCount())
+        {
             errno = EINVAL;
             return -1;
         }
-    }
-    return 0;
-}
 
-/**
- * @brief 删除事件
- * @details 物理删除：直接从 epoll 中撤销，且不触发任何回调
- */
-bool IOManager::delEvent(int fd, Event event)
-{
-    RWMutexType::ReadLock lock(m_mutex);
-    if ((int)m_fdContexts.size() <= fd)
-    {
-        return false;
-    }
-    FdContext* fd_ctx = m_fdContexts[fd];
-    lock.unlock();
-
-    FdContext::MutexType::Lock lock2(fd_ctx->mutex);
-    if (SYLAR_UNLIKELY(!(fd_ctx->events & event)))
-    {
-        return false;
-    }
-
-    // 计算删除后的剩余事件掩码
-    Event new_events = (Event)(fd_ctx->events & ~event);
-    int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-    struct epoll_event epevent;
-    epevent.events = EPOLLET | new_events;
-    epevent.data.ptr = fd_ctx;
-
-    int rt = epoll_ctl(m_epfd, op, fd, &epevent);
-    if (rt)
-    {
-        BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
-                                 << op << "," << fd << "," << epevent.events << "):"
-                                 << rt << " (" << errno << ") (" << strerror(errno) << ")";
-        return false;
-    }
-
-    --m_pendingEventCount;
-    fd_ctx->events = new_events;
-    FdContext::EventContext& event_ctx = fd_ctx->getEventContext(event);
-    fd_ctx->resetEventContext(event_ctx);
-    return true;
-}
-
-/**
- * @brief 取消事件
- * @details 逻辑删除：如果事件存在，则强制触发它一次（恢复协程执行），然后撤销监听
- */
-bool IOManager::cancelEvent(int fd, Event event, std::function<void()> on_cancel)
-{
-    RWMutexType::ReadLock lock(m_mutex);
-    if ((int)m_fdContexts.size() <= fd)
-    {
-        return false;
-    }
-    FdContext* fd_ctx = m_fdContexts[fd];
-    lock.unlock();
-
-    FdContext::MutexType::Lock lock2(fd_ctx->mutex);
-    if (SYLAR_UNLIKELY(!(fd_ctx->events & event)))
-    {
-        return false;
-    }
-
-    Event new_events = (Event)(fd_ctx->events & ~event);
-    int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-    struct epoll_event epevent;
-    epevent.events = EPOLLET | new_events;
-    epevent.data.ptr = fd_ctx;
-
-    int rt = epoll_ctl(m_epfd, op, fd, &epevent);
-    if (rt)
-    {
-        BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
-                                 << op << "," << fd << "," << epevent.events << "):"
-                                 << rt << " (" << errno << ") (" << strerror(errno) << ")";
-        return false;
-    }
-
-    if (on_cancel)
-    {
-        on_cancel();
-    }
-
-    // 核心：在删除前主动触发，保证了即使事件没发生，被取消的协程也能从 yield 处醒来
-    fd_ctx->triggerEvent(event);
-    --m_pendingEventCount;
-    return true;
-}
-
-/**
- * @brief 取消所有事件
- */
-bool IOManager::cancelAll(int fd)
-{
-    RWMutexType::ReadLock lock(m_mutex);
-    if ((int)m_fdContexts.size() <= fd)
-    {
-        return false;
-    }
-    FdContext* fd_ctx = m_fdContexts[fd];
-    lock.unlock();
-
-    FdContext::MutexType::Lock lock2(fd_ctx->mutex);
-    if (!fd_ctx->events)
-    {
-        return false;
-    }
-
-    int op = EPOLL_CTL_DEL;
-    struct epoll_event epevent;
-    epevent.events = 0;
-    epevent.data.ptr = fd_ctx;
-
-    int rt = epoll_ctl(m_epfd, op, fd, &epevent);
-    if (rt)
-    {
-        BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
-                                 << op << "," << fd << "," << epevent.events << "):"
-                                 << rt << " (" << errno << ") (" << strerror(errno) << ")";
-        return false;
-    }
-
-    // 遍历并触发读写事件
-    if (fd_ctx->events & READ)
-    {
-        fd_ctx->triggerEvent(READ);
-        --m_pendingEventCount;
-    }
-    if (fd_ctx->events & WRITE)
-    {
-        fd_ctx->triggerEvent(WRITE);
-        --m_pendingEventCount;
-    }
-
-    BASE_ASSERT(fd_ctx->events == NONE);
-    return true;
-}
-
-/**
- * @brief 唤醒调度器线程
- * @details 通过自唤醒管道写入数据，打破 epoll_wait 的阻塞
- */
-void IOManager::tickle()
-{
-    if (hasIdleThreads())
-    {
-        int rt = write(m_tickleFds[1], "T", 1);
-        BASE_ASSERT(rt == 1);
-    }
-}
-
-/**
- * @brief 停止条件判断
- */
-bool IOManager::stopping()
-{
-    uint64_t timeout = 0;
-    return stopping(timeout);
-}
-
-bool IOManager::stopping(uint64_t& timeout)
-{
-    timeout = getNextTimer();
-    return timeout == ~0ull && m_pendingEventCount == 0 && Scheduler::stopping();
-}
-
-void IOManager::onTimerInsertedAtFront()
-{
-    tickle();
-}
-
-/**
- * @brief 核心 IO 调度循环
- * @details
- * 1. 当 Scheduler::run() 发现没活干时会切进此协程。
- * 2. 阻塞在 epoll_wait 处进入内核睡眠。
- * 3. 醒来后处理就绪事件，将对应的任务放入调度队列。
- * 4. 执行完分发后 Yield 出去，让线程去跑领到的业务协程。
- */
-void IOManager::idle()
-{
-    // 每次处理的最大事件数
-    static const uint64_t MAX_EVNETS = 256;
-    epoll_event* events = new epoll_event[MAX_EVNETS]();
-    std::shared_ptr<epoll_event> shared_events(events, [](epoll_event* ptr)
-                                               { delete[] ptr; });
-
-    while (true)
-    {
-        uint64_t next_timeout = 0;
-        if (stopping(next_timeout))
+        if (getCurrentWorkerIndex() == owner)
         {
-            BASE_LOG_INFO(g_logger) << "name=" << getName() << " idle stopping exit";
-            break;
+            return fn();
         }
 
-        int rt = 0;
-        do
+        int result = -1;
+        Semaphore sem(0);
+        int owner_thread = getWorkerThreadId(owner);
+        scheduleCommand([&]()
+                        {
+            result = fn();
+            sem.notify(); }, owner_thread);
+        sem.wait();
+        return result;
+    }
+
+    bool IOManager::runOnOwnerSyncBool(size_t owner, const std::function<bool()> &fn)
+    {
+        if (owner == Scheduler::kInvalidWorker || owner >= getWorkerCount())
         {
-            // 默认最大睡眠时间 5 秒
-            static const uint64_t MAX_TIMEOUT = 3000;
-            if (next_timeout != ~0ull)
+            errno = EINVAL;
+            return false;
+        }
+
+        if (getCurrentWorkerIndex() == owner)
+        {
+            return fn();
+        }
+
+        bool result = false;
+        Semaphore sem(0);
+        int owner_thread = getWorkerThreadId(owner);
+        scheduleCommand([&]()
+                        {
+            result = fn();
+            sem.notify(); }, owner_thread);
+        sem.wait();
+        return result;
+    }
+
+    int IOManager::addEvent(int fd, Event event, std::function<void()> cb)
+    {
+        return addEventInternal(fd, event, std::move(cb), nullptr, ~0ull, nullptr);
+    }
+
+    int IOManager::waitEvent(int fd, Event event, uint64_t timeout_ms)
+    {
+        Fiber::ptr fiber = Fiber::GetThis();
+        uint64_t wait_token = 0;
+        int rt = addEventInternal(fd, event, nullptr, fiber, timeout_ms, &wait_token);
+        if (rt)
+        {
+            return rt;
+        }
+
+        sylar::Fiber::YieldToHold();
+
+        Fiber::WaitResult result = Fiber::GetThisRaw()->consumeWaitResult(wait_token);
+        if (result == Fiber::WAIT_TIMEOUT)
+        {
+            errno = ETIMEDOUT;
+            return 1;
+        }
+        return 0;
+    }
+
+    int IOManager::addEventInternal(int fd, Event event, std::function<void()> cb,
+                                    Fiber::ptr fiber, uint64_t timeout_ms, uint64_t *wait_token)
+    {
+        FdContext *fd_ctx = getFdContext(fd, true);
+        if (!fd_ctx)
+        {
+            errno = EBADF;
+            return -1;
+        }
+
+        size_t owner = Scheduler::kInvalidWorker;
+        {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            owner = fd_ctx->ownerWorker;
+            if (owner == Scheduler::kInvalidWorker || fd_ctx->events == NONE)
             {
-                next_timeout = std::min(next_timeout, MAX_TIMEOUT);
+                owner = getCurrentWorkerIndex();
+                if (owner == Scheduler::kInvalidWorker)
+                {
+                    owner = m_eventWorkerCursor.fetch_add(1, std::memory_order_relaxed) % getWorkerCount();
+                }
+                fd_ctx->ownerWorker = owner;
+            }
+        }
+
+        std::function<void()> local_cb = std::move(cb);
+        return runOnOwnerSyncInt(owner, [this, fd_ctx, fd, event, owner, local_cb, fiber, timeout_ms, wait_token]() mutable -> int
+                                 {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (SYLAR_UNLIKELY(fd_ctx->events & event))
+            {
+                errno = EEXIST;
+                return -1;
+            }
+
+            WorkerContext& worker = m_workerContexts[owner];
+            int op = fd_ctx->events ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
+            epoll_event epevent;
+            memset(&epevent, 0, sizeof(epevent));
+            epevent.events = ToEpollEvents(static_cast<Event>(fd_ctx->events | event));
+            epevent.data.ptr = fd_ctx;
+
+            int rt = epoll_ctl(worker.epfd, op, fd, &epevent);
+            if (rt)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
+                                          << op << "," << fd << "," << epevent.events << "):"
+                                          << rt << " (" << errno << ") (" << strerror(errno) << ")";
+                return -1;
+            }
+
+            ++m_pendingEventCount;
+            fd_ctx->events = static_cast<Event>(fd_ctx->events | event);
+
+            FdContext::EventContext& event_ctx = fd_ctx->getEventContext(event);
+            SYLAR_ASSERT(!event_ctx.scheduler && !event_ctx.fiber && !event_ctx.cb);
+            event_ctx.scheduler = this;
+            event_ctx.thread = getWorkerThreadId(owner);
+
+            if (local_cb)
+            {
+                event_ctx.cb.swap(local_cb);
             }
             else
             {
-                next_timeout = MAX_TIMEOUT;
+                event_ctx.fiber = fiber ? fiber : Fiber::GetThis();
+                SYLAR_ASSERT2(event_ctx.fiber->getState() == Fiber::EXEC,
+                              "state=" << event_ctx.fiber->getState());
+                event_ctx.waitToken = event_ctx.fiber->beginWait();
+                if (wait_token)
+                {
+                    *wait_token = event_ctx.waitToken;
+                }
             }
 
-            // 精准睡眠：epoll_wait 会在 IO 发生 OR 时间到期时返回
-            rt = epoll_wait(m_epfd, events, MAX_EVNETS, (int)next_timeout);
-
-            if (rt < 0 && errno == EINTR)
+            if (timeout_ms != ~0ull)
             {
-                // 忽略系统调用中断
+                uint64_t wait_key = event_ctx.waitToken;
+                event_ctx.timeoutTimer = addTimer(
+                    timeout_ms,
+                    std::bind(&IOManager::onEventTimeout, this, fd, event, wait_key),
+                    false,
+                    owner);
             }
-            else
+
+            return 0; });
+    }
+
+    bool IOManager::delEvent(int fd, Event event)
+    {
+        FdContext *fd_ctx = getFdContext(fd, false);
+        if (!fd_ctx)
+        {
+            return false;
+        }
+
+        size_t owner = Scheduler::kInvalidWorker;
+        {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!(fd_ctx->events & event))
+            {
+                return false;
+            }
+            owner = fd_ctx->ownerWorker;
+        }
+
+        return runOnOwnerSyncBool(owner, [this, fd_ctx, fd, event, owner]() -> bool
+                                  {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!(fd_ctx->events & event))
+            {
+                return false;
+            }
+
+            WorkerContext& worker = m_workerContexts[owner];
+            Event new_events = static_cast<Event>(fd_ctx->events & ~event);
+            int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
+            epoll_event epevent;
+            memset(&epevent, 0, sizeof(epevent));
+            epevent.events = ToEpollEvents(new_events);
+            epevent.data.ptr = fd_ctx;
+
+            int rt = epoll_ctl(worker.epfd, op, fd, &epevent);
+            if (rt)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
+                                          << op << "," << fd << "," << epevent.events << "):"
+                                          << rt << " (" << errno << ") (" << strerror(errno) << ")";
+                return false;
+            }
+
+            --m_pendingEventCount;
+            fd_ctx->events = new_events;
+            if (new_events == NONE)
+            {
+                fd_ctx->ownerWorker = Scheduler::kInvalidWorker;
+            }
+            FdContext::EventContext& event_ctx = fd_ctx->getEventContext(event);
+            if (event_ctx.timeoutTimer)
+            {
+                event_ctx.timeoutTimer->cancel();
+            }
+            fd_ctx->resetEventContext(event_ctx);
+            return true; });
+    }
+
+    bool IOManager::cancelEvent(int fd, Event event)
+    {
+        return cancelEventInternal(fd, event, Fiber::WAIT_CANCELLED);
+    }
+
+    bool IOManager::cancelEventInternal(int fd, Event event, Fiber::WaitResult result)
+    {
+        FdContext *fd_ctx = getFdContext(fd, false);
+        if (!fd_ctx)
+        {
+            return false;
+        }
+
+        size_t owner = Scheduler::kInvalidWorker;
+        {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!(fd_ctx->events & event))
+            {
+                return false;
+            }
+            owner = fd_ctx->ownerWorker;
+        }
+
+        return runOnOwnerSyncBool(owner, [this, fd_ctx, fd, event, result, owner]() -> bool
+                                  {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!(fd_ctx->events & event))
+            {
+                return false;
+            }
+
+            WorkerContext& worker = m_workerContexts[owner];
+            Event new_events = static_cast<Event>(fd_ctx->events & ~event);
+            int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
+            epoll_event epevent;
+            memset(&epevent, 0, sizeof(epevent));
+            epevent.events = ToEpollEvents(new_events);
+            epevent.data.ptr = fd_ctx;
+
+            int rt = epoll_ctl(worker.epfd, op, fd, &epevent);
+            if (rt)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
+                                          << op << "," << fd << "," << epevent.events << "):"
+                                          << rt << " (" << errno << ") (" << strerror(errno) << ")";
+                return false;
+            }
+
+            fd_ctx->triggerEvent(event, result);
+            --m_pendingEventCount;
+            if (fd_ctx->events == NONE)
+            {
+                fd_ctx->ownerWorker = Scheduler::kInvalidWorker;
+            }
+            return true; });
+    }
+
+    bool IOManager::cancelAll(int fd)
+    {
+        FdContext *fd_ctx = getFdContext(fd, false);
+        if (!fd_ctx)
+        {
+            return false;
+        }
+
+        size_t owner = Scheduler::kInvalidWorker;
+        {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!fd_ctx->events)
+            {
+                return false;
+            }
+            owner = fd_ctx->ownerWorker;
+        }
+
+        return runOnOwnerSyncBool(owner, [this, fd_ctx, fd, owner]() -> bool
+                                  {
+            FdContext::MutexType::Lock lock(fd_ctx->mutex);
+            if (!fd_ctx->events)
+            {
+                return false;
+            }
+
+            WorkerContext& worker = m_workerContexts[owner];
+            epoll_event epevent;
+            memset(&epevent, 0, sizeof(epevent));
+            epevent.events = 0;
+            epevent.data.ptr = fd_ctx;
+
+            int rt = epoll_ctl(worker.epfd, EPOLL_CTL_DEL, fd, &epevent);
+            if (rt)
+            {
+                SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << worker.epfd << ", "
+                                          << EPOLL_CTL_DEL << "," << fd << "," << epevent.events << "):"
+                                          << rt << " (" << errno << ") (" << strerror(errno) << ")";
+                return false;
+            }
+
+            if (fd_ctx->events & READ)
+            {
+                fd_ctx->triggerEvent(READ, Fiber::WAIT_CANCELLED);
+                --m_pendingEventCount;
+            }
+            if (fd_ctx->events & WRITE)
+            {
+                fd_ctx->triggerEvent(WRITE, Fiber::WAIT_CANCELLED);
+                --m_pendingEventCount;
+            }
+            if (fd_ctx->events == NONE)
+            {
+                fd_ctx->ownerWorker = Scheduler::kInvalidWorker;
+            }
+            return true; });
+    }
+
+    void IOManager::tickle(size_t worker)
+    {
+        if (worker >= m_workerContexts.size())
+        {
+            return;
+        }
+
+        uint64_t one = 1;
+        ssize_t rt = write(m_workerContexts[worker].wakeFd, &one, sizeof(one));
+        if (rt < 0 && errno != EAGAIN)
+        {
+            SYLAR_ASSERT(false);
+        }
+    }
+
+    bool IOManager::stopping()
+    {
+        uint64_t timeout = 0;
+        return stopping(timeout);
+    }
+
+    bool IOManager::stopping(uint64_t &timeout)
+    {
+        size_t worker = getCurrentWorkerIndex();
+        if (worker == Scheduler::kInvalidWorker)
+        {
+            timeout = ~0ull;
+        }
+        else
+        {
+            timeout = getNextTimer(worker);
+        }
+
+        return timeout == ~0ull &&
+               m_pendingEventCount.load(std::memory_order_acquire) == 0 &&
+               !hasTimer() &&
+               Scheduler::stopping();
+    }
+
+    size_t IOManager::getTimerWorkerIndex()
+    {
+        size_t current = getCurrentWorkerIndex();
+        if (current != Scheduler::kInvalidWorker)
+        {
+            return current;
+        }
+        return m_timerWorkerCursor.fetch_add(1, std::memory_order_relaxed) % getWorkerCount();
+    }
+
+    void IOManager::onTimerInsertedAtFront(size_t worker)
+    {
+        tickle(worker);
+    }
+
+    void IOManager::onEventTimeout(int fd, Event event, uint64_t wait_token)
+    {
+        FdContext *fd_ctx = getFdContext(fd, false);
+        if (!fd_ctx)
+        {
+            return;
+        }
+
+        FdContext::MutexType::Lock lock(fd_ctx->mutex);
+        if (!(fd_ctx->events & event))
+        {
+            return;
+        }
+
+        FdContext::EventContext &event_ctx = fd_ctx->getEventContext(event);
+        if (event_ctx.waitToken != wait_token)
+        {
+            return;
+        }
+
+        size_t owner = fd_ctx->ownerWorker;
+        WorkerContext &worker = m_workerContexts[owner];
+        Event new_events = static_cast<Event>(fd_ctx->events & ~event);
+        int op = new_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
+        epoll_event epevent;
+        memset(&epevent, 0, sizeof(epevent));
+        epevent.events = ToEpollEvents(new_events);
+        epevent.data.ptr = fd_ctx;
+
+        int rt = epoll_ctl(worker.epfd, op, fd, &epevent);
+        if (rt)
+        {
+            return;
+        }
+
+        fd_ctx->triggerEvent(event, Fiber::WAIT_TIMEOUT);
+        --m_pendingEventCount;
+    }
+
+    void IOManager::idle()
+    {
+        static const int MAX_EVENTS = 256;
+        std::vector<epoll_event> events(MAX_EVENTS);
+        size_t worker = getCurrentWorkerIndex();
+        SYLAR_ASSERT(worker != Scheduler::kInvalidWorker);
+
+        WorkerContext &ctx = m_workerContexts[worker];
+        while (true)
+        {
+            uint64_t next_timeout = 0;
+            if (stopping(next_timeout))
             {
                 break;
             }
-        } while (true);
 
-        // 处理到期的定时器回调
-        std::vector<std::function<void()>> cbs;
-        listExpiredCb(cbs);
-        if (!cbs.empty())
-        {
-            // 将过期的定时器回调全部投入调度器
-            schedule(cbs.begin(), cbs.end());
-            cbs.clear();
+            int timeout = -1;
+            if (next_timeout != ~0ull)
+            {
+                timeout = next_timeout > static_cast<uint64_t>(INT_MAX)
+                              ? INT_MAX
+                              : static_cast<int>(next_timeout);
+            }
+
+            int rt = 0;
+            do
+            {
+                rt = epoll_wait(ctx.epfd, &events[0], MAX_EVENTS, timeout);
+            } while (rt < 0 && errno == EINTR);
+
+            for (int i = 0; i < rt; ++i)
+            {
+                epoll_event &event = events[i];
+                if (event.data.fd == ctx.wakeFd)
+                {
+                    uint64_t dummy = 0;
+                    while (read(ctx.wakeFd, &dummy, sizeof(dummy)) > 0)
+                    {
+                    }
+                    continue;
+                }
+
+                FdContext *fd_ctx = static_cast<FdContext *>(event.data.ptr);
+                FdContext::MutexType::Lock lock(fd_ctx->mutex);
+
+                if (event.events & (EPOLLERR | EPOLLHUP))
+                {
+                    event.events |= (EPOLLIN | EPOLLOUT);
+                }
+
+                uint32_t real_events = NONE;
+                if (event.events & EPOLLIN)
+                {
+                    real_events |= READ;
+                }
+                if (event.events & EPOLLOUT)
+                {
+                    real_events |= WRITE;
+                }
+                real_events &= fd_ctx->events;
+
+                if (real_events == NONE)
+                {
+                    continue;
+                }
+
+                Event left_events = static_cast<Event>(fd_ctx->events & ~real_events);
+                int op = left_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
+                epoll_event epevent;
+                memset(&epevent, 0, sizeof(epevent));
+                epevent.events = ToEpollEvents(left_events);
+                epevent.data.ptr = fd_ctx;
+
+                int rt2 = epoll_ctl(ctx.epfd, op, fd_ctx->fd, &epevent);
+                if (rt2)
+                {
+                    SYLAR_LOG_ERROR(g_logger) << "epoll_ctl(" << ctx.epfd << ", "
+                                              << op << "," << fd_ctx->fd << "," << epevent.events << "):"
+                                              << rt2 << " (" << errno << ") (" << strerror(errno) << ")";
+                    continue;
+                }
+
+                if (real_events & READ)
+                {
+                    fd_ctx->triggerEvent(READ, Fiber::WAIT_READY);
+                    --m_pendingEventCount;
+                }
+                if (real_events & WRITE)
+                {
+                    fd_ctx->triggerEvent(WRITE, Fiber::WAIT_READY);
+                    --m_pendingEventCount;
+                }
+            }
+
+            std::vector<std::function<void()>> cbs;
+            listExpiredCb(worker, cbs);
+            if (!cbs.empty())
+            {
+                schedule(cbs.begin(), cbs.end());
+            }
+
+            Fiber::GetThisRaw()->yield();
         }
-
-        // 处理就绪的 IO 事件
-        for (int i = 0; i < rt; ++i)
-        {
-            epoll_event& event = events[i];
-            // 如果是自唤醒消息，读空管道继续
-            if (event.data.fd == m_tickleFds[0])
-            {
-                uint8_t dummy[256];
-                while (read(m_tickleFds[0], dummy, sizeof(dummy)) > 0)
-                    ;
-                continue;
-            }
-
-            // 拿到注册时绑定的 FdContext
-            FdContext* fd_ctx = (FdContext*)event.data.ptr;
-            FdContext::MutexType::Lock lock(fd_ctx->mutex);
-
-            // 处理错误事件：转成读写事件由上层处理
-            if (event.events & (EPOLLERR | EPOLLHUP))
-            {
-                event.events |= (EPOLLIN | EPOLLOUT) & fd_ctx->events;
-            }
-
-            uint32_t real_events = NONE;
-            if (event.events & EPOLLIN)
-            {
-                real_events |= READ;
-            }
-            if (event.events & EPOLLOUT)
-            {
-                real_events |= WRITE;
-            }
-
-            if ((fd_ctx->events & real_events) == NONE)
-            {
-                continue;
-            }
-
-            // 移除已触发的事件，剩下未触发的重新 MOD 注册（一次性触发模式）
-            uint32_t left_events = (fd_ctx->events & ~real_events);
-            int op = left_events ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-            event.events = EPOLLET | left_events;
-
-            int rt2 = epoll_ctl(m_epfd, op, fd_ctx->fd, &event);
-            if (rt2)
-            {
-                BASE_LOG_ERROR(g_logger) << "epoll_ctl(" << m_epfd << ", "
-                                         << op << "," << fd_ctx->fd << "," << event.events << "):"
-                                         << rt2 << " (" << errno << ") (" << strerror(errno) << ")";
-                continue;
-            }
-
-            // 分别触发就绪的读写事件
-            if (real_events & READ)
-            {
-                fd_ctx->triggerEvent(READ);
-                --m_pendingEventCount;
-            }
-            if (real_events & WRITE)
-            {
-                fd_ctx->triggerEvent(WRITE);
-                --m_pendingEventCount;
-            }
-        }
-
-        // 执行完一轮事件分发后，让出执行权，让 run() 里的调度逻辑去运行刚才放入的任务
-        Fiber::ptr cur = Fiber::GetThis();
-        auto raw_ptr = cur.get();
-        cur.reset();
-        raw_ptr->yield();
     }
-}
 
-IOManager* IOManager::GetThis()
-{
-    return dynamic_cast<IOManager*>(Scheduler::GetThis());
-}
+    IOManager *IOManager::GetThis()
+    {
+        return dynamic_cast<IOManager *>(Scheduler::GetThis());
+    }
 
-} // namespace sylar
+}

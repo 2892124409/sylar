@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -136,6 +137,27 @@ class FakeSink : public ai::service::MessageSink
     std::vector<ai::common::PersistMessage> records;
 };
 
+ai::llm::LlmRouter::ptr BuildRouter(const std::shared_ptr<FakeLlmClient>& llm)
+{
+    ai::llm::LlmClientRegistry::ptr registry(new ai::llm::LlmClientRegistry());
+
+    ai::llm::LlmProviderEntry entry;
+    entry.provider_id = "fake";
+    entry.provider_type = "openai_compatible";
+    entry.default_model = "deepseek-chat";
+    entry.client = llm;
+
+    std::string error;
+    bool ok = registry->Register(entry, error);
+    assert(ok);
+
+    std::unordered_map<std::string, std::string> model_to_provider;
+    model_to_provider["deepseek-chat"] = "fake";
+    model_to_provider["test-model"] = "fake";
+
+    return ai::llm::LlmRouter::ptr(new ai::llm::LlmRouter(registry, "fake", model_to_provider));
+}
+
 ai::config::ChatSettings BuildDefaultChatSettings()
 {
     ai::config::ChatSettings settings;
@@ -162,7 +184,8 @@ void TestCompleteAndHistory()
     std::shared_ptr<FakeStore> store(new FakeStore());
     std::shared_ptr<FakeSink> sink(new FakeSink());
 
-    ai::service::ChatService service(settings, llm, store, sink);
+    ai::llm::LlmRouter::ptr router = BuildRouter(llm);
+    ai::service::ChatService service(settings, router, store, sink);
 
     ai::common::ChatCompletionRequest request;
     request.sid = "sid-1";
@@ -200,7 +223,8 @@ void TestStream()
     std::shared_ptr<FakeStore> store(new FakeStore());
     std::shared_ptr<FakeSink> sink(new FakeSink());
 
-    ai::service::ChatService service(settings, llm, store, sink);
+    ai::llm::LlmRouter::ptr router = BuildRouter(llm);
+    ai::service::ChatService service(settings, router, store, sink);
 
     ai::common::ChatCompletionRequest request;
     request.sid = "sid-2";
@@ -266,7 +290,8 @@ void TestMissingSidRejected()
     std::shared_ptr<FakeStore> store(new FakeStore());
     std::shared_ptr<FakeSink> sink(new FakeSink());
 
-    ai::service::ChatService service(settings, llm, store, sink);
+    ai::llm::LlmRouter::ptr router = BuildRouter(llm);
+    ai::service::ChatService service(settings, router, store, sink);
 
     ai::common::ChatCompletionRequest request;
     request.sid = "";
@@ -311,7 +336,8 @@ void TestSummaryRefresh()
     store->seed_messages.push_back(m3);
     store->seed_messages.push_back(m4);
 
-    ai::service::ChatService service(settings, llm, store, sink);
+    ai::llm::LlmRouter::ptr router = BuildRouter(llm);
+    ai::service::ChatService service(settings, router, store, sink);
 
     ai::common::ChatCompletionRequest request;
     request.sid = "sid-sum";

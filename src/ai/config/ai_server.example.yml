@@ -121,16 +121,7 @@ ai:
     dedup_ttl_ms: 600000              # 0 与 dedup_max_entries=0 一起可关闭去重
     dedup_max_entries: 50000
 
-# Scheduler/IO defaults:
-# - iomanager.use_caller: true  -> single IOM mode in ai/main.cc (io=accept)
-# - fiber.pool.enabled: false   -> matches current benchmark-preferred default
-# You can override these values per deployment needs.
+# Scheduler/IO default:
+# - iomanager.use_caller: true  -> caller mode for io_worker; accept_worker remains a separate IOManager
 iomanager:
   use_caller: true
-
-fiber:
-  pool:
-    enabled: false
-    max_size: 1000
-    min_keep: 10
-    idle_timeout: 60000

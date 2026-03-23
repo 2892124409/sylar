@@ -63,7 +63,7 @@ bool LoadConfigFromFile(const std::string& config_file, std::string& error)
     try
     {
         YAML::Node node = YAML::LoadFile(config_file);
-        base::Config::LoadFromYaml(node);
+        sylar::Config::LoadFromYaml(node);
         return true;
     }
     catch (const std::exception& ex)
@@ -132,8 +132,8 @@ bool DecodePersistPayload(const std::string& payload, ai::common::PersistMessage
 int main(int argc, char** argv)
 {
     sylar::set_hook_enable(true);
-    BASE_LOG_ROOT()->setLevel(base::LogLevel::INFO);
-    BASE_LOG_NAME("system")->setLevel(base::LogLevel::INFO);
+    BASE_LOG_ROOT()->setLevel(sylar::LogLevel::INFO);
+    BASE_LOG_NAME("system")->setLevel(sylar::LogLevel::INFO);
 
     std::string config_file = ParseConfigFilePath(argc, argv);
     std::string error;
