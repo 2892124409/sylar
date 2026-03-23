@@ -3,9 +3,8 @@
 namespace base
 {
 
-static void ListAllMember(const std::string& prefix,
-                          const YAML::Node& node,
-                          std::list<std::pair<std::string, const YAML::Node>>& output)
+static void ListAllMember(
+    const std::string& prefix, const YAML::Node& node, std::list<std::pair<std::string, const YAML::Node>>& output)
 {
     if (prefix.find_first_not_of("abcdefghijklmnopqrstuvwxyz._0123456789") != std::string::npos)
     {
@@ -15,12 +14,9 @@ static void ListAllMember(const std::string& prefix,
     output.push_back(std::make_pair(prefix, node));
     if (node.IsMap())
     {
-        for (auto it = node.begin();
-             it != node.end(); ++it)
+        for (auto it = node.begin(); it != node.end(); ++it)
         {
-            ListAllMember(prefix.empty() ? it->first.Scalar()
-                                         : prefix + "." + it->first.Scalar(),
-                          it->second, output);
+            ListAllMember(prefix.empty() ? it->first.Scalar() : prefix + "." + it->first.Scalar(), it->second, output);
         }
     }
 }

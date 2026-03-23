@@ -4,7 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
-#include <sstream>
+#include <vector>
 
 namespace ai
 {
@@ -17,6 +17,7 @@ AsyncMySqlWriter::AsyncMySqlWriter(const MysqlConnectionPool::ptr& pool,
                                    const config::PersistSettings& persist_settings)
     : m_pool(pool)
     , m_persist_settings(persist_settings)
+    , m_persister(new ChatMessagePersister(pool))
     , m_running(false)
 {
 }
@@ -40,7 +41,14 @@ bool AsyncMySqlWriter::Start(std::string& error)
         return false;
     }
 
-    if (!EnsureSchema(error))
+    if (!m_persister)
+    {
+        error = "chat message persister is null";
+        return false;
+    }
+
+    // 统一交由 ChatMessagePersister 进行幂等建表与字段补齐。
+    if (!m_persister->Init(error))
     {
         return false;
     }
@@ -130,131 +138,22 @@ void AsyncMySqlWriter::Run()
     }
 }
 
-bool AsyncMySqlWriter::EnsureSchema(std::string& error)
-{
-    ScopedMysqlConn conn(m_pool, 0, error);
-    if (!conn)
-    {
-        return false;
-    }
-
-    static const char* kCreateConversationsSql =
-        "CREATE TABLE IF NOT EXISTS conversations ("
-        " id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
-        " sid VARCHAR(128) NOT NULL,"
-        " conversation_id VARCHAR(128) NOT NULL,"
-        " created_at_ms BIGINT UNSIGNED NOT NULL,"
-        " updated_at_ms BIGINT UNSIGNED NOT NULL,"
-        " summary_text MEDIUMTEXT NOT NULL DEFAULT '',"
-        " summary_updated_at_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,"
-        " PRIMARY KEY (id),"
-        " UNIQUE KEY uniq_sid_conv (sid, conversation_id),"
-        " KEY idx_updated_at_ms (updated_at_ms)"
-        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-
-    static const char* kCreateMessagesSql =
-        "CREATE TABLE IF NOT EXISTS chat_messages ("
-        " id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
-        " sid VARCHAR(128) NOT NULL,"
-        " conversation_id VARCHAR(128) NOT NULL,"
-        " role VARCHAR(16) NOT NULL,"
-        " content MEDIUMTEXT NOT NULL,"
-        " created_at_ms BIGINT UNSIGNED NOT NULL,"
-        " PRIMARY KEY (id),"
-        " KEY idx_sid_conv_time (sid, conversation_id, created_at_ms)"
-        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-
-    static const char* kAlterConversationSummaryText =
-        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS summary_text MEDIUMTEXT NOT NULL DEFAULT ''";
-
-    static const char* kAlterConversationSummaryUpdatedAt =
-        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS summary_updated_at_ms BIGINT UNSIGNED NOT NULL DEFAULT 0";
-
-    return ExecuteSql(conn.get(), kCreateConversationsSql, error) &&
-           ExecuteSql(conn.get(), kCreateMessagesSql, error) &&
-           ExecuteSql(conn.get(), kAlterConversationSummaryText, error) &&
-           ExecuteSql(conn.get(), kAlterConversationSummaryUpdatedAt, error);
-}
-
-bool AsyncMySqlWriter::ExecuteSql(MYSQL* conn, const std::string& sql, std::string& error)
-{
-    if (mysql_query(conn, sql.c_str()) != 0)
-    {
-        error = mysql_error(conn);
-        return false;
-    }
-    return true;
-}
-
 bool AsyncMySqlWriter::FlushBatch(std::deque<common::PersistMessage>& batch, std::string& error)
 {
-    ScopedMysqlConn conn(m_pool, 0, error);
-    if (!conn)
+    if (!m_persister)
     {
+        error = "chat message persister is null";
         return false;
     }
 
-    if (!ExecuteSql(conn.get(), "BEGIN", error))
+    // 将 deque 转为 vector，复用统一落库执行器。
+    std::vector<common::PersistMessage> messages;
+    messages.reserve(batch.size());
+    for (std::deque<common::PersistMessage>::const_iterator it = batch.begin(); it != batch.end(); ++it)
     {
-        return false;
+        messages.push_back(*it);
     }
-
-    for (size_t i = 0; i < batch.size(); ++i)
-    {
-        const common::PersistMessage& message = batch[i];
-        std::ostringstream upsert_conversation;
-        upsert_conversation << "INSERT INTO conversations (sid, conversation_id, created_at_ms, updated_at_ms) VALUES ('"
-                            << Escape(conn.get(), message.sid)
-                            << "', '"
-                            << Escape(conn.get(), message.conversation_id)
-                            << "', "
-                            << message.created_at_ms
-                            << ", "
-                            << message.created_at_ms
-                            << ") ON DUPLICATE KEY UPDATE updated_at_ms=VALUES(updated_at_ms)";
-
-        if (!ExecuteSql(conn.get(), upsert_conversation.str(), error))
-        {
-            ExecuteSql(conn.get(), "ROLLBACK", error);
-            return false;
-        }
-
-        std::ostringstream insert_message;
-        insert_message << "INSERT INTO chat_messages (sid, conversation_id, role, content, created_at_ms) VALUES ('"
-                       << Escape(conn.get(), message.sid)
-                       << "', '"
-                       << Escape(conn.get(), message.conversation_id)
-                       << "', '"
-                       << Escape(conn.get(), message.role)
-                       << "', '"
-                       << Escape(conn.get(), message.content)
-                       << "', "
-                       << message.created_at_ms
-                       << ")";
-
-        if (!ExecuteSql(conn.get(), insert_message.str(), error))
-        {
-            ExecuteSql(conn.get(), "ROLLBACK", error);
-            return false;
-        }
-    }
-
-    if (!ExecuteSql(conn.get(), "COMMIT", error))
-    {
-        ExecuteSql(conn.get(), "ROLLBACK", error);
-        return false;
-    }
-
-    return true;
-}
-
-std::string AsyncMySqlWriter::Escape(MYSQL* conn, const std::string& value)
-{
-    std::string escaped;
-    escaped.resize(value.size() * 2 + 1);
-    unsigned long length = mysql_real_escape_string(conn, &escaped[0], value.c_str(), value.size());
-    escaped.resize(length);
-    return escaped;
+    return m_persister->PersistBatch(messages, error);
 }
 
 } // namespace storage

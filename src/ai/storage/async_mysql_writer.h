@@ -3,9 +3,8 @@
 
 #include "ai/config/ai_app_config.h"
 #include "ai/service/chat_interfaces.h"
+#include "ai/storage/chat_message_persister.h"
 #include "ai/storage/mysql_connection_pool.h"
-
-#include <mysql/mysql.h>
 
 #include <condition_variable>
 #include <deque>
@@ -29,7 +28,7 @@ namespace storage
  * 该类实现 `service::MessageSink`，用于将请求线程中的消息写入动作异步化：
  * - 前台线程调用 `Enqueue` 仅负责入队；
  * - 后台线程周期性/批量刷盘；
- * - 通过事务保证单批次写入的一致性。
+ * - 具体 SQL 写入由 `ChatMessagePersister` 统一执行。
  *
  * 语义说明：
  * - `Enqueue` 成功表示“消息已入内存队列”，不表示“已提交数据库”。
@@ -82,31 +81,18 @@ class AsyncMySqlWriter : public service::MessageSink
     void Run();
 
     /**
-     * @brief 确保最小表结构存在（幂等建表）。
-     */
-    bool EnsureSchema(std::string& error);
-
-    /**
-     * @brief 执行单条 SQL。
-     */
-    bool ExecuteSql(MYSQL* conn, const std::string& sql, std::string& error);
-
-    /**
      * @brief 将一个批次事务性写入 MySQL。
-     * @details 内部使用 BEGIN/COMMIT/ROLLBACK 管理事务边界。
+     * @details 实际写库委托给 `ChatMessagePersister::PersistBatch`。
      */
     bool FlushBatch(std::deque<common::PersistMessage>& batch, std::string& error);
-
-    /**
-     * @brief SQL 字符串转义，避免注入风险。
-     */
-    std::string Escape(MYSQL* conn, const std::string& value);
 
   private:
     /** @brief MySQL 连接池。 */
     MysqlConnectionPool::ptr m_pool;
     /** @brief 持久化策略配置（队列容量、批大小、刷盘间隔）。 */
     config::PersistSettings m_persist_settings;
+    /** @brief 统一 SQL 执行器（幂等建表 + 事务批写）。 */
+    ChatMessagePersister::ptr m_persister;
 
     /** @brief 运行标志；true 表示后台线程应继续工作。 */
     bool m_running;

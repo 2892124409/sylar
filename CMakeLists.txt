@@ -174,6 +174,7 @@ if(BUILD_AI_CHAT_SERVER)
         src/ai/storage/auth_repository.cc
         src/ai/storage/mysql_connection_pool.cc
         src/ai/storage/chat_repository.cc
+        src/ai/storage/chat_message_persister.cc
         src/ai/storage/async_mysql_writer.cc
         src/ai/main.cc
     )

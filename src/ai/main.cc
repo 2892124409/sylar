@@ -1,22 +1,22 @@
 #include "ai/config/ai_app_config.h"
 #include "ai/http/ai_http_api.h"
-#include "ai/middleware/auth_middleware.h"
-#include "ai/middleware/request_id_middleware.h"
-#include "ai/mq/rabbitmq_message_sink.h"
 #include "ai/llm/anthropic_client.h"
 #include "ai/llm/llm_client_factory.h"
 #include "ai/llm/llm_client_registry.h"
 #include "ai/llm/llm_router.h"
-#include "ai/llm/provider_key_pool.h"
 #include "ai/llm/openai_compatible_client.h"
+#include "ai/llm/provider_key_pool.h"
+#include "ai/middleware/auth_middleware.h"
+#include "ai/middleware/request_id_middleware.h"
+#include "ai/mq/rabbitmq_message_sink.h"
 #include "ai/rag/embedding_client.h"
 #include "ai/rag/rag_indexer.h"
 #include "ai/rag/rag_retriever.h"
 #include "ai/rag/vector_store.h"
 #include "ai/service/auth_service.h"
 #include "ai/service/chat_service.h"
-#include "ai/storage/async_mysql_writer.h"
 #include "ai/storage/api_key_pool_repository.h"
+#include "ai/storage/async_mysql_writer.h"
 #include "ai/storage/auth_repository.h"
 #include "ai/storage/chat_repository.h"
 #include "ai/storage/mysql_connection_pool.h"
@@ -228,7 +228,8 @@ int main(int argc, char** argv)
         api_key_pool_repository.reset(new ai::storage::ApiKeyPoolRepository(mysql_pool));
         if (!api_key_pool_repository->Init(error))
         {
-            BASE_LOG_WARN(g_logger) << "init api key pool repository failed, fallback to single key for all providers: " << error;
+            BASE_LOG_WARN(g_logger) << "init api key pool repository failed, fallback to single key for all providers: "
+                                    << error;
             api_key_pool_repository.reset();
         }
     }
@@ -301,9 +302,8 @@ int main(int argc, char** argv)
             if (api_key_pool_repository)
             {
                 // 第五阶段：key pool 绑定 provider_id，避免跨 provider 污染状态。
-                ai::llm::ProviderKeyPool::ptr key_pool(new ai::llm::ProviderKeyPool(api_key_pool_repository,
-                                                                                     provider.key_pool,
-                                                                                     provider.id));
+                ai::llm::ProviderKeyPool::ptr key_pool(
+                    new ai::llm::ProviderKeyPool(api_key_pool_repository, provider.key_pool, provider.id));
                 std::string key_pool_error;
                 if (!key_pool->Start(key_pool_error))
                 {
@@ -344,9 +344,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    ai::llm::LlmRouter::ptr llm_router(new ai::llm::LlmRouter(llm_registry,
-                                                              llm_settings.routing.default_provider_id,
-                                                              llm_settings.routing.model_to_provider));
+    ai::llm::LlmRouter::ptr llm_router(new ai::llm::LlmRouter(
+        llm_registry, llm_settings.routing.default_provider_id, llm_settings.routing.model_to_provider));
 
     /// @brief Step 8: 组装账号与对话业务服务。
     ai::service::AuthService::ptr auth_service(new ai::service::AuthService(auth_settings, auth_repository));
@@ -384,10 +383,8 @@ int main(int argc, char** argv)
         rag_indexer.reset(new ai::rag::RagIndexer(embedding_client, vector_store, rag_idx_settings));
 
         std::vector<float> probe_embedding;
-        if (!embedding_client->Embed("rag_startup_probe", probe_embedding, error) ||
-            probe_embedding.empty() ||
-            !vector_store->EnsureCollection(probe_embedding.size(), error) ||
-            !rag_indexer->Start(error))
+        if (!embedding_client->Embed("rag_startup_probe", probe_embedding, error) || probe_embedding.empty() ||
+            !vector_store->EnsureCollection(probe_embedding.size(), error) || !rag_indexer->Start(error))
         {
             BASE_LOG_WARN(g_logger) << "init rag components failed, disable rag: " << error;
             rag_settings.enabled = false;
@@ -397,8 +394,8 @@ int main(int argc, char** argv)
     }
 
     /// @brief 组装业务编排核心 ChatService。
-    ai::service::ChatService::ptr chat_service(
-        new ai::service::ChatService(chat_settings, llm_router, chat_repository, message_sink, rag_settings, rag_retriever, rag_indexer));
+    ai::service::ChatService::ptr chat_service(new ai::service::ChatService(
+        chat_settings, llm_router, chat_repository, message_sink, rag_settings, rag_retriever, rag_indexer));
 
     /// @brief Step 9: 按配置创建 HTTP worker（benchmark 同款模式）。
     /// @details
@@ -571,8 +568,8 @@ int main(int argc, char** argv)
         rag_indexer->Stop();
     }
     for (std::unordered_map<std::string, ai::llm::ProviderKeyPool::ptr>::iterator it = provider_key_pools.begin();
-         it != provider_key_pools.end();
-         ++it)
+        it != provider_key_pools.end();
+        ++it)
     {
         if (it->second)
         {
