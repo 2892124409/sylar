@@ -221,9 +221,6 @@ target_link_libraries(test_bytearray sylar)
 add_executable(test_stream tests/test_stream.cc)
 target_link_libraries(test_stream sylar)
 
-add_executable(test_tcp_server tests/test_tcp_server.cc)
-target_link_libraries(test_tcp_server sylar)
-
 add_executable(test_memorypool tests/test_memory_pool.cc)
 target_link_libraries(test_memorypool pthread)
 
