@@ -32,6 +32,9 @@ struct Options
     uint64_t keepalive_timeout_ms = 5000;
     uint32_t keepalive_max_requests = 0;
     bool session_enabled = false;
+    bool tls_enabled = false;
+    std::string cert_file;
+    std::string key_file;
 };
 
 void PrintUsage(const char* prog)
@@ -46,6 +49,9 @@ void PrintUsage(const char* prog)
         << "  --keepalive-timeout-ms <ms>   Keep-alive idle timeout in ms (default: 5000)\n"
         << "  --keepalive-max-requests <n>  Max keep-alive requests, 0=unlimited\n"
         << "  --session-enabled <0|1>       Enable automatic HTTP sessions (default: 0)\n"
+        << "  --tls <0|1>                   Enable HTTPS/TLS mode (default: 0)\n"
+        << "  --cert-file <path>            TLS certificate file (PEM)\n"
+        << "  --key-file <path>             TLS private key file (PEM)\n"
         << "  --help                        Show this help\n";
 }
 
@@ -169,6 +175,18 @@ ParseStatus ParseOptions(int argc, char** argv, Options& options)
         {
             options.session_enabled = ParseBool(value);
         }
+        else if (arg == "--tls")
+        {
+            options.tls_enabled = ParseBool(value);
+        }
+        else if (arg == "--cert-file")
+        {
+            options.cert_file = value;
+        }
+        else if (arg == "--key-file")
+        {
+            options.key_file = value;
+        }
         else
         {
             std::cerr << "unknown argument: " << arg << std::endl;
@@ -219,6 +237,23 @@ int main(int argc, char** argv)
         new sylar::IOManager(options.accept_threads, false, "http-bench-accept"));
 
     http::HttpServer::ptr server(new http::HttpServer(io_worker.get(), accept_worker.get()));
+    if (options.tls_enabled)
+    {
+        if (options.cert_file.empty() || options.key_file.empty())
+        {
+            std::cerr << "tls enabled but cert/key not provided" << std::endl;
+            return 1;
+        }
+        http::ssl::SslConfig ssl_config;
+        ssl_config.setCertificateFile(options.cert_file);
+        ssl_config.setPrivateKeyFile(options.key_file);
+        ssl_config.setVerifyPeer(false);
+        if (!server->setSslConfig(ssl_config))
+        {
+            std::cerr << "failed to initialize TLS context with cert/key" << std::endl;
+            return 1;
+        }
+    }
     server->getServletDispatch()->addServlet(
         "/ping",
         [](http::HttpRequest::ptr, http::HttpResponse::ptr resp, http::HttpSession::ptr) -> int32_t
@@ -260,10 +295,12 @@ int main(int argc, char** argv)
     InstallSignals();
 
     std::cout
-        << "http_bench_server listening on " << options.host << ":" << options.port << "\n"
+        << "http_bench_server listening on " << options.host << ":" << options.port
+        << " protocol=" << (options.tls_enabled ? "https" : "http") << "\n"
         << "  io_threads=" << options.io_threads
         << " accept_threads=" << options.accept_threads
         << " session_enabled=" << (options.session_enabled ? 1 : 0)
+        << " tls_enabled=" << (options.tls_enabled ? 1 : 0)
         << " keepalive_timeout_ms=" << options.keepalive_timeout_ms
         << " keepalive_max_requests=" << options.keepalive_max_requests
         << " max_connections=" << options.max_connections << "\n"

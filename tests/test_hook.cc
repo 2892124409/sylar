@@ -338,6 +338,10 @@ int main(int argc, char **argv)
         SYLAR_LOG_INFO(g_logger) << "========================================";
         iom.stop(); });
 
+#ifdef SYLAR_NET_VARIANT_UPSTREAM_REF
+    iom.stop();
+#else
     iom.runCaller();
+#endif
     return 0;
 }

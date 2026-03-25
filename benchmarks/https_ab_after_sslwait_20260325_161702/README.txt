@@ -1,0 +1,10 @@
+profile=https_only_after_ssl_wait
+after_patch=ssl_want_read_write_wait_event
+rounds=3
+duration=5s
+client_threads=16
+io_threads=8
+accept_threads=1
+connections=1024,2048
+cases=ping,echo_raw
+protocol=https

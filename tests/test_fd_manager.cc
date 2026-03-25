@@ -16,10 +16,16 @@ int main()
     assert(first->isSocket());
     assert(!first->isClose());
 
+    sylar::FdCtx::ptr second;
+#ifdef SYLAR_NET_VARIANT_UPSTREAM_REF
+    // upstream_ref 仅验证 del 后可重建上下文（无 setClose 语义）。
+    sylar::FdMgr::GetInstance()->del(fd);
+    second = sylar::FdMgr::GetInstance()->get(fd, true);
+#else
     // 模拟 close() 与 del() 之间的短窗口：旧上下文已标记关闭，但槽位尚未清空。
     first->setClose(true);
-
-    sylar::FdCtx::ptr second = sylar::FdMgr::GetInstance()->get(fd, true);
+    second = sylar::FdMgr::GetInstance()->get(fd, true);
+#endif
     assert(second);
     assert(second.get() != first.get());
     assert(second->isSocket());

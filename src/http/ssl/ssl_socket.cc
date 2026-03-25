@@ -1,7 +1,10 @@
 #include "http/ssl/ssl_socket.h"
 
 #include "log/logger.h"
+#include "sylar/concurrency/thread.h"
+#include "sylar/fiber/fd_manager.h"
 
+#include <errno.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <unistd.h>
@@ -17,10 +20,7 @@ namespace
 {
 
 /**
- * @brief 归一化 SSL I/O 返回值
- * @param ssl SSL 会话对象
- * @param rt  SSL_read/SSL_write 返回值
- * @return >0 成功字节数；0 对端关闭；-2 需重试；-1 失败
+ * @brief 归一化 SSL I/O 返回值，并给出需要等待的事件
  */
 static int HandleSslIoResult(SSL* ssl, int rt)
 {
@@ -38,6 +38,13 @@ static int HandleSslIoResult(SSL* ssl, int rt)
     }
     // 非阻塞/协程场景下需要等待读写条件后重试。
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+    {
+        return -2;
+    }
+    // 某些 nonblocking + hook 组合下会走 SYSCALL 并带 EAGAIN/EWOULDBLOCK，
+    // 这类场景与 WANT_READ/WANT_WRITE 等价，应该重试而非直接失败。
+    if (err == SSL_ERROR_SYSCALL &&
+        (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
     {
         return -2;
     }
@@ -101,8 +108,36 @@ SslSocket::ptr SslSocket::FromSocket(sylar::Socket::ptr socket, SslContext::ptr 
     }
 
     SslSocket::ptr ssl_socket(new SslSocket(ctx, mode, socket->getFamily()));
+    // dup 出来的 fd 不一定已经在 FdManager 中注册（尤其是 upstream_ref 变体），
+    // 这里显式创建上下文，确保后续 Socket::init(fd) 能成功接管。
+#ifdef SYLAR_NET_VARIANT_UPSTREAM_REF
+    if (!sylar::FdMgr::GetInstance()->get(fd, true))
+    {
+        BASE_LOG_ERROR(g_logger) << "create fd_ctx for ssl socket failed fd=" << fd;
+        ::close(fd);
+        return nullptr;
+    }
+#else
+    sylar::FdCtx::ptr fd_ctx = sylar::FdMgr::GetInstance()->get(fd, true);
+    if (!fd_ctx || fd_ctx->isClose())
+    {
+        BASE_LOG_ERROR(g_logger) << "create fd_ctx for ssl socket failed fd=" << fd;
+        ::close(fd);
+        return nullptr;
+    }
+    if (!fd_ctx->bindAffinityIfUnset(sylar::GetThreadId()))
+    {
+        BASE_LOG_ERROR(g_logger) << "bind ssl socket affinity failed"
+                                 << " fd=" << fd
+                                 << " current_tid=" << sylar::GetThreadId()
+                                 << " affinity_tid=" << fd_ctx->getAffinityThread();
+        ::close(fd);
+        return nullptr;
+    }
+#endif
     if (!ssl_socket->init(fd))
     {
+        BASE_LOG_ERROR(g_logger) << "init ssl socket from fd failed fd=" << fd;
         // init 失败需手动关闭 dup 出来的 fd。
         ::close(fd);
         return nullptr;
@@ -167,7 +202,7 @@ int SslSocket::send(const void* buffer, size_t length, int)
         int result = HandleSslIoResult(m_ssl, rt);
         if (result == -2)
         {
-            // WANT_READ/WANT_WRITE 时自旋重试。
+            // WANT_READ/WANT_WRITE 时重试。
             continue;
         }
         // 返回成功字节数/EOF/失败。
@@ -203,7 +238,7 @@ int SslSocket::recv(void* buffer, size_t length, int)
         int result = HandleSslIoResult(m_ssl, rt);
         if (result == -2)
         {
-            // WANT_READ/WANT_WRITE 时自旋重试。
+            // WANT_READ/WANT_WRITE 时重试。
             continue;
         }
         // 返回成功字节数/EOF/失败。
@@ -268,8 +303,14 @@ bool SslSocket::handshake()
             // 需要等待 I/O 条件后继续握手。
             continue;
         }
+        if (err == SSL_ERROR_SYSCALL &&
+            (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+        {
+            continue;
+        }
         // 其他错误直接判定握手失败。
-        BASE_LOG_ERROR(g_logger) << "SSL handshake failed err=" << err;
+        BASE_LOG_ERROR(g_logger) << "SSL handshake failed err=" << err
+                                 << " errno=" << errno;
         return false;
     }
 }

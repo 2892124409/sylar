@@ -1,0 +1,9 @@
+impl,protocol,case_name,connections,rounds,median_rps,median_p99_ms,sum_socket_errors
+local,https,echo_raw,1024,3,57516,172.85,0
+local,https,echo_raw,2048,3,52068.8,485.21,0
+local,https,ping,1024,3,55172.9,215.05,0
+local,https,ping,2048,3,51814.5,496.11,0
+upstream_ref,https,echo_raw,1024,3,49806.6,50.04,0
+upstream_ref,https,echo_raw,2048,3,36350.4,260.78,0
+upstream_ref,https,ping,1024,3,48010.7,144.55,0
+upstream_ref,https,ping,2048,3,37836.8,285.81,0

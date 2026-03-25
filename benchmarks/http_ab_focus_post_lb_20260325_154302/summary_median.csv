@@ -1,0 +1,17 @@
+impl,protocol,case_name,connections,rounds,median_rps,median_p99_ms,sum_socket_errors
+local,http,echo_raw,1024,3,74691.2,34.15,0
+local,http,echo_raw,2048,3,78133.1,69.39,0
+local,http,ping,1024,3,76145.5,37.94,0
+local,http,ping,2048,3,76323.4,77.52,0
+local,https,echo_raw,1024,3,58822.6,186.01,0
+local,https,echo_raw,2048,3,55525.2,370.54,0
+local,https,ping,1024,3,57237.2,219.43,0
+local,https,ping,2048,3,51597.3,491.88,0
+upstream_ref,http,echo_raw,1024,3,60096,34.16,0
+upstream_ref,http,echo_raw,2048,3,52713.8,72,0
+upstream_ref,http,ping,1024,3,58971.6,41.11,0
+upstream_ref,http,ping,2048,3,51548.3,73.36,0
+upstream_ref,https,echo_raw,1024,3,46692.5,63.84,0
+upstream_ref,https,echo_raw,2048,3,36455.9,197.32,0
+upstream_ref,https,ping,1024,3,47308.7,180.03,0
+upstream_ref,https,ping,2048,3,36476.1,322.8,0

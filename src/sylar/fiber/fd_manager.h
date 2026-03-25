@@ -11,6 +11,7 @@
 #define __SYLAR_FD_MANAGER_H__
 
 #include <memory>
+#include <atomic>
 #include <vector>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -98,6 +99,28 @@ namespace sylar
          */
         uint64_t getTimeout(int type);
 
+        /**
+         * @brief 若当前未绑定线程，则绑定到 tid；若已绑定则要求与 tid 一致
+         * @return true 绑定成功或已绑定且一致；false 已绑定到其他线程
+         */
+        bool bindAffinityIfUnset(int tid);
+
+        /**
+         * @brief 获取线程亲和目标线程 id，-1 表示未绑定
+         */
+        int getAffinityThread() const
+        {
+            return m_affinityThread.load(std::memory_order_acquire);
+        }
+
+        /**
+         * @brief 清理线程亲和绑定
+         */
+        void clearAffinity()
+        {
+            m_affinityThread.store(-1, std::memory_order_release);
+        }
+
     private:
         /**
          * @brief 初始化
@@ -121,6 +144,8 @@ namespace sylar
         uint64_t m_recvTimeout;
         /// 写超时时间毫秒
         uint64_t m_sendTimeout;
+        /// fd 线程亲和目标线程 id，-1 表示未绑定
+        std::atomic<int> m_affinityThread;
     };
 
     /**

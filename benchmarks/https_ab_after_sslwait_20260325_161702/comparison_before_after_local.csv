@@ -1,0 +1,5 @@
+case_name,connections,before_local_rps,after_local_rps,delta_rps_pct,before_local_p99_ms,after_local_p99_ms,delta_p99_pct
+echo_raw,1024,58822.6,57516,-2.22126,186.01,172.85,-7.07489
+echo_raw,2048,55525.2,52068.8,-6.22492,370.54,485.21,30.9467
+ping,1024,57237.2,55172.9,-3.60657,219.43,215.05,-1.99608
+ping,2048,51597.3,51814.5,0.420952,491.88,496.11,0.859966

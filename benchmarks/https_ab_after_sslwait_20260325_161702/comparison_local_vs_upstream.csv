@@ -1,0 +1,5 @@
+protocol,case_name,connections,local_median_rps,upstream_median_rps,delta_rps_pct,local_median_p99_ms,upstream_median_p99_ms,delta_p99_pct,local_err_sum,upstream_err_sum
+https,echo_raw,1024,57516,49806.6,15.4787,172.85,50.04,245.424,0,0
+https,echo_raw,2048,52068.8,36350.4,43.2413,485.21,260.78,86.061,0,0
+https,ping,1024,55172.9,48010.7,14.9179,215.05,144.55,48.7721,0,0
+https,ping,2048,51814.5,37836.8,36.9421,496.11,285.81,73.5804,0,0

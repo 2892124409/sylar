@@ -1,0 +1,11 @@
+profile=high_concurrency
+rounds=4
+duration=15s
+client_threads=16
+io_threads=8
+accept_threads=1
+conn_levels=1024,2048
+cases=ping,echo_raw
+protocols=http,https
+server_cpuset=0-7
+client_cpuset=8-15

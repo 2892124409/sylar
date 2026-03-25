@@ -1,0 +1,9 @@
+protocol,case_name,connections,local_median_rps,upstream_median_rps,delta_rps_pct,local_median_p99_ms,upstream_median_p99_ms,delta_p99_pct,local_err_sum,upstream_err_sum
+http,echo_raw,1024,74691.2,60096,24.2865,34.15,34.16,-0.029274,0,0
+http,echo_raw,2048,78133.1,52713.8,48.2213,69.39,72,-3.625,0,0
+http,ping,1024,76145.5,58971.6,29.1223,37.94,41.11,-7.71102,0,0
+http,ping,2048,76323.4,51548.3,48.0619,77.52,73.36,5.67067,0,0
+https,echo_raw,1024,58822.6,46692.5,25.9787,186.01,63.84,191.369,0,0
+https,echo_raw,2048,55525.2,36455.9,52.3079,370.54,197.32,87.7863,0,0
+https,ping,1024,57237.2,47308.7,20.9866,219.43,180.03,21.8852,0,0
+https,ping,2048,51597.3,36476.1,41.4551,491.88,322.8,52.3792,0,0

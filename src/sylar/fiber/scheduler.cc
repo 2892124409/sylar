@@ -63,6 +63,26 @@ namespace sylar
         return t_scheduler_fiber;
     }
 
+    std::vector<Scheduler::WorkerStats> Scheduler::getWorkerStatsSnapshot() const
+    {
+        std::vector<WorkerStats> stats;
+        stats.reserve(m_workers.size());
+        for (size_t i = 0; i < m_workers.size(); ++i)
+        {
+            const Worker *worker = m_workers[i].get();
+            if (!worker)
+            {
+                continue;
+            }
+            WorkerStats stat;
+            stat.threadId = worker->threadId;
+            stat.queuedTasks = worker->queuedTasks.load(std::memory_order_relaxed);
+            stat.sleeping = worker->sleeping.load(std::memory_order_relaxed);
+            stats.push_back(stat);
+        }
+        return stats;
+    }
+
     void Scheduler::scheduleCommand(const Fiber::ptr &fiber, int thread)
     {
         FiberAndThread task(fiber, thread);

@@ -1,0 +1,10 @@
+profile=high_concurrency_short_after_lb_patch
+rounds=3
+duration=5s
+client_threads=16
+io_threads=8
+accept_threads=1
+conn_levels=1024,2048
+cases=ping,echo_raw
+protocols=http,https
+order=round1(local->upstream),round2(upstream->local)

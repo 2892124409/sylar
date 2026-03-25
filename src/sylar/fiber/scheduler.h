@@ -25,6 +25,13 @@ namespace sylar
         typedef std::shared_ptr<Scheduler> ptr;
         static const size_t kInvalidWorker = static_cast<size_t>(-1);
 
+        struct WorkerStats
+        {
+            int threadId = -1;
+            uint32_t queuedTasks = 0;
+            bool sleeping = false;
+        };
+
         Scheduler(size_t threads = 1, bool use_caller = true, const std::string &name = "");
         virtual ~Scheduler();
 
@@ -38,6 +45,7 @@ namespace sylar
         void runCaller();
         void stop();
         bool isCallerActive() const { return m_callerActive.load(std::memory_order_acquire); }
+        std::vector<WorkerStats> getWorkerStatsSnapshot() const;
 
         template <class FiberOrCb>
         void schedule(FiberOrCb fc, int thread = -1)
