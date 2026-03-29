@@ -4,7 +4,10 @@
  */
 
 #include "sylar/net/tcp_server.h"
+#include "sylar/concurrency/thread.h"
+#include "sylar/fiber/fd_manager.h"
 #include "sylar/log/logger.h"
+#include <climits>
 #include <cstring>
 #include <sstream>
 
@@ -188,6 +191,93 @@ namespace sylar
             // 子类可以重写此方法实现具体业务逻辑
         }
 
+        int TcpServer::selectIoThreadForNewClient()
+        {
+            if (!m_ioWorker)
+            {
+                return -1;
+            }
+
+            std::vector<sylar::Scheduler::WorkerStats> stats = m_ioWorker->getWorkerStatsSnapshot();
+            if (stats.empty())
+            {
+                return -1;
+            }
+
+            std::lock_guard<std::mutex> lock(m_ioBalanceMutex);
+            uint64_t best_score = ULLONG_MAX;
+            std::vector<int> candidates;
+            candidates.reserve(stats.size());
+
+            for (size_t i = 0; i < stats.size(); ++i)
+            {
+                const sylar::Scheduler::WorkerStats& stat = stats[i];
+                if (stat.threadId <= 0)
+                {
+                    continue;
+                }
+                uint64_t inflight = 0;
+                auto it = m_inflightClientsByThread.find(stat.threadId);
+                if (it != m_inflightClientsByThread.end())
+                {
+                    inflight = it->second;
+                }
+
+                // 优先平衡连接负载，队列长度用于细粒度打散。
+                uint64_t score = inflight * 8ull + static_cast<uint64_t>(stat.queuedTasks);
+                if (score < best_score)
+                {
+                    best_score = score;
+                    candidates.clear();
+                    candidates.push_back(stat.threadId);
+                }
+                else if (score == best_score)
+                {
+                    candidates.push_back(stat.threadId);
+                }
+            }
+
+            if (candidates.empty())
+            {
+                return -1;
+            }
+            int picked = candidates[m_ioSelectSeq % candidates.size()];
+            ++m_ioSelectSeq;
+            return picked;
+        }
+
+        void TcpServer::onClientScheduled(int thread_id)
+        {
+            if (thread_id <= 0)
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(m_ioBalanceMutex);
+            ++m_inflightClientsByThread[thread_id];
+        }
+
+        void TcpServer::onClientFinished(int thread_id)
+        {
+            if (thread_id <= 0)
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(m_ioBalanceMutex);
+            auto it = m_inflightClientsByThread.find(thread_id);
+            if (it == m_inflightClientsByThread.end())
+            {
+                return;
+            }
+            if (it->second > 0)
+            {
+                --it->second;
+            }
+            if (it->second == 0)
+            {
+                m_inflightClientsByThread.erase(it);
+            }
+        }
+
         void TcpServer::startAccept(Socket::ptr sock)
         {
             while (!m_isStop.load(std::memory_order_acquire))
@@ -196,8 +286,34 @@ namespace sylar
                 if (client)
                 {
                     client->setRecvTimeout(m_recvTimeout);
-                    m_ioWorker->schedule(std::bind(&TcpServer::handleClient,
-                                                   shared_from_this(), client));
+                    int target_thread = selectIoThreadForNewClient();
+                    onClientScheduled(target_thread);
+                    auto self = shared_from_this();
+                    m_ioWorker->schedule([self, client, target_thread]()
+                                         {
+                                             std::shared_ptr<void> load_guard(nullptr, [self, target_thread](void *) {
+                                                 self->onClientFinished(target_thread);
+                                             });
+                                             int fd = client->getSocket();
+                                             sylar::FdCtx::ptr fd_ctx = sylar::FdMgr::GetInstance()->get(fd, true);
+                                             if (!fd_ctx || fd_ctx->isClose())
+                                             {
+                                                 SYLAR_LOG_ERROR(g_logger) << "bind client affinity failed: invalid fd_ctx fd=" << fd;
+                                                 client->close();
+                                                 return;
+                                             }
+                                             if (!fd_ctx->bindAffinityIfUnset(sylar::GetThreadId()))
+                                             {
+                                                 SYLAR_LOG_ERROR(g_logger) << "bind client affinity failed: mismatch"
+                                                                           << " fd=" << fd
+                                                                           << " current_tid=" << sylar::GetThreadId()
+                                                                           << " affinity_tid=" << fd_ctx->getAffinityThread();
+                                                 client->close();
+                                                 return;
+                                             }
+                                             self->handleClient(client);
+                                         },
+                                         target_thread);
                 }
                 else
                 {

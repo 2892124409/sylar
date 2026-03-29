@@ -10,8 +10,10 @@
 #include "sylar/fiber/iomanager.h"
 #include "sylar/base/noncopyable.h"
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace sylar
@@ -98,6 +100,11 @@ namespace sylar
              */
             virtual void startAccept(Socket::ptr sock);
 
+        private:
+            int selectIoThreadForNewClient();
+            void onClientScheduled(int thread_id);
+            void onClientFinished(int thread_id);
+
         protected:
             std::vector<Socket::ptr> m_socks; // 监听 Socket 数组
             IOManager *m_ioWorker;            // 处理客户端的调度器
@@ -107,6 +114,9 @@ namespace sylar
             std::string m_type;               // 服务器类型
             std::atomic<bool> m_isStop;       // 是否停止
             mutable std::mutex m_mutex;       // 保护 m_socks
+            std::mutex m_ioBalanceMutex;      // 保护 io 负载均衡统计
+            std::unordered_map<int, uint64_t> m_inflightClientsByThread;
+            size_t m_ioSelectSeq = 0;
         };
 
     } // namespace net

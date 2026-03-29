@@ -200,7 +200,6 @@ namespace sylar
             {
                 SYLAR_LOG_ERROR(g_logger) << hook_fun_name << " waitEvent(" << fd << ", "
                                           << event << ") error:" << errno << " " << strerror(errno);
-                errno = EBADF;
                 return -1;
             }
             if (wait_rt > 0)

@@ -63,24 +63,24 @@ namespace sylar
         return t_scheduler_fiber;
     }
 
-    void Scheduler::scheduleCommand(const Fiber::ptr &fiber, int thread)
+    std::vector<Scheduler::WorkerStats> Scheduler::getWorkerStatsSnapshot() const
     {
-        FiberAndThread task(fiber, thread);
-        if (!task.fiber)
+        std::vector<WorkerStats> stats;
+        stats.reserve(m_workers.size());
+        for (size_t i = 0; i < m_workers.size(); ++i)
         {
-            return;
+            const Worker *worker = m_workers[i].get();
+            if (!worker)
+            {
+                continue;
+            }
+            WorkerStats stat;
+            stat.threadId = worker->threadId;
+            stat.queuedTasks = worker->queuedTasks.load(std::memory_order_relaxed);
+            stat.sleeping = worker->sleeping.load(std::memory_order_relaxed);
+            stats.push_back(stat);
         }
-        scheduleTask(std::move(task), true);
-    }
-
-    void Scheduler::scheduleCommand(const std::function<void()> &cb, int thread)
-    {
-        FiberAndThread task(cb, thread);
-        if (!task.cb)
-        {
-            return;
-        }
-        scheduleTask(std::move(task), true);
+        return stats;
     }
 
     void Scheduler::setThis()
@@ -298,7 +298,7 @@ namespace sylar
 
         for (size_t i = 0; i < tasks.size(); ++i)
         {
-            scheduleTask(std::move(tasks[i]), false);
+            scheduleTask(std::move(tasks[i]));
             m_pendingTaskCount.fetch_sub(1, std::memory_order_release);
         }
     }
@@ -357,7 +357,7 @@ namespace sylar
         m_pendingTaskCount.fetch_add(1, std::memory_order_release);
     }
 
-    void Scheduler::scheduleTask(FiberAndThread task, bool allow_cross_worker)
+    void Scheduler::scheduleTask(FiberAndThread task)
     {
         if (!task.fiber && !task.cb)
         {
@@ -370,36 +370,19 @@ namespace sylar
             return;
         }
 
+        size_t current = (t_scheduler == this) ? t_scheduler_worker_index : kInvalidWorker;
+        if (current != kInvalidWorker)
+        {
+            // 严格主从 Reactor：同一调度器内部的 worker 不做互投，当前 worker 直接本地入队。
+            enqueueLocal(*m_workers[current], std::move(task));
+            return;
+        }
+
         size_t worker_index = selectWorker(task.thread);
         if (worker_index == kInvalidWorker)
         {
             enqueueStartupTask(std::move(task));
             return;
-        }
-
-        size_t current = (t_scheduler == this) ? t_scheduler_worker_index : kInvalidWorker;
-        if (current != kInvalidWorker)
-        {
-            if (current == worker_index)
-            {
-                enqueueLocal(*m_workers[current], std::move(task));
-                return;
-            }
-
-            if (!allow_cross_worker)
-            {
-                static std::atomic<uint64_t> s_cross_worker_downgrade_log_count(0);
-                uint64_t n = s_cross_worker_downgrade_log_count.fetch_add(1, std::memory_order_relaxed);
-                if (n < 16)
-                {
-                    SYLAR_LOG_WARN(g_logger) << "cross-worker schedule downgraded to local queue"
-                                             << " scheduler=" << m_name
-                                             << " current_worker=" << current
-                                             << " target_worker=" << worker_index;
-                }
-                enqueueLocal(*m_workers[current], std::move(task));
-                return;
-            }
         }
 
         Worker &worker = *m_workers[worker_index];

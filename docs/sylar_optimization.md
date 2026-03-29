@@ -275,216 +275,176 @@ void sylar_coctx_swap(Context* from, const Context* to) {
 
 ---
 
-## 第二部分：协程网络层与调度优化终态 (2026-03-22)
+## 第二部分：网络层终态与 A/B 压测复盘 (2026-03-25)
 
-这一部分只描述当前代码已经落地的终态，不展开中间过渡过程。
+这一部分只记录当前分支已经落地并验证过的实现，不再描述已废弃的中间方案。
 
 ### 2.1 终态目标与约束
 
-当前阶段的目标可以概括成五条：
+当前网络层的目标是：
 
-1. 主从 Reactor 拓扑明确化（`accept` 与 IO 处理解耦）
-2. 调度与 IO 热路径局部化（每 worker 独立资源）
-3. 跨线程分发负载均衡化（从 RR 升级到 P2C）
-4. 等待语义显式化（`WaitResult + token`）
-5. 停机与短连接场景稳定性补齐
+1. `accept` 与业务 IO 明确分离（主从 Reactor）
+2. 单连接生命周期只在一个 IO worker 线程内执行
+3. 保持高吞吐（RPS）前提下尽量压制高并发尾延迟（p99）
+4. TLS 路径纳入统一压测口径（HTTP/HTTPS 都测）
 
-当前代码层面的硬约束：
+当前代码约束（硬规则）：
 
-- `TcpServer` 启动时要求 `accept_worker != io_worker`（不同 `IOManager` 实例）
-- 不再支持“accept/io 共用同一个 IOM”的旧模式
+- `TcpServer::start()` 要求 `accept_worker != io_worker`（不同 `IOManager` 实例）
+- IO 事件 API（`addEvent/delEvent/cancelEvent/cancelAll/waitEvent`）必须在当前 `IOManager` worker 线程调用；否则返回 `EXDEV`
+- `FdCtx` 通过 `bindAffinityIfUnset()` 固化线程亲和，线程不一致时拒绝执行
 
 ### 2.2 终态拓扑
 
-推荐拓扑（A 案）：
-
 ```text
-main thread
-  accept_iom(1, true)
-    runCaller()
-    - accept loop
-    - epoll_0 / eventfd_0 / timer_bucket_0
+accept_iom(1)                    io_iom(N)
+  - accept loop                    - worker_0 ... worker_N-1
+  - 只负责接入                      - 每 worker 独立 epoll/eventfd/timer bucket
+  - 将新连接投递到目标 io 线程         - handleClient + socket IO + timer callback
 
-io worker pool
-  io_iom(N, false)
-    worker_i:
-      - localQueue
-      - mailboxRing(热路径)
-      - mailboxFallback(无界链表兜底)
-      - epoll_i / eventfd_i / timer_bucket_i
-      - handleClient/read/write/timer callbacks
+连接路径：
+accept -> select target io thread -> io_worker.schedule(..., thread_id) -> handleClient
 ```
 
-可选拓扑（B 案）：
+关键点：
 
-- 主线程不进入任何 worker run loop，仅做编排；
-- `accept_iom(1, false)` 与 `io_iom(N, false)` 都在后台线程运行。
+- `accept_worker` 可以向 `io_worker` 投递任务
+- 同一 `Scheduler` 内部 worker 不做互投；只要代码已经运行在该调度器 worker 上，`schedule(...)` 就直接进入当前 worker 的本地队列
 
-### 2.3 Scheduler 终态：无全局任务链表 + 命令通道分层
+### 2.3 Scheduler 终态（P2C + 外部投递收件箱）
 
-`Scheduler` 的核心结构：
+`Scheduler` 关键结构：
 
-- 每个 worker 本地 `localQueue`
-- 每个 worker 跨线程收件箱分成两层：
-  - `mailboxRing`：有界无锁环形队列（热路径）
-  - `mailboxFallback`：无界无锁链表（ring 满时兜底）
-- 全局计数器：`pending/active/idle`
+- 每 worker 本地 `localQueue`
+- 跨线程收件箱两层：
+  - `mailboxRing`（有界无锁环）
+  - `mailboxFallback`（无界链表兜底）
+- `queuedTasks` 原子计数（负载近似值）
 
-关键语义（当前实现）：
+关键语义：
 
-1. 已去掉 work stealing
-   - worker 不再从其他 worker 的本地队列偷任务。
-2. 普通 `schedule(...)` 强调本地执行
-   - 当 worker 内部把普通任务投到其他 worker 时，降级回本地队列。
-3. 新增 `scheduleCommand(...)` 作为跨线程命令路径
-   - IO 控制命令、owner 执行命令走这个通道。
+1. `selectWorker` 从 RR 升级为 P2C（比较两个候选 `queuedTasks`）
+2. 只要当前线程已经是该 `Scheduler` 的 worker，`schedule(...)` 就直接入当前 worker 的 `localQueue`
+3. 同一 `Scheduler` 内部 worker 不再互投；`mailboxRing + mailboxFallback` 只用于外部线程或外部调度器向目标 worker 远程投递
+4. 仅在目标 worker `sleeping=true` 时 `tickle(worker)`，降低 wakeup 风暴
+5. 新增 `getWorkerStatsSnapshot()` 给 `TcpServer` 做接入负载均衡
 
-4. worker 选择从 RR 升级到 P2C（Power of Two Choices）
-   - 未指定 `thread` 的远程投递，不再直接轮询，而是从两个候选 worker 里选 `queuedTasks` 更小的一个。
-   - `queuedTasks` 是每 worker 的原子近似负载：任务入队时增加、任务真正弹出执行时减少。
-   - 保留 caller 语义：caller 未激活时，候选集合仍可跳过 caller worker。
+### 2.4 IOManager 终态（严格线程域 + 显式等待结果）
 
-5. 命令邮箱采用“ring 优先 + 链表兜底”
-   - 远程命令优先入 `mailboxRing`（减少 `new/delete` 与指针追踪）。
-   - ring 满时降级到 `mailboxFallback`，语义仍然是不丢任务。
+IO 层当前不是“跨 worker 转发执行”模型，而是“严格线程域”模型：
 
-6. 唤醒路径做了“按需唤醒 + idle 前二次检查”
-   - 跨线程入队时，仅当目标 worker 处于 `sleeping=true` 才 `tickle(worker)`。
-   - worker 进入 idle 休眠前，先二次检查本地队列/邮箱/pending，避免“任务刚到但还没 sleep”导致的漏唤醒窗口。
+- 每 worker 独立 `epoll + eventfd`
+- 事件操作必须由当前 worker 自己执行
+- 不再依赖旧的 `ownerWorker + Semaphore` 跨线程同步路径
 
-这使得“普通业务任务”与“跨线程控制命令”在语义上分层，避免无限制互投。
+等待语义：
 
-P2C 的面试讲法（30 秒）：
+1. `waitEvent()` 生成 `waitToken`
+2. 事件触发时写入 `WAIT_READY/WAIT_TIMEOUT/WAIT_CANCELLED`
+3. fiber 恢复后 `consumeWaitResult(token)` 判定结果
+4. 对外 errno 仍保持 POSIX 习惯（如超时映射 `ETIMEDOUT`）
 
-- 轮询分发在突发短连接下容易把慢 worker 继续打满；
-- P2C 每次只比较两个候选，但负载均衡效果明显优于纯 RR；
-- 工程上用 `queuedTasks` 做近似指标，成本低、易落地、压测可验证。
+### 2.5 TcpServer 终态（连接感知接入均衡）
 
-### 2.4 IOManager 终态：每 worker 独立 epoll + owner 执行
+`TcpServer` 的接入分配从“简单 RR”收敛到“连接感知打分”：
 
-IO 资源按 worker 分片：
+- 采样指标来自 `io_worker.getWorkerStatsSnapshot()`
+- 每线程维护 `inflightClientsByThread`
+- 评分：`score = inflight * 8 + queuedTasks`
+- 同分用轮转打散
 
-- `WorkerContext{epfd, wakeFd}`
-- 每个 worker 独立 `epoll_wait`
-- `tickle(worker)` 定向唤醒
+调度流程：
 
-唤醒优化的直接目的：
+1. `accept` 到新连接
+2. 选择目标 `target_thread`
+3. 记录 inflight++（`onClientScheduled`）
+4. `m_ioWorker->schedule(..., target_thread)` 执行 `handleClient`
+5. 连接结束 inflight--（`onClientFinished`）
 
-- 减少无效 `eventfd` 写入，降低高并发下 wakeup 风暴
-- 降低“过度唤醒 + 空转”带来的系统调用与上下文切换成本
-- 在不引入 work stealing 的前提下，保证跨线程命令投递后的可见性与及时唤醒
+并在进入 `handleClient` 前再次执行 `FdCtx::bindAffinityIfUnset(current_tid)`，保证单 fd 生命周期线程一致。
 
-fd 事件管理采用 owner 模型：
+### 2.6 TLS 路径状态（当前保留重试语义）
 
-- `FdContext::ownerWorker` 记录 fd 所属 worker
-- `addEvent/delEvent/cancelEvent/cancelAll` 的核心修改在 owner worker 执行
-- 跨线程转发通过 `scheduleCommand(...) + Semaphore` 同步到 owner 执行
+这一轮曾做过一个 TLS 实验：
 
-等待恢复路径：
+- 方案：把 `SSL_ERROR_WANT_READ/WANT_WRITE` 从自旋重试改为“等待事件后再重试”
+- 结果：在当前高并发短压（5s）口径下，本地实现出现“RPS 下降且部分场景 p99 更高”
+- 处理：该实验已回滚，当前代码恢复为原始重试策略
 
-- `triggerEvent()` 写入 `WaitResult`
-- 再通过命令通道恢复 fiber/callback
+当前代码路径还额外补了两件工程细节：
 
-短连接稳定性补丁（当前已落地）：
+- `SslSocket::FromSocket(...)` 在接管已有 socket 时，会显式向 `FdMgr` 创建/获取 `FdCtx`
+- 对接管到的 fd 执行 `bindAffinityIfUnset(current_tid)`，保证 SSL 包装后的 fd 仍遵守线程亲和约束
 
-- 当 fd 事件清空（`events == NONE`）时，重置 `ownerWorker`
-- `addEvent` 在 `owner invalid` 或 `events == NONE` 时重新绑定 owner
+另外，当前 TLS 路径对 `SSL_ERROR_SYSCALL + EAGAIN/EWOULDBLOCK/EINTR` 做了兼容处理，统一按“可重试”语义看待，避免某些 nonblocking + hook 组合下被误判成硬错误。
 
-目的：避免 fd 复用沿用旧 owner，导致恢复投递到错误 worker。
+落点文件仍是：`http/ssl/ssl_socket.cc`。所以这一节现在表达的不是“TLS 做了协程等待”，而是“TLS 等待让出实验已回滚，当前保留重试语义，同时补齐了 fd 上下文和线程亲和的一致性处理”。
 
-### 2.5 Timer 终态：每 worker 分桶最小堆
+### 2.7 压测口径与最新结果
 
-`TimerManager` 已从全局容器切到 per-worker bucket：
+统一口径：`wrk`、高并发、keepalive、`/ping + /echo`、HTTP+HTTPS。
 
-- 每个 worker 一套最小堆
-- timer 带 `worker` 归属
-- `IOManager::idle()` 在事件轮询后处理本 worker 的过期回调
+已完成的关键结果：
 
-收益不是“单点计时器更快”，而是 timer 与 IO 事件循环天然同 worker 局部化。
+| 场景 | 结果结论 |
+| --- | --- |
+| HTTP 高并发（3 轮中位数） | 本地实现 RPS `+24.29% ~ +48.22%`；p99 `-7.71% ~ +5.67%`（基本持平） |
+| HTTPS（最终版本，已回滚） | 本地实现 RPS `+20.99% ~ +52.31%`；p99 `+21.89% ~ +191.37%`（明显更差） |
+| HTTPS（`waitEvent` 实验，未保留） | 本地实现 RPS `+14.92% ~ +43.24%`；p99 `+48.77% ~ +245.42%`（更差） |
 
-### 2.6 Hook / wait 终态：显式等待结果
+补充（仅看本地 HTTPS，`waitEvent` 实验对比）：
 
-hook 路径的等待语义：
+- `echo_raw@1024`：p99 `186.01 -> 172.85 ms`（下降）
+- `ping@1024`：p99 `219.43 -> 215.05 ms`（小幅下降）
+- `ping@2048`：p99 `491.88 -> 496.11 ms`（基本持平）
+- `echo_raw@2048`：p99 `370.54 -> 485.21 ms`（上升）
 
-1. `waitEvent()` 为当前 fiber 生成 `waitToken`
-2. 事件上下文保存 token
-3. `triggerEvent()` 写回 `WAIT_READY/WAIT_TIMEOUT/WAIT_CANCELLED`
-4. fiber 恢复后 `consumeWaitResult(token)` 判定结果
+结论：`waitEvent` 版本没有带来整体收益，已回滚。高并发下 HTTPS p99 的主矛盾仍是排队与调度抖动，不是单一重试策略问题。
 
-对外仍保持 POSIX 习惯（例如 timeout 对应 `ETIMEDOUT`），但运行时内部语义已经显式化。
-
-### 2.7 TcpServer 与主线程角色
-
-`TcpServer` 终态语义：
-
-- `start()` 显式校验 `accept_worker` 与 `io_worker` 非空且不同实例
-- `stop()` 在 `acceptWorker` 上异步清理监听 socket，确保 accept loop 可退出
-
-主线程角色可以按场景选择：
-
-1. 主线程跑 `accept_worker`（推荐默认）
-   - 更标准的主从 Reactor，接入路径清晰。
-2. 主线程两个都不做
-   - 适合做纯编排/测试驱动。
-
-但无论哪种角色，都不再回到“accept/io 共用同一 IOM”的旧模型。
-
-### 2.8 工程改动落点（终态）
-
-本轮核心改动文件：
+### 2.8 工程改动落点（当前终态）
 
 - `sylar/fiber/scheduler.*`
-  - 去 stealing、普通跨 worker 投递降级、命令通道 `scheduleCommand(...)`
-  - 负载均衡：`selectWorker` 从 RR 升级到 P2C（基于 `queuedTasks`）
-  - 命令邮箱升级为 `MPSC ring + 无界链表兜底`
-  - 唤醒优化：按 `sleeping` 状态定向 tickle、idle 前二次检查防漏唤醒
+  - P2C 选 worker（用于外部线程/外部调度器投递）
+  - 同一 `Scheduler` 内部 worker 不互投，当前 worker 内部 `schedule` 直接本地入队
+  - `mailboxRing + mailboxFallback`
+  - `getWorkerStatsSnapshot()`
 - `sylar/fiber/iomanager.*`
-  - per-worker `epoll/eventfd`、fd owner 执行、owner 生命周期修复
-- `sylar/fiber/timer.*`
-  - per-worker timer bucket
-- `sylar/fiber/hook.cc`、`sylar/fiber/fiber.*`
-  - `WaitResult + token` 等待恢复语义
+  - per-worker `epoll/eventfd`
+  - 严格线程域校验（非法线程返回 `EXDEV`）
+  - `WaitResult + waitToken`
+- `sylar/fiber/fd_manager.*`
+  - `FdCtx` 线程亲和绑定与校验
 - `sylar/net/tcp_server.*`
-  - accept/io worker 分离约束、主从 Reactor 停机路径
-- `tests/test_benchmark_tcp_allocator.cc`、`tests/run_allocator_bench.sh`
-  - A/B 拓扑压测、失败记录与聚合输出
+  - accept/io 分离硬约束
+  - 连接感知接入均衡（`inflight + queuedTasks`）
+- `http/ssl/ssl_socket.cc`
+  - `FromSocket` 主动补 `FdCtx` 并绑定线程亲和
+  - `SSL_ERROR_SYSCALL + EAGAIN/EWOULDBLOCK/EINTR` 统一按可重试处理
+  - TLS `WANT_READ/WANT_WRITE` 曾做协程让出实验，已回滚到原策略
+- `tests/run_http_ab_suite.sh`、`tests/http_bench_server.cc`
+  - HTTP/HTTPS A/B 压测入口
 
-### 2.9 验证与压测结论（当前状态）
+### 2.9 当前可复述的技术结论
 
-验证口径：
+1. 本地网络层目前是“吞吐优先”形态，RPS 领先稳定
+2. HTTP 尾延迟已基本打平参考实现
+3. HTTPS 尾延迟仍落后，尤其在 2048 并发以上
+4. TLS `waitEvent` 实验在当前口径下无净收益，已回滚；当前 TLS 路径更侧重 fd 上下文和线程亲和的一致性
 
-- `test_tcp_server`：主从 Reactor 功能路径
-- `test_benchmark_tcp_allocator`：`mode=a|b`、`persistent|short`
-
-全矩阵压测（2026-03-22）：
-
-- 三分配器（baseline/jemalloc/tcmalloc）
-- 两拓扑（A/B）
-- 两负载（persistent/short）
-- 线程集（`io_threads=2,4,8`）
-- `repeat=3`
-
-结果：
-
-- 脚本全矩阵跑通
-- `failures.csv` 无失败行（仅表头）
-- `short` 不再出现此前的 `exit 139` 进程崩溃
-- P2C 版本在同口径矩阵下稳定运行，无新增崩溃/超时
-
-### 2.10 面试怎么讲（终态版）
+### 2.10 面试怎么讲（当前版本）
 
 30 秒版本：
 
-> 第一阶段我把协程切换从 `ucontext` 换成手写汇编，先把最热切换路径降开销。第二阶段我直接把网络层收敛到终态：调度器去全局队列和 stealing，worker 选择从 RR 升级到 P2C，命令通道改成每 worker 的 `MPSC ring` 热路径加无界链表兜底，IOManager 改为每 worker 独立 `epoll/eventfd`，fd 控制统一在 owner worker 执行，等待语义改成 `WaitResult + token`，并把 `TcpServer` 固化为 accept/io 分离的主从 Reactor。同时在调度层做了按需唤醒和 idle 前二次检查，减少唤醒风暴与漏唤醒窗口。最后补了 fd 复用下 owner 生命周期问题，短连接压测稳定通过。
+> 第二阶段我把网络层收敛成 accept/io 分离的主从 Reactor。调度器从 RR 升级到 P2C，但这个 P2C 只用于外部线程或 `accept_worker` 把任务投到目标 `io_worker`；同一 `Scheduler` 内部 worker 不再互投，当前 worker 内部 `schedule` 直接回本地队列。IOManager 切到每 worker 独立 epoll 并做严格线程域约束，等待语义显式化成 waitToken + WaitResult。TcpServer 接入时按 inflight 和队列长度做连接感知分配，并保证单 fd 生命周期线程亲和。TLS 路径上，我们验证过 `WANT_READ/WANT_WRITE` 让出事件循环的方案，但在当前口径下回滚，最终保留重试语义，同时补齐 SSL 包装场景下的 fd 上下文和线程亲和处理。压测结果是 RPS 明显领先参考实现，HTTP p99 基本打平，但 HTTPS p99 仍偏高。 
 
-2 分钟版本关键词：
+2 分钟关键词：
 
-- `hot path slimming`（阶段一）
-- `per-worker resource partitioning`
-- `ownership + command channel`
-- `P2C load balancing over queuedTasks`
+- `master-sub reactor`
+- `P2C over queuedTasks`
+- `strict thread-domain IO ops`
+- `fd affinity`
 - `explicit wait semantics`
-- `master-sub reactor with clear accept/io boundary`
+- `RPS-leading but HTTPS tail-latency gap`
 
 ---
 

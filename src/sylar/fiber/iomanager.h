@@ -39,7 +39,6 @@ namespace sylar
                 Fiber::ptr fiber;
                 std::function<void()> cb;
                 Timer::ptr timeoutTimer;
-                int thread = -1;
                 uint64_t waitToken = 0;
             };
 
@@ -51,7 +50,6 @@ namespace sylar
             EventContext write;
             int fd = 0;
             Event events = NONE;
-            size_t ownerWorker = Scheduler::kInvalidWorker;
             MutexType mutex;
         };
 
@@ -87,15 +85,13 @@ namespace sylar
                              Fiber::ptr fiber, uint64_t timeout_ms, uint64_t *wait_token);
         bool cancelEventInternal(int fd, Event event, Fiber::WaitResult result);
         void onEventTimeout(int fd, Event event, uint64_t wait_token);
-        int runOnOwnerSyncInt(size_t owner, const std::function<int()> &fn);
-        bool runOnOwnerSyncBool(size_t owner, const std::function<bool()> &fn);
         FdContext *getFdContext(int fd, bool auto_create);
-        size_t selectEventWorker() const;
+        size_t getCurrentWorkerForOp() const;
+        bool ensureFdAffinity(int fd, const char *op_name, bool auto_create);
 
     private:
         std::vector<WorkerContext> m_workerContexts;
         std::atomic<size_t> m_pendingEventCount;
-        std::atomic<size_t> m_eventWorkerCursor;
         std::atomic<size_t> m_timerWorkerCursor;
         RWMutexType m_mutex;
         std::vector<FdContext *> m_fdContexts;

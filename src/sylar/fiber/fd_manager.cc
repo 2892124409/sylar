@@ -28,7 +28,8 @@ namespace sylar
           m_isClosed(false),           // 关闭标志，默认未关闭
           m_fd(fd),                    // 保存文件描述符
           m_recvTimeout((uint64_t)-1), // 接收超时，-1表示永不超时
-          m_sendTimeout((uint64_t)-1)  // 发送超时，-1表示永不超时
+          m_sendTimeout((uint64_t)-1), // 发送超时，-1表示永不超时
+          m_affinityThread(-1)         // 默认未绑定线程亲和
     {
         init(); // 调用初始化函数，检测fd类型并设置属性
     }
@@ -178,6 +179,17 @@ namespace sylar
             // 返回发送（写）超时
             return m_sendTimeout;
         }
+    }
+
+    bool FdCtx::bindAffinityIfUnset(int tid)
+    {
+        int expected = -1;
+        if (m_affinityThread.compare_exchange_strong(
+                expected, tid, std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            return true;
+        }
+        return expected == tid;
     }
 
     /**

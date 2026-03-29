@@ -25,6 +25,13 @@ namespace sylar
         typedef std::shared_ptr<Scheduler> ptr;
         static const size_t kInvalidWorker = static_cast<size_t>(-1);
 
+        struct WorkerStats
+        {
+            int threadId = -1;
+            uint32_t queuedTasks = 0;
+            bool sleeping = false;
+        };
+
         Scheduler(size_t threads = 1, bool use_caller = true, const std::string &name = "");
         virtual ~Scheduler();
 
@@ -38,6 +45,7 @@ namespace sylar
         void runCaller();
         void stop();
         bool isCallerActive() const { return m_callerActive.load(std::memory_order_acquire); }
+        std::vector<WorkerStats> getWorkerStatsSnapshot() const;
 
         template <class FiberOrCb>
         void schedule(FiberOrCb fc, int thread = -1)
@@ -47,11 +55,8 @@ namespace sylar
             {
                 return;
             }
-            scheduleTask(std::move(task), false);
+            scheduleTask(std::move(task));
         }
-
-        void scheduleCommand(const Fiber::ptr &fiber, int thread = -1);
-        void scheduleCommand(const std::function<void()> &cb, int thread = -1);
 
         template <class InputIterator>
         void schedule(InputIterator begin, InputIterator end)
@@ -174,7 +179,7 @@ namespace sylar
         };
 
         void run(size_t worker_index);
-        void scheduleTask(FiberAndThread task, bool allow_cross_worker);
+        void scheduleTask(FiberAndThread task);
         size_t selectWorker(int thread) const;
         void enqueueStartupTask(FiberAndThread task);
         void flushStartupTasks();
